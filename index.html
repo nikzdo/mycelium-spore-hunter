@@ -243,12 +243,88 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
   background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
 .tomehint{text-align:center;font-size:12px;color:#c8b8e8;margin-top:10px;letter-spacing:.1em}
+/* ---------- item 44: tabular numerals ---------- */
+/* Every readout whose digits CHANGE while you read it. Proportional digits reflow the whole
+   line as a count ticks, which reads as jitter and hides the change itself. */
+#kills,#coinhud,#mycohud,#lvlbadge,#xplabel,#fps,#bossname,.cprog,.tstat,.glvl,
+.buff .n,.gearslot .gt,.hotslot .htier,.potslot .pcnt,.potslot .ptimer,
+.essrow .cnt,.istats,.mut .cost,.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+/* ---------- item 45: zero-state, and HUD stats that ARE the control ---------- */
+/* A count of 0 is information. Greyed out, absence is legible at a glance instead of read. */
+.zero{opacity:.42;filter:saturate(.22)}
+#coinhud.zero,#mycohud.zero{color:#cfc6b4}
+.potslot.zero{opacity:.4;filter:grayscale(.7)}
+.potslot.zero .pcnt,.buff.zero .n,.gearslot.zero .gt{background:#8e86a0;color:#241c33}
+/* The ammo counter is the loadout switch, so it has to LOOK pressable. #hud is pointer-events:none,
+   so anything interactive inside it must re-arm pointer events for itself. */
+[data-weapon],[data-potion],[data-gear]{pointer-events:auto;cursor:pointer;
+  transition:transform .12s ease-out,box-shadow .12s ease-out,opacity .12s}
+[data-weapon]:hover,[data-potion]:hover,[data-gear]:hover{transform:translateY(-3px);opacity:1}
+[data-weapon]:active,[data-potion]:active,[data-gear]:active{transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+/* .sel marks the active choice — same ring language as .active/.on so the two can coexist. */
+.hotslot.sel,.potslot.sel{opacity:1;filter:none;
+  box-shadow:0 0 0 3px var(--rc,var(--amber)),0 3px 0 var(--ink),0 0 16px var(--rc,rgba(255,180,60,.6))}
+.gearslot.sel{opacity:1;box-shadow:0 0 0 2px var(--rc,var(--amber)),0 2px 0 var(--ink)}
+.hotslot.sel .hnum,.potslot.sel .pkey{background:var(--cream);color:var(--ink)}
+/* ---------- item 48: announcements name their kind ---------- */
+/* One neutral style makes a reward and a threat read the same. Colour + glow carry the kind;
+   contextual prompts stay in #harvestPrompt, which is a different job. */
+#announce.good{color:#eaffd8;text-shadow:0 4px 0 var(--ink),0 0 40px rgba(150,240,110,.65)}
+#announce.bad{color:#ffd0c4;text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,70,50,.7);letter-spacing:.08em}
+#announce.cool{color:#dcc6ff;text-shadow:0 4px 0 var(--ink),0 0 44px rgba(180,107,255,.75)}
+/* ---------- item 50: boot overlay ---------- */
+/* World generation is one long blocking frame. It cannot be hidden, only owned: say what is
+   happening, then fade out once the first real frame has landed so pop-in happens behind this. */
+#boot{z-index:70;opacity:0;visibility:hidden;pointer-events:none;
+  background:radial-gradient(ellipse at center,#241a33 0%,#0d0a14 78%);
+  transition:opacity .5s ease-out,visibility 0s linear .5s}
+#boot.on{opacity:1;visibility:visible;pointer-events:auto;transition:opacity .12s ease-out,visibility 0s}
+#boot .bootcap{font-size:clamp(44px,7vw,86px);line-height:1;filter:drop-shadow(0 10px 24px rgba(0,0,0,.6));
+  animation:bootbob 2.4s ease-in-out infinite}
+#boot .boottitle{margin-top:18px;font-size:clamp(20px,2.6vw,30px);font-weight:700;letter-spacing:.16em;
+  color:var(--cream);text-shadow:0 3px 0 var(--ink)}
+#boot .bootsub{margin-top:10px;font-family:'Gochi Hand',cursive;font-size:clamp(15px,1.8vw,20px);
+  color:#ffe9b8;opacity:.9;max-width:min(520px,86vw);line-height:1.5}
+#boot .bootbar{margin-top:22px;width:min(300px,64vw);height:12px;border:3px solid var(--ink);border-radius:999px;
+  background:rgba(20,12,26,.65);box-shadow:0 3px 0 var(--ink);overflow:hidden}
+/* Indeterminate on purpose: generation reports no progress, so a fake percentage would lie.
+   The sweep freezes during the stall — that IS the honest signal. */
+#boot .bootfill{height:100%;width:42%;border-radius:999px;background:linear-gradient(180deg,#ffcf6b,#f59b3c);
+  animation:bootsweep 1.5s ease-in-out infinite}
+@keyframes bootbob{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-9px) rotate(3deg)}}
+@keyframes bootsweep{0%{transform:translateX(-110%)}100%{transform:translateX(240%)}}
+/* ---------- item 51: visible focus + reduced motion ---------- */
+:where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus{outline:none}
+:where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus-visible{
+  outline:3px solid var(--cream);outline-offset:3px;box-shadow:0 0 0 6px rgba(28,20,16,.65)}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important}
+  /* Transient banners are animation-driven: killing the animation outright would either strand
+     them on screen or skip them entirely, so swap in fade-only versions at the same timing. */
+  #announce.show{animation:annRM 2.6s ease-out forwards!important}
+  #levelup.show{animation:annRM 2.2s ease-out forwards!important}
+  .dmg{animation:dmgRM .8s ease-out forwards!important}
+  #boot .bootfill{animation:none!important;width:100%;opacity:.5}
+  #boot .bootcap{animation:none!important}
+  @keyframes annRM{0%{opacity:0}8%{opacity:1}80%{opacity:1}100%{opacity:0}}
+  @keyframes dmgRM{0%{opacity:0;transform:translate(-50%,-20px)}15%{opacity:1}100%{opacity:0;transform:translate(-50%,-20px)}}
+}
 </style>
 </head>
 <body>
 <div id="game"></div>
 <div id="grade"></div>
 <div id="dmgvin"></div>
+
+<!-- item 50: shown (class "on") right before world generation, removed after the first rendered
+     frame. Covers the generation stall and the pop-in that follows it. -->
+<div id="boot" class="overlay">
+  <div class="bootcap">🍄</div>
+  <div class="boottitle">GROWING THE VALLEY</div>
+  <div class="bootsub" id="bootnote">Seeding terrain, scattering the Bloom, fitting colliders. One long breath, then you're in.</div>
+  <div class="bootbar"><div class="bootfill"></div></div>
+</div>
 
 <div id="hud">
   <div id="hpwrap"><div class="barlabel">SPORE HUNTER</div><div class="bar"><div class="fill" id="hpfill" style="width:100%"></div></div></div>
