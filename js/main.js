@@ -976,6 +976,27 @@ function resetRun(){
   applyMutations();
   $('bosswrap').style.display = 'none';
   document.getElementById('objective').textContent = 'Hunt the Bloom';
+
+  // continuing into a new world after a boss win (not restarting after death) — replay the
+  // build victory() stashed: level, loadout, potions, kills. one-time use, cleared on read.
+  let cont = null;
+  try{ cont = JSON.parse(sessionStorage.getItem('mycelium_continue') || 'null'); }catch(e){}
+  if(cont){
+    sessionStorage.removeItem('mycelium_continue');
+    const p = game.player;
+    while(game.level < cont.level) levelUp(true); // same growth path as normal leveling, no double-counting with mutations
+    game.xp = cont.xp;
+    game.kills = cont.kills; game.totalKills = cont.totalKills; game.runEssences = cont.runEssences;
+    for(const id of cont.weapons) p.addWeapon(id);
+    p.equipWeapon(cont.equipped);
+    for(const slot of ARMOR_SLOTS){
+      for(const id of cont.armorOwned[slot]) p.addArmor(slot, id);
+      if(cont.armor[slot]) p.equipArmor(slot, cont.armor[slot], game);
+    }
+    p.potions = cont.potions;
+    p.hp = p.maxHp; // full heal — a small reward for clearing the last world
+  }
+
   updateHUD(); updateBuffs(); updateBackpack(); updateContracts();
 }
 function runStats(){
@@ -990,6 +1011,7 @@ function gameOver(){
   audio.roar(0.8);
   const reachedDepth = progress.depth;
   progress.resetDepth(); // death resets world scaling back to baseline
+  sessionStorage.removeItem('mycelium_continue'); // and wipes any pending "continue the build" state
   $('gostats').innerHTML = runStats() +
     `<br><span style="color:#ff9adf">🌀 Reached World Depth ${reachedDepth} — back to Depth 1</span>`;
   $('goseed').textContent = `World seed #${game.seed} · ${world.theme.name}`;
@@ -1001,6 +1023,16 @@ function victory(){
   game.shake(1);
   particles.burst(game.boss.group.position.clone().setY(4), 60, {r:1,g:0.85,b:0.3, spread:8, size:12, life:1.6, grav:4});
   progress.advanceDepth(); // the NEXT world starts one notch harder
+  // stash the current build so "NEW HUNT (NEW WORLD)" continues this run instead of starting
+  // over — only dying resets level/loadout (gameOver clears this same key)
+  const p = game.player;
+  sessionStorage.setItem('mycelium_continue', JSON.stringify({
+    level: game.level, xp: game.xp,
+    kills: game.kills, totalKills: game.totalKills, runEssences: game.runEssences,
+    weapons: p.weapons, equipped: p.equipped,
+    armorOwned: p.armorOwned, armor: p.armor,
+    potions: p.potions,
+  }));
   $('victext').textContent = game.boss.R.name + ' falls. Sunlight returns to the valley.';
   $('vstats').innerHTML = runStats() +
     `<br><span style="color:#ff9adf">🌀 World Depth ${progress.depth} next — mobs get stronger the longer your streak runs</span>`;
