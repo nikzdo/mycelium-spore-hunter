@@ -1,0 +1,84 @@
+# MYCELIUM — Spore Hunter
+
+Browser roguelite, Three.js, **no build step**. `index.html` uses an import map pointing `three`
+at the vendored `vendor/three.module.js` and loads `js/main.js` as a plain ES module. Edit a file,
+reload the tab. Serve over HTTP (`python3 -m http.server 8000` from the repo root) — `file://`
+breaks ES module imports on CORS.
+
+See README.md for mechanics and the file-by-file architecture table.
+
+## Verifying a change
+
+There is no test suite. Verification is the debug query params, and they are the reason they
+exist — **keep them working**:
+
+| param | use |
+|---|---|
+| `?seed=N` | force a world seed; same seed must always regenerate identically |
+| `?demo` | scripted bot drives a run — headless verification |
+| `?probe` | live run state via `document.title`, polled by `setTimeout` so it survives a backgrounded tab |
+| `?boss` / `?win` | force a boss spawn / force the victory flow |
+| `?glutton` / `?elder` | force the boss archetype, overriding the seeded pick |
+| `?god` | player takes no effective damage |
+| `?tome=` `?levelup=` `?buy=` | jump straight to a UI state |
+
+Syntax check without a browser: `cp js/x.js /tmp/c.mjs && node --check /tmp/c.mjs`
+(plain `node --check` treats the file as CommonJS and fails on `import`).
+
+Minimum bar for any change: the page loads with **zero console errors**, and `?demo&seed=42`
+still plays.
+
+## Performance discipline
+
+These are load-bearing. The codebase has been through perf-regression passes and the rules are
+what keep it fast:
+
+- **Batch repeated geometry into `InstancedMesh`.** Rocks, trees, grass, decorative mushrooms —
+  one draw call regardless of count. New per-world content pushes into the *existing* instance
+  arrays rather than creating new draw calls.
+- **Never attach a real `THREE.PointLight` to anything that spawns or despawns in bursts**
+  (pickups, projectiles). Adding/removing a light forces shader recompilation on other materials
+  in the scene and hitches. Real lights are reserved for singular, rare landmarks.
+- **No per-frame allocations in hot paths.** `groundHeight()` and `surfaceAt()` run for every
+  entity every frame. Plain-number math only — no `new Vector3()` in anything they call.
+- **Diff-based DOM updates.** HUD widgets touch the DOM only when their displayed state actually
+  changes, never once per frame.
+
+## Habits
+
+Adopted from a code review of a sibling procedural-island prototype. They are why that file stays
+comprehensible, and they apply here.
+
+**A movement constant is a level-design constraint — say so.** Sprint is a ground-only move and
+air speed is capped; the reason is that a running jump must not clear a gap the level intends you
+to route around. When a tuning value is load-bearing for a piece of level design, the comment
+says which design it holds up, so the next person doesn't casually bump it. Our ravine, bridge and
+`STEP` height all want this treatment.
+
+**One chokepoint per cross-cutting effect.** All damage through one `hurt()`, all effects through
+one particle call, all payouts through one reward pop. New content then gets consistent feel for
+free, and tuning happens in one place instead of six.
+
+**Placement predicates query the finished world, not the noise.** Every spawn test reads height,
+slope, exclusion zones *and the collider list* — so a prop can't spawn inside something that
+already exists. This is the single habit that most separates a generator that produces places from
+one that produces scatter.
+
+**Comments state the invariant, not the code.** Not "loop over the tiers" but "the visual mesh and
+the collision volume come out of the same loop, so they can never drift apart." Not "30% chance"
+but "pods are where pry-spines come from, so cysts always stay reachable." Not "dispose geometry"
+but "dropping the shared geometry would empty every prop built afterwards." The README does this
+at architecture level; do it at line level too, because that's where it prevents the regression.
+
+## Ownership boundaries worth preserving
+
+- **`progress.js` owns every `mycelium_*` `localStorage` key.** Essence bank, mutations, gear
+  collection, coins, Mycelium, contracts, World Depth. Nothing else reads or writes them. Per-run
+  state lives on `game` in `main.js` and on `Player`, and is discarded on every new hunt.
+- **`weapons.js` / `armor.js` / `potions.js` / `mushrooms.js` / `bossTraits.js` are pure data.**
+  No progression logic — that all lives in `progress.js`.
+- **Geometry and collision are emitted together.** A prop that registers a collider does it in the
+  same loop that builds its mesh, so the two cannot drift apart.
+- **Seeded determinism.** `mulberry32` streams, with `deriveSeed(seed, salt)` giving each
+  subsystem an independent stream from one world seed. A seed must always rebuild the same world;
+  don't introduce `Math.random()` into generation.
