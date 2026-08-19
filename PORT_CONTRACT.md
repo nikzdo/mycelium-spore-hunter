@@ -43,6 +43,16 @@ errors**: `mcp__playwright__browser_navigate` to `http://127.0.0.1:8000/index.ht
 wait ~4s, then `mcp__playwright__browser_console_messages`. Report the actual console output in
 your final message. **Do not claim success without having read that output.**
 
+**The playwright browser session is SHARED between concurrently running agents.** Console
+messages from another agent's test page will appear in your read, and vice versa. Two rules:
+1. Attribute every message to its source URL before believing it. A message whose URL is not
+   `index.html` is not yours. One agent already nearly reported another's 404 as its own failure.
+2. `/favicon.ico` 404s and `The root document of this element is not valid for pointer lock.`
+   are known, pre-existing, and not failures — see PORT_NOTES.md. Report them, don't chase them.
+
+Known-noisy verification path: clicking `#startbtn` for real triggers `requestPointerLock()`,
+which headless Chrome refuses. Prefer `?demo`, which skips it.
+
 If playwright is unavailable to you, say so explicitly rather than skipping verification silently.
 
 ## Existing interfaces (facts — verified, do not guess)
