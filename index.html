@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MYCELIUM — Spore Hunter</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍄</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Gochi+Hand&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#1c1410; --cream:#fff6e3; --amber:#ffb347; --leaf:#7ec850;
+  --hp:#ff5a5a; --stam:#ffd94a; --rare:#4da6ff; --epic:#b46bff; --leg:#ffc23d;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
+html,body{width:100%;height:100%;overflow:hidden;background:#0d0a14;font-family:'Fredoka',sans-serif;color:var(--cream)}
+canvas{display:block;filter:saturate(1.16) contrast(1.06)}
+#game{position:fixed;inset:0}
+/* ---------- overlays ---------- */
+.overlay{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.hidden{display:none!important}
+/* grain + vignette + grade */
+#grade{position:fixed;inset:0;z-index:10;pointer-events:none;
+  background:radial-gradient(ellipse at center, transparent 55%, rgba(40,15,60,.38) 100%);}
+#grade::after{content:"";position:absolute;inset:0;opacity:.05;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");}
+#dmgvin{position:fixed;inset:0;z-index:11;pointer-events:none;opacity:0;transition:opacity .1s;
+  background:radial-gradient(ellipse at center, transparent 40%, rgba(255,30,30,.55) 100%);}
+/* ---------- title ---------- */
+#title{background:transparent;transition:opacity .6s}
+#title .logo{font-size:clamp(48px,9vw,120px);font-weight:700;letter-spacing:.06em;color:var(--cream);
+  text-shadow:0 4px 0 #c96b2c, 0 8px 0 rgba(28,20,16,.9), 0 14px 40px rgba(255,160,60,.45);
+  animation:float 4s ease-in-out infinite;}
+#title .logo span{color:var(--amber)}
+#title .sub{font-family:'Gochi Hand',cursive;font-size:clamp(20px,3vw,34px);color:#ffe9b8;margin-top:6px;
+  text-shadow:0 2px 0 rgba(28,20,16,.8);letter-spacing:.12em}
+#title .cta{margin-top:48px;font-size:clamp(18px,2.2vw,26px);font-weight:600;color:var(--cream);
+  padding:14px 46px;border:4px solid var(--ink);border-radius:999px;background:linear-gradient(180deg,#ffcf6b,#f59b3c);
+  box-shadow:0 6px 0 var(--ink),0 12px 30px rgba(0,0,0,.4);color:var(--ink);cursor:pointer;animation:pulse 1.6s ease-in-out infinite}
+#title .hint{margin-top:22px;font-size:14px;opacity:.85;letter-spacing:.08em}
+@keyframes float{0%,100%{transform:translateY(0) rotate(-1deg)}50%{transform:translateY(-12px) rotate(1deg)}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+/* ---------- cards ---------- */
+.card{background:linear-gradient(180deg,#2b2138,#1c1526);border:4px solid var(--ink);border-radius:24px;
+  padding:36px 52px;box-shadow:0 10px 0 var(--ink),0 30px 80px rgba(0,0,0,.6);max-width:640px}
+.card h2{font-size:34px;color:var(--amber);margin-bottom:14px;text-shadow:0 3px 0 var(--ink)}
+.card p{font-size:17px;line-height:1.55;color:#efe3ff}
+.card .btnrow{margin-top:26px;display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+.tbtn{font-family:'Fredoka';font-weight:600;font-size:17px;padding:11px 30px;border-radius:999px;border:3px solid var(--ink);
+  background:linear-gradient(180deg,#ffcf6b,#f59b3c);color:var(--ink);cursor:pointer;box-shadow:0 4px 0 var(--ink)}
+.tbtn.alt{background:linear-gradient(180deg,#9be26e,#58a839)}
+.tbtn.grey{background:linear-gradient(180deg,#b9b3c9,#7d7592)}
+.tbtn:active{transform:translateY(3px);box-shadow:0 1px 0 var(--ink)}
+#intro p em{color:var(--amber);font-style:normal;font-weight:600}
+/* ---------- HUD ---------- */
+#hud{position:fixed;inset:0;z-index:20;pointer-events:none;opacity:0;transition:opacity .4s}
+#hud.on{opacity:1}
+#hpwrap{position:absolute;top:22px;left:24px;width:min(320px,34vw)}
+.barlabel{font-size:13px;font-weight:700;letter-spacing:.12em;text-shadow:0 2px 0 var(--ink);margin-bottom:4px}
+.bar{height:20px;border:3px solid var(--ink);border-radius:999px;background:rgba(20,12,26,.65);overflow:hidden;box-shadow:0 3px 0 var(--ink)}
+.bar .fill{height:100%;border-radius:999px;transition:width .18s ease-out}
+#hpfill{background:linear-gradient(180deg,#ff8a7a,#e33e3e)}
+#bosswrap{position:absolute;top:20px;left:50%;transform:translateX(-50%);width:min(560px,60vw);display:none}
+#bossfill{background:linear-gradient(180deg,#d9a6ff,#8b3fe0)}
+#pips{position:absolute;top:112px;left:24px;display:flex;gap:7px}
+.pip{width:20px;height:20px;border:3px solid var(--ink);border-radius:50%;background:#3a2f4d;box-shadow:0 2px 0 var(--ink)}
+.pip.full{background:linear-gradient(180deg,#ffe98a,#ffb52e)}
+#gearhud{position:absolute;top:142px;left:24px;display:flex;gap:6px}
+.gearslot{width:26px;height:26px;border:2px solid var(--ink);border-radius:8px;background:#241c33;
+  display:flex;align-items:center;justify-content:center;font-size:14px;opacity:.35;box-shadow:0 2px 0 var(--ink);position:relative}
+.gearslot.on{opacity:1;box-shadow:0 0 0 2px var(--rc,#ffb347),0 2px 0 var(--ink)}
+.gearslot .gt{position:absolute;bottom:-6px;right:-6px;background:#ffe98a;color:var(--ink);font-size:8px;font-weight:700;
+  border:1px solid var(--ink);border-radius:999px;padding:0 3px}
+#buffs{position:absolute;top:174px;left:24px;display:flex;gap:8px;flex-wrap:wrap;max-width:300px}
+.buff{width:38px;height:38px;border:3px solid var(--ink);border-radius:12px;background:linear-gradient(180deg,#3d3152,#241c33);
+  display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 3px 0 var(--ink);position:relative}
+.buff .n{position:absolute;bottom:-7px;right:-7px;background:var(--amber);color:var(--ink);font-size:11px;font-weight:700;
+  border:2px solid var(--ink);border-radius:999px;padding:0 5px}
+#kills{position:absolute;top:22px;right:24px;text-align:right;font-size:14px;font-weight:600;text-shadow:0 2px 0 var(--ink)}
+#kills .row{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-bottom:3px}
+.dot{width:12px;height:12px;border-radius:50%;border:2px solid var(--ink)}
+#coinhud{position:absolute;top:168px;right:24px;font-size:15px;font-weight:700;color:#ffe98a;text-shadow:0 2px 0 var(--ink)}
+#mycohud{position:absolute;top:192px;right:24px;font-size:15px;font-weight:700;color:#a8f0a0;text-shadow:0 2px 0 var(--ink)}
+#contracts{position:absolute;top:220px;right:24px;width:216px;display:flex;flex-direction:column;gap:6px}
+.contract{display:flex;gap:8px;align-items:center;background:rgba(20,12,26,.55);border:2px solid rgba(255,246,227,.2);
+  border-radius:12px;padding:6px 8px}
+.cicon{width:26px;height:26px;border-radius:50% 50% 50% 4px;border:2px solid var(--ink);flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;font-size:12px;box-shadow:0 2px 0 var(--ink)}
+.cinfo{flex:1;min-width:0}
+.cname{font-size:11px;font-weight:700;color:#ffe9b8;text-shadow:0 1px 0 var(--ink)}
+.cbar{height:7px;border:1px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.4);overflow:hidden;margin:3px 0 2px}
+.cfill{height:100%;background:linear-gradient(180deg,#c8f088,#7ec850);border-radius:999px;transition:width .18s ease-out}
+.cprog{font-size:10px;color:#e8e0d0}
+#harvestPrompt{position:absolute;top:56%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:19px;
+  color:#eaffd8;text-shadow:0 2px 0 var(--ink);background:rgba(40,70,20,.55);padding:6px 20px;border-radius:999px;
+  border:2px solid rgba(180,255,140,.45);white-space:nowrap}
+.dmg.harvest{font-size:16px;font-weight:700}
+#objective{position:absolute;bottom:98px;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:20px;
+  color:#ffe9b8;text-shadow:0 2px 0 var(--ink);background:rgba(28,20,16,.45);padding:6px 22px;border-radius:999px;border:2px solid rgba(255,246,227,.25)}
+#zone{position:absolute;bottom:136px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink)}
+/* ---------- backpack (weapon + potion quickbar, bottom-center) ---------- */
+#backpack{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;
+  background:rgba(20,12,26,.4);border:2px solid rgba(255,246,227,.18);border-radius:20px;padding:10px 14px}
+#bpWeapons, #bpPotions{display:flex;gap:8px}
+#backpack .bpdiv{width:2px;align-self:stretch;background:rgba(255,246,227,.2);border-radius:2px}
+.hotslot, .potslot{position:relative;width:50px;height:50px;border:3px solid var(--ink);border-radius:14px;pointer-events:auto;
+  background:linear-gradient(180deg,#3d3152,#241c33);display:flex;align-items:center;justify-content:center;
+  font-size:23px;box-shadow:0 3px 0 var(--ink), inset 0 0 0 2px var(--rc,transparent);cursor:pointer;opacity:.7}
+.hotslot.active{opacity:1;box-shadow:0 0 0 3px var(--rc,#ffb347),0 3px 0 var(--ink),0 0 16px var(--rc,rgba(255,180,60,.6))}
+.hotslot .hnum{position:absolute;top:-7px;left:-7px;background:var(--amber);color:var(--ink);font-size:11px;font-weight:700;
+  border:2px solid var(--ink);border-radius:999px;width:18px;height:18px;display:flex;align-items:center;justify-content:center}
+.hotslot .htier{position:absolute;bottom:-7px;right:-7px;background:#ffe98a;color:var(--ink);font-size:9px;font-weight:700;
+  border:2px solid var(--ink);border-radius:999px;padding:0 4px}
+.potslot{box-shadow:0 3px 0 var(--ink), inset 0 0 0 2px var(--pc,transparent);opacity:.4;filter:grayscale(.6)}
+.potslot.has{opacity:.85;filter:none}
+.potslot.active{opacity:1;filter:none;box-shadow:0 0 0 3px var(--pc,#9be26e),0 3px 0 var(--ink),0 0 16px var(--pc,rgba(155,226,110,.6))}
+.potslot .pkey{position:absolute;top:-7px;left:-7px;background:#e8e4d0;color:var(--ink);font-size:10px;font-weight:700;
+  border:2px solid var(--ink);border-radius:999px;width:18px;height:18px;display:flex;align-items:center;justify-content:center}
+.potslot .pcnt{position:absolute;bottom:-7px;right:-7px;background:var(--amber);color:var(--ink);font-size:10px;font-weight:700;
+  border:2px solid var(--ink);border-radius:999px;padding:0 4px}
+.potslot .ptimer{position:absolute;bottom:-7px;left:50%;transform:translateX(-50%);background:#9be26e;color:var(--ink);
+  font-size:9px;font-weight:700;border:2px solid var(--ink);border-radius:999px;padding:0 4px;white-space:nowrap}
+/* ---------- inventory overlay ---------- */
+#inventory{background:rgba(12,8,20,.72);backdrop-filter:blur(4px)}
+.invcard{width:min(620px,92vw);max-height:80vh;overflow-y:auto;background:linear-gradient(180deg,#2b2138,#1c1526);
+  border:4px solid var(--ink);border-radius:24px;padding:30px 34px;box-shadow:0 10px 0 var(--ink),0 30px 80px rgba(0,0,0,.6)}
+.invcard h2{font-size:30px;color:var(--amber);margin-bottom:4px;text-align:center}
+.invhint2{text-align:center;font-size:13px;color:#c8b8e8;margin-bottom:16px;letter-spacing:.04em}
+.invsubh{font-family:'Gochi Hand';font-size:19px;color:#ffe9b8;margin:16px 0 8px;text-align:center;letter-spacing:.04em}
+.invitem{display:flex;gap:14px;align-items:center;border:3px solid var(--rc,var(--ink));border-radius:16px;
+  padding:12px 14px;margin-bottom:10px;background:rgba(255,255,255,.04)}
+.invitem.active{background:rgba(255,200,80,.12);box-shadow:0 0 0 2px var(--rc,#ffb347)}
+.invitem.empty{opacity:.45}
+.iicon{font-size:28px;width:46px;height:46px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  border:3px solid var(--ink);border-radius:12px;background:linear-gradient(180deg,#3d3152,#241c33)}
+.iinfo{flex:1;min-width:0}
+.iname{font-weight:700;font-size:16px;color:#fff6e3}
+.iname .ieq{margin-left:8px;font-size:11px;color:#ffe98a;letter-spacing:.06em}
+.idesc{font-size:12px;color:#c8b8e8;margin:3px 0 6px}
+.istats{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;font-weight:700;color:#ffe9b8}
+.invitem .pips{display:flex;gap:3px;margin-top:6px}
+.invitem .pip2{width:11px;height:11px;border:2px solid #5a4a78;border-radius:50%;background:rgba(255,255,255,.06)}
+.invitem .pip2.on{background:radial-gradient(circle at 35% 30%,#ffe98a,#e8962e);border-color:var(--ink)}
+.glvl{font-size:11px;font-weight:700;color:#c8b8e8;margin-top:3px}
+.ibtnrow{display:flex;flex-direction:column;gap:6px;flex:0 0 auto}
+.invbtn{flex:0 0 auto;font-family:'Fredoka';font-weight:700;font-size:13px;padding:9px 16px;border-radius:999px;
+  border:3px solid var(--ink);cursor:pointer;background:linear-gradient(180deg,#ffcf6b,#f59b3c);color:var(--ink);box-shadow:0 3px 0 var(--ink)}
+.invbtn:active{transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+.invbtn:disabled{background:linear-gradient(180deg,#8a8290,#5a5262);color:#c8c0d0;cursor:not-allowed}
+#invclose{margin:16px auto 0;display:block;font-family:'Fredoka';font-weight:600;font-size:16px;
+  padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
+  background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
+/* ---------- tome tabs (alchemy / forge) ---------- */
+.tometabs{display:flex;gap:8px;justify-content:center;margin-bottom:10px}
+.ttab{font-family:'Fredoka';font-weight:700;font-size:12px;letter-spacing:.06em;padding:7px 14px;border-radius:999px;
+  border:2px solid #6b4a2a;cursor:pointer;background:rgba(255,250,235,.4);color:#6b3a1a}
+.ttab.on{background:linear-gradient(180deg,#ffcf6b,#f59b3c);box-shadow:0 2px 0 #6b4a2a}
+/* damage numbers */
+.dmg{position:fixed;z-index:30;font-weight:700;pointer-events:none;text-shadow:0 2px 0 var(--ink),0 0 12px rgba(0,0,0,.4);
+  animation:dmgpop .8s ease-out forwards;font-size:22px;color:#fff}
+.dmg.crit{font-size:30px;color:var(--leg)}
+.dmg.player{color:#ff6b6b}
+@keyframes dmgpop{0%{transform:translate(-50%,0) scale(.4);opacity:0}15%{opacity:1;transform:translate(-50%,-14px) scale(1.25)}
+  100%{transform:translate(-50%,-70px) scale(.9);opacity:0}}
+#announce{position:fixed;top:32%;left:50%;transform:translateX(-50%);z-index:40;font-size:clamp(30px,5vw,58px);font-weight:700;
+  color:var(--cream);text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,180,80,.6);opacity:0;pointer-events:none;letter-spacing:.04em;white-space:nowrap}
+#announce.show{animation:ann 2.6s ease-out forwards}
+@keyframes ann{0%{opacity:0;transform:translateX(-50%) scale(.6)}12%{opacity:1;transform:translateX(-50%) scale(1.08)}
+  20%{transform:translateX(-50%) scale(1)}80%{opacity:1}100%{opacity:0}}
+#fps{position:fixed;bottom:8px;right:10px;z-index:60;font-size:11px;opacity:.6}
+/* ---------- XP bar + level badge ---------- */
+#xpwrap{position:absolute;top:52px;left:24px;width:min(320px,34vw);display:flex;align-items:center;gap:10px}
+#lvlbadge{flex:0 0 auto;width:44px;height:44px;border:3px solid var(--ink);border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#ffe98a,#e8962e);color:var(--ink);font-weight:700;font-size:19px;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 3px 0 var(--ink),0 0 18px rgba(255,200,80,.5)}
+#xpbarwrap{flex:1}
+#xpbarwrap .bar{height:13px}
+#xpfill{background:linear-gradient(180deg,#fff3a0,#ffb52e)}
+#xplabel{font-size:11px;font-weight:700;letter-spacing:.1em;text-shadow:0 2px 0 var(--ink);margin-bottom:3px;color:#ffe9b8}
+/* ---------- level-up banner ---------- */
+#levelup{position:fixed;top:22%;left:50%;transform:translateX(-50%);z-index:41;pointer-events:none;opacity:0;
+  font-family:'Gochi Hand',cursive;font-size:clamp(40px,6vw,74px);color:#ffe98a;letter-spacing:.08em;white-space:nowrap;
+  text-shadow:0 0 24px rgba(255,200,60,.9),0 4px 0 var(--ink),0 8px 30px rgba(0,0,0,.5)}
+#levelup.show{animation:lvl 2.2s ease-out forwards}
+@keyframes lvl{0%{opacity:0;transform:translateX(-50%) translateY(30px) scale(.5)}
+  15%{opacity:1;transform:translateX(-50%) translateY(0) scale(1.15)}
+  25%{transform:translateX(-50%) scale(1)}75%{opacity:1}
+  100%{opacity:0;transform:translateX(-50%) translateY(-24px) scale(1.05)}}
+/* ---------- title tome button ---------- */
+#tomebtn{margin-top:16px;font-family:'Fredoka';font-weight:600;font-size:16px;letter-spacing:.14em;
+  padding:9px 26px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
+  background:linear-gradient(180deg,#d8b8ff,#9a6fd8);color:var(--ink);box-shadow:0 4px 0 var(--ink);opacity:.92}
+#tomebtn:active{transform:translateY(3px);box-shadow:0 1px 0 var(--ink)}
+.seedline{margin-top:12px;font-family:'Gochi Hand';font-size:15px;color:#c8b8e8;opacity:.9}
+/* ---------- SPORE TOME (storybook) ---------- */
+#tome{background:rgba(12,8,20,.72);backdrop-filter:blur(4px)}
+.tomebook{display:flex;gap:0;width:min(1060px,94vw);height:min(660px,88vh);
+  filter:drop-shadow(0 24px 60px rgba(0,0,0,.7))}
+.tomepage{flex:1;background:
+    radial-gradient(ellipse at 20% 10%, rgba(255,255,255,.5), transparent 55%),
+    linear-gradient(160deg,#f6e8c8 0%,#eedcb4 55%,#e2cb9e 100%);
+  border:4px solid var(--ink);padding:26px 30px;color:#3a2a1a;overflow-y:auto;position:relative}
+.tomepage.left{border-radius:26px 6px 6px 26px;border-right-width:2px}
+.tomepage.right{border-radius:6px 26px 26px 6px;border-left-width:2px}
+.tomepage h2{font-family:'Gochi Hand',cursive;font-size:34px;color:#6b3a1a;text-align:center;margin-bottom:4px}
+.tomepage h3{font-family:'Gochi Hand',cursive;font-size:21px;color:#8a5a2a;margin:14px 0 8px;
+  border-bottom:2px dashed rgba(107,58,26,.4);padding-bottom:3px}
+.tomepage .subtitle{text-align:center;font-size:13px;letter-spacing:.16em;font-weight:700;color:#8a6a3f;margin-bottom:8px}
+.tstat{display:flex;justify-content:space-between;font-size:15px;font-weight:600;padding:3px 2px;color:#4a3520}
+.tstat b{color:#6b3a1a}
+.txp{margin:8px 0 2px}
+.txp .bar{height:14px;border-color:#6b4a2a;box-shadow:0 2px 0 #6b4a2a;background:rgba(90,60,30,.25)}
+.txp .barlabel{color:#6b3a1a;text-shadow:none}
+.essrow{display:flex;align-items:center;gap:9px;margin-bottom:7px;font-weight:600;font-size:15px;color:#4a3520}
+.essdot{width:26px;height:26px;border-radius:50% 50% 50% 4px;border:3px solid var(--ink);flex:0 0 auto;
+  box-shadow:inset -3px -4px 0 rgba(0,0,0,.25), 0 2px 0 var(--ink)}
+.essrow .cnt{margin-left:auto;font-weight:700;color:#6b3a1a}
+.essrow .life{font-size:11px;color:#8a6a3f;margin-left:6px}
+.mut{border:3px solid #6b4a2a;border-radius:14px;padding:10px 12px;margin-bottom:10px;
+  background:rgba(255,250,235,.55);display:flex;gap:12px;align-items:center;transition:transform .12s}
+.mut .icon{font-size:28px;width:44px;height:44px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  border:3px solid var(--ink);border-radius:12px;background:linear-gradient(180deg,#fff6e3,#e8d0a0);box-shadow:0 2px 0 var(--ink)}
+.mut .info{flex:1;min-width:0}
+.mut .mname{font-weight:700;font-size:16px;color:#4a2a12}
+.mut .mdesc{font-size:13px;color:#6b4a2a}
+.mut .pips{display:flex;gap:4px;margin-top:4px}
+.mut .pip2{width:13px;height:13px;border:2px solid #6b4a2a;border-radius:50%;background:rgba(90,60,30,.2)}
+.mut .pip2.on{background:radial-gradient(circle at 35% 30%,#ffe98a,#e8962e)}
+.mut .cost{font-size:12px;font-weight:700;color:#6b4a2a;margin-top:3px;display:flex;gap:7px;flex-wrap:wrap}
+.mut .cost .ci{display:flex;align-items:center;gap:3px}
+.mut .cost .cdot{width:12px;height:12px;border-radius:50%;border:2px solid var(--ink);display:inline-block}
+.mut .cost .lack{color:#b03a2a;text-decoration:line-through}
+.mut .gearline{font-size:11px;font-weight:700;color:#8a6a3f;margin-top:3px}
+.mutbtn{flex:0 0 auto;font-family:'Fredoka';font-weight:700;font-size:13px;padding:8px 14px;border-radius:999px;
+  border:3px solid var(--ink);cursor:pointer;background:linear-gradient(180deg,#ffcf6b,#f59b3c);color:var(--ink);box-shadow:0 3px 0 var(--ink)}
+.mutbtn:disabled{background:linear-gradient(180deg,#b9b3c9,#7d7592);cursor:not-allowed}
+.mutbtn:active{transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+.mut.maxed .mutbtn{background:linear-gradient(180deg,#ffe98a,#ffb52e);cursor:default}
+.mut.locked{opacity:.55;filter:saturate(.5)}
+.mut.locked .mutbtn{background:linear-gradient(180deg,#b9b3c9,#7d7592);cursor:not-allowed}
+.mut:not(.locked):not(.maxed):hover{transform:translateY(-2px)}
+#tomeclose{margin:18px auto 0;display:block;font-family:'Fredoka';font-weight:600;font-size:16px;
+  padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
+  background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
+.tomehint{text-align:center;font-size:12px;color:#c8b8e8;margin-top:10px;letter-spacing:.1em}
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div id="grade"></div>
+<div id="dmgvin"></div>
+
+<div id="hud">
+  <div id="hpwrap"><div class="barlabel">SPORE HUNTER</div><div class="bar"><div class="fill" id="hpfill" style="width:100%"></div></div></div>
+  <div id="xpwrap">
+    <div id="lvlbadge">1</div>
+    <div id="xpbarwrap"><div id="xplabel">LEVEL 1 — 0 / 45 XP</div><div class="bar"><div class="fill" id="xpfill" style="width:0%"></div></div></div>
+  </div>
+  <div id="bosswrap"><div class="barlabel" id="bossname" style="text-align:center;color:#d9a6ff">ELDER MYCONID</div><div class="bar"><div class="fill" id="bossfill" style="width:100%"></div></div></div>
+  <div id="pips"></div>
+  <div id="gearhud"></div>
+  <div id="buffs"></div>
+  <div id="kills"></div>
+  <div id="coinhud">🪙 0</div>
+  <div id="mycohud">🌿 0</div>
+  <div id="contracts"></div>
+  <div id="harvestPrompt" class="hidden"></div>
+  <div id="zone"></div>
+  <div id="objective">Hunt the Bloom</div>
+  <div id="backpack">
+    <div id="bpWeapons"></div>
+    <div class="bpdiv"></div>
+    <div id="bpPotions"></div>
+  </div>
+</div>
+<div id="announce"></div>
+<div id="levelup"></div>
+<div id="fps"></div>
+
+<div id="title" class="overlay">
+  <div class="logo">MYCELIUM</div>
+  <div class="sub">— SPORE <span style="color:#ffb347">HUNTER</span> —</div>
+  <button class="cta" id="startbtn">CLICK TO START</button><br>
+  <button id="tomebtn">📖 SPORE TOME</button>
+  <div class="hint">W/S move &nbsp;•&nbsp; MOUSE steer &nbsp;•&nbsp; A/D turn &nbsp;•&nbsp; CLICK attack &nbsp;•&nbsp; SPACE jump &nbsp;•&nbsp; SHIFT dash &nbsp;•&nbsp; 1-7 weapons &nbsp;•&nbsp; Q/E/R/F/G potions &nbsp;•&nbsp; H harvest &nbsp;•&nbsp; B backpack &nbsp;•&nbsp; TAB tome &nbsp;•&nbsp; M mute &nbsp;•&nbsp; ESC pause</div>
+</div>
+
+<div id="intro" class="overlay hidden">
+  <div class="card">
+    <h2>The Great Bloom</h2>
+    <p>The Great Bloom has corrupted the forest. Living mushrooms — from humble grey caps to <em>legendary golden horrors</em> — swarm the valley where your village once stood.<br><br>You are the last <em>Spore Hunter</em>. Cut through the Bloom, gather its power, and slay whichever ancient horror still rules it — <em>Elder Myconid</em> or <em>Rotmaw the Bloated</em>.</p>
+    <div class="btnrow"><button class="tbtn alt" id="gobtn">TAKE UP THE BLADE</button></div>
+  </div>
+</div>
+
+<div id="pause" class="overlay hidden">
+  <div class="card">
+    <h2>Paused</h2>
+    <p>The spores drift on the wind...</p>
+    <div class="btnrow">
+      <button class="tbtn alt" id="resumebtn">RESUME</button>
+      <button class="tbtn grey" id="mutebtn">MUTE: OFF</button>
+      <button class="tbtn" id="tomebtn2">SPORE TOME</button>
+      <button class="tbtn" id="restartbtn">NEW WORLD</button>
+    </div>
+    <div class="seedline" id="pauseseed"></div>
+  </div>
+</div>
+
+<div id="gameover" class="overlay hidden">
+  <div class="card">
+    <h2 style="color:#ff6b6b">The Bloom Claims You</h2>
+    <p id="gostats"></p>
+    <div class="btnrow"><button class="tbtn alt" id="retrybtn">NEW HUNT (NEW WORLD)</button></div>
+    <div class="seedline" id="goseed"></div>
+  </div>
+</div>
+
+<div id="victory" class="overlay hidden">
+  <div class="card">
+    <h2 style="color:#ffd94a">The Grove Is Free!</h2>
+    <p id="victext">The Bloom's ruler falls. Sunlight returns to the valley.</p>
+    <p id="vstats" style="margin-top:12px"></p>
+    <div class="btnrow"><button class="tbtn alt" id="againbtn">NEW HUNT (NEW WORLD)</button></div>
+    <div class="seedline" id="vseed"></div>
+  </div>
+</div>
+
+<div id="tome" class="overlay hidden">
+  <div class="tomebook">
+    <div class="tomepage left" id="tomeleft"></div>
+    <div class="tomepage right" id="tomeright"></div>
+  </div>
+  <button id="tomeclose">CLOSE TOME</button>
+  <div class="tomehint">TAB / I / ESC to close &nbsp;•&nbsp; mutations and your gear collection are permanent across hunts</div>
+</div>
+
+<div id="inventory" class="overlay hidden">
+  <div class="invcard">
+    <h2>🎒 Backpack</h2>
+    <div class="invhint2">Found this hunt &nbsp;•&nbsp; weapons: click EQUIP or press 1–7 &nbsp;•&nbsp; potions: click DRINK or press Q/E/R/F/G &nbsp;•&nbsp; ★ stars come from duplicates, levels from coins — see the full collection in the Spore Tome</div>
+    <div class="invsubh">⚔️ Weapons</div>
+    <div id="invgrid"></div>
+    <div class="invsubh">🧪 Potions</div>
+    <div id="invpotions"></div>
+    <div class="invsubh">🪖 Gear</div>
+    <div id="invgear"></div>
+    <button id="invclose">CLOSE</button>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"./vendor/three.module.js",
+"three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
