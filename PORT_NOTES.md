@@ -125,3 +125,44 @@ Append-only. One bullet each: what you need, in which file you do NOT own, and w
   world.js's module-scope constants in TDZ during init, which is the same trap world-core already
   documented for STEP/PLAYER_R. Its placement predicates read the FINISHED collider list, so calling
   it after buildWorld is also the only order that makes them correct.
+
+## FINAL OPTIMIZATION PASS — brief (user-requested, run LAST)
+
+Measured numbers gathered during the port. Start from these, re-measure before changing
+anything, and report before/after. Do not regress correctness or the art direction to win
+draw calls.
+
+**Draw calls — current estimate ~500 in a populated frame.**
+| source | measured | note |
+|---|---|---|
+| scene with shadows | 339 | vs 124 with `?shadows=off` — inherent second depth pass |
+| interactive props (26) | 79 | ~1/3 are `addOutline()` ink hulls = the art direction |
+| fauna (10 critters) | 70 | **7 draw calls per critter** — worst per-object cost in the game |
+| rockgen (133 rocks) | 3 | already excellent, merged fill + ink. The model to copy. |
+| harvestables | 5 | was 196 before item 35. Already fixed. |
+
+**Ranked candidates:**
+1. **Fauna, 7 calls/critter.** Merge each critter's static sub-meshes; only genuinely animated
+   parts need to stay separate. Biggest single win available.
+2. **Props, 79 calls.** `InstancedMesh` per (kind, wear-stage) — the props agent deliberately
+   skipped this as real index bookkeeping, not a tweak, and it complicates the wear-state
+   texture swap. Do it carefully or not at all; do NOT break `HEAD_HITS` registration or the
+   bob-tracked `bot` (a stale `bot` fires the pod hit at the wrong height).
+3. **Ink hulls.** Merge hulls per prop type the way rockgen does, rather than one hull per mesh.
+4. **Shadow casters (291-324).** Cull small casters, tighten the ortho box around the player,
+   or lower the default tier. `shadowize()` is already one-time and idempotent.
+
+**Hot path regression worth attention:**
+- `groundHeight()` went **0.08us -> 0.36us per call** (4.5x) after the terrain-shaping wave —
+  more noise fields, domain warp, authored curve. It has ~41 call sites and runs per entity per
+  frame, so this is the most likely CPU cost in the game now. Options: cache per (x,z) at a
+  coarse grid, reduce octaves in the per-frame path vs the mesh-build path, or split a cheap
+  `groundHeightFast()` for entity queries from the full-quality version used at build time.
+- `surfaceAt()` is 0.65us with 216 colliders (linear scan, squared-distance early-out). A
+  spatial index was deliberately NOT added — measure again once props/fauna/rockgen have pushed
+  the collider count up, and only add one if it now pays.
+- World build 56-104ms. Only matters once item 10's live-rebuild panel exists.
+
+**Rules that must survive the pass** (CLAUDE.md): no `PointLight` on anything that spawns in
+bursts; no per-frame allocations in hot paths; diff-based DOM; `surfaceAt`'s shared return
+object stays read-immediately-never-store; seeded determinism unchanged.
