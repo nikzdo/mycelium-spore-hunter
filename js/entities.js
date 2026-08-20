@@ -1,6 +1,6 @@
 // entities.js — player, mushrooms, boss, powerups, projectiles
 import * as THREE from 'three';
-import { toonMat, addOutline, paintTexture, makeBlobShadow } from './fx.js';
+import { toonMat, addOutline, paintTexture, makeBlobShadow, glowTexture } from './fx.js';
 import { groundHeight, surfaceAt, slopeAt, inExclusion } from './world.js';
 import { WEAPONS_BY_ID } from './weapons.js';
 import { POTIONS_BY_ID } from './potions.js';
@@ -134,20 +134,37 @@ export class Mushroom {
       a.position.set(0.55*s*sx, 0.55*s, 0); a.scale.set(1,1.6,1); addOutline(a,0.06);
       g.add(a); this.arms.push(a);
     }
-    // glow aura (rare+)
+    /* glow aura (rare+) — NO PointLight, on purpose. This is the same rule the Powerup below
+       spells out, and it matters more here: enemies spawn and die in bursts, and three.js keys a
+       shader program on the scene's light count, so every rare mushroom that appeared or died
+       recompiled the program for every lit material on screen. Measured, spawning twelve of them:
+       renderer.info.programs 152 -> 456 and a single 4.8 s frame. The rarity read is carried by
+       three material-only layers instead:
+         - the cap's own emissive, ramped by rarity, so the CREATURE is what glows;
+         - a billboarded aura sprite carrying fx.glowTexture(). A sprite, not a sphere shell: an
+           additive shell has FLAT alpha (a hard-edged disc, the mapless-halo bug in round form)
+           and is a thing the camera can end up inside, which paints the whole viewport;
+         - a soft pool of light on the ground, also mapped. A flat-alpha additive annulus is a
+           pale wash with a hard edge on both sides; the radial map is what makes it light. */
     if(rarityIdx >= 2){
-      const aura = new THREE.Mesh(new THREE.SphereGeometry(1.5*s, 12, 10),
-        new THREE.MeshBasicMaterial({ color:R.glow, transparent:true, opacity:0.10+rarityIdx*0.02,
-          blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.BackSide }));
-      aura.position.y = 1*s; g.add(aura); this.aura = aura;
-      // colored light ring on the ground
-      const ring = new THREE.Mesh(new THREE.RingGeometry(1.15*s, 1.7*s, 28),
-        new THREE.MeshBasicMaterial({ color:R.glow, transparent:true, opacity:0.55,
-          blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide }));
+      // the creature glows, not the air around it — this is what replaces the light
+      cap.material.emissive.set(R.glow);
+      cap.material.emissiveIntensity = 0.22 + rarityIdx*0.16;
+      const aura = new THREE.Sprite(new THREE.SpriteMaterial({ map:glowTexture(), color:R.glow,
+        transparent:true, opacity:0.24+rarityIdx*0.06, blending:THREE.AdditiveBlending,
+        depthWrite:false, fog:false }));   // fog off: fog on an additive layer adds sky to the sky
+      aura.scale.setScalar(4.2*s); aura.position.y = 1.15*s; g.add(aura); this.aura = aura;
+      // ground pool. Disc, not an annulus: with a radial map the falloff IS the ring, and there
+      // is no inner edge left to read as a decal.
+      const ring = new THREE.Mesh(new THREE.CircleGeometry(2.0*s, 24),
+        new THREE.MeshBasicMaterial({ color:R.glow, map:glowTexture(), transparent:true,
+          opacity:0.34+rarityIdx*0.04, blending:THREE.AdditiveBlending, depthWrite:false,
+          side:THREE.DoubleSide, fog:false }));
       ring.rotation.x = -Math.PI/2; ring.position.y = 0.08; g.add(ring); this.groundRing = ring;
-      const pl = new THREE.PointLight(R.glow, 3+rarityIdx*2, 7*s);
-      pl.position.y = 1.4*s; g.add(pl); this.light = pl;
     }
+    /* the hit flash WRITES cap.material.emissive, so the rarity glow has to be remembered
+       somewhere or the first hit erases it permanently — flash now adds on top of this. */
+    this.emissBase = cap.material.emissive.clone();
     this.blob = makeBlobShadow(2.4*s); this.blob.position.y = 0.05; g.add(this.blob);
     this.body = new THREE.Group(); this.body.add(stem, cap);
     this.cap = cap; this.stem = stem;
@@ -168,8 +185,10 @@ export class Mushroom {
     this.dead = true;
     const p = this.group.position.clone(); p.y += 1;
     const c = new THREE.Color(this.R.glow);
-    game.particles.burst(p, 26, {r:c.r, g:c.g, b:c.b, spread:5, size:9, life:0.9, grav:6, drag:0.96});
-    game.particles.burst(p, 14, {r:1,g:1,b:1, spread:3, size:6, life:0.5});
+    // counts halved (26+14 -> 14+8): fx.js caps sprite pixel size, and the cap only stays loose
+    // if the burst does not hand it forty overlapping sprites to clamp
+    game.particles.burst(p, 14, {r:c.r, g:c.g, b:c.b, spread:5, size:9, life:0.9, grav:6, drag:0.96});
+    game.particles.burst(p, 8, {r:1,g:1,b:1, spread:3, size:6, life:0.5});
     game.audio.pop(this.rarity);
     game.onKill(this);
     this.scene.remove(this.group);
@@ -330,10 +349,11 @@ export class Mushroom {
     if(this.flash > 0){
       this.flash -= dt*5;
       const f = Math.max(0, this.flash);
-      this.cap.material.emissive.setRGB(f, f*0.3, f*0.2);
+      const b = this.emissBase;   // flash ADDS to the rarity glow; the last write (f=0) restores it
+      this.cap.material.emissive.setRGB(b.r + f, b.g + f*0.3, b.b + f*0.2);
     }
-    if(this.aura) this.aura.material.opacity = (0.10+this.rarity*0.02) * (1+Math.sin(this.t*3)*0.3);
-    if(this.R.rainbow){ // mythic: cycle hue live across cap, aura, ring, light
+    if(this.aura) this.aura.material.opacity = (0.24+this.rarity*0.06) * (1+Math.sin(this.t*3)*0.22);
+    if(this.R.rainbow){ // mythic: cycle hue live across cap, aura and ground pool
       const hue = (this.t*0.15) % 1;
       this._rc = this._rc || new THREE.Color();
       this._rc.setHSL(hue, 0.85, 0.55);
@@ -341,7 +361,6 @@ export class Mushroom {
       this.cap.material.emissive.copy(this._rc);
       if(this.aura) this.aura.material.color.copy(this._rc);
       if(this.groundRing) this.groundRing.material.color.copy(this._rc);
-      if(this.light) this.light.color.copy(this._rc);
     }
     this.blob.position.y = 0.05 - (g.position.y - this.baseY);
   }
@@ -364,7 +383,12 @@ export class Boss extends Mushroom {
     this._prevHp = this.hp; this._sinceHitT = 0;
     this.cap.material = toonMat({ color:this.R.color, map:capTexture(this.R.color),
       rim:0.7, rimColor:'#'+new THREE.Color(this.R.glow).getHexString(), emissive:0x220a44, emissiveIntensity:0.6 });
-    if(this.light){ this.light.intensity = 20; this.light.distance = 25; this.light.color.set(this.R.glow); }
+    this.emissBase = this.cap.material.emissive.clone();
+    // a boss is singular, but it still SPAWNS and DIES mid-run, so it gets no light either —
+    // the aura sprite is simply scaled up, which costs one quad and recompiles nothing
+    if(this.aura){ this.aura.material.color.set(this.R.glow); this.aura.material.opacity = 0.34;
+      this.aura.scale.setScalar(9.5); this.aura.position.y = 2.2; }
+    if(this.groundRing) this.groundRing.material.color.set(this.R.glow);
   }
   update(dt, game){
     super.update(dt, game);
@@ -420,11 +444,14 @@ export class GluttonBoss extends Mushroom {
     const bileMat = toonMat({ color:this.R.color, map:capTexture(this.R.color), rim:0.5,
       rimColor:'#'+new THREE.Color(this.R.glow).getHexString(), emissive:0x2a3a10, emissiveIntensity:0.4 });
     this.cap.material = bileMat;
+    this.emissBase = this.cap.material.emissive.clone();
     const belly = new THREE.Mesh(new THREE.SphereGeometry(0.95, 12, 9), toonMat({ color:this.R.color, rim:0.4 }).clone());
     belly.material.color.offsetHSL(0, 0, -0.12);
     belly.position.y = 0.55; belly.scale.set(1.3, 1.05, 1.3); addOutline(belly, 0.06);
     this.body.add(belly); this.belly = belly;
-    if(this.light){ this.light.intensity = 16; this.light.distance = 22; this.light.color.set(this.R.glow); }
+    if(this.aura){ this.aura.material.color.set(this.R.glow); this.aura.material.opacity = 0.30;
+      this.aura.scale.setScalar(8.5); this.aura.position.y = 1.8; }   // see Boss: no PointLight
+    if(this.groundRing) this.groundRing.material.color.set(this.R.glow);
     this.chargeCd = 8; this.vomitCd = 5; this.puddleCd = 10; this.summonCd = 13;
     this.charging = false; this.telegraphT = 0;
   }
@@ -928,7 +955,7 @@ export class Player {
               this.hp = Math.min(this.maxHp, this.hp + dmg*armorLifesteal);
             if(game.addXP) game.addXP(e.isBoss ? 'boss' : e.rarity);
             _tip.copy(e.group.position); _tip.y += 2*e.R.scale;
-            game.damageNumber(_tip, dmg, crit);
+            game.damageNumber(_tip, dmg, crit, false, e);   // keyed on the enemy: a combo is ONE growing number
             hitAny = true; if(crit) critAny = true;
             hitList.push(e);
           }
@@ -947,7 +974,7 @@ export class Player {
                   const dmg2 = Math.round(dmgBase*fin.mult);
                   e.hit(dmg2, g.position, game, 1);
                   _tip.copy(e.group.position); _tip.y += 2*e.R.scale;
-                  game.damageNumber(_tip, dmg2, false);
+                  game.damageNumber(_tip, dmg2, false, e);
                 }
               }
             } else if(fin.type==='chainhit' && critAny){
@@ -1011,6 +1038,21 @@ export const POWERUPS = [
   { id:'magnet', icon:'🧲', name:'Spore Magnet', color:0xff9adf, w:10 },
   { id:'hp',     icon:'❤️', name:'Max HP Up',    color:0xff5a5a, w:14 },
 ];
+/* Every live drop registers here so a NEW drop can see what is already on the ground.
+   INVARIANT (the bug this exists to prevent): three additive layers per drop is fine, nine is
+   paper. One rare+ kill drops essence AND a coin AND possibly a weapon/potion/powerup, and they
+   scatter into a couple of metres of each other — so the 9 m pillar, the layer with by far the
+   most screen area, is the one that gets suppressed when it would be stacking on a neighbour.
+   Entries are pruned by "left the scene", not by an unregister call, so resetRun() wiping
+   game.powerups can never leak them. */
+const _liveDrops = [];
+const DROP_CROWD = 1.5;      // metres. Below this two pillars overlap for most of the camera arc.
+function _pruneDrops(){
+  for(let i=_liveDrops.length-1;i>=0;i--){
+    const d = _liveDrops[i];
+    if(d.dead || !d.group.parent) _liveDrops.splice(i,1);
+  }
+}
 export class Powerup {
   constructor(scene, pos, def){
     this.def = def; this.scene = scene; this.dead = false; this.t = Math.random()*7;
@@ -1053,6 +1095,15 @@ export class Powerup {
     const tx = pos.x + Math.cos(scatterA)*scatterDist, tz = pos.z + Math.sin(scatterA)*scatterDist;
     this.scatterTo = new THREE.Vector3(tx, groundHeight(tx,tz) + (pos.y - groundHeight(pos.x,pos.z)), tz);
     this.scatterT = 0; this.scatterDur = 0.35 + Math.random()*0.2;
+    // the pillar is decided against where this drop LANDS, not where the kill happened, because
+    // the scatter is what actually determines whether two of them share a metre of ground
+    _pruneDrops();
+    for(const d of _liveDrops){
+      const t = d.scatterTo || d.group.position;
+      const dx = t.x - tx, dz = t.z - tz;
+      if(dx*dx + dz*dz < DROP_CROWD*DROP_CROWD){ pillar.visible = false; break; }
+    }
+    _liveDrops.push(this);
     g.position.copy(this.scatterFrom);
     this.baseY = this.scatterTo.y;
     scene.add(g);
@@ -1076,7 +1127,7 @@ export class Powerup {
     const pulse = 1 + Math.sin(this.t*4)*0.08;
     this.orb.scale.setScalar(pulse);
     this.halo.material.opacity = 0.08 + Math.sin(this.t*4)*0.03;
-    this.pillar.material.opacity = 0.09 + Math.sin(this.t*3)*0.03;
+    if(this.pillar.visible) this.pillar.material.opacity = 0.09 + Math.sin(this.t*3)*0.03;
     // sparkle particles
     if(Math.random() < dt*7){
       game.particles.spawn(gp.x+(Math.random()-0.5)*1.2, gp.y+(Math.random()-0.5)*1.4, gp.z+(Math.random()-0.5)*1.2,

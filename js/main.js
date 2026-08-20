@@ -1,6 +1,6 @@
 // main.js — MYCELIUM: Spore Hunter — game orchestration
 import * as THREE from 'three';
-import { ParticlePool, RewardPops, FrameMarks } from './fx.js';
+import { ParticlePool, RewardPops, FrameMarks, glowTexture } from './fx.js';
 import { buildWorld, groundHeight, groundOnly, COLLIDERS, PARAMS as WORLD_PARAMS } from './world.js';
 import { Mushroom, Boss, GluttonBoss, Player, Powerup, POWERUPS, RARITIES, clearHeadHits } from './entities.js';
 import { buildInteractiveProps, PROP_PARAMS } from './props.js';
@@ -69,13 +69,21 @@ const progress = new Progress(); // meta progression (essences + mutations, loca
 /* ================= projectiles & rings ================= */
 const projPool = [];
 const projGeo = new THREE.SphereGeometry(0.28, 8, 6);
+const PROJ_HALO_OP = 0.35;          // the FAR value; the near fade in the update loop scales it
+const PROJ_HALO_NEAR = 0.7, PROJ_HALO_FULL = 3.0;   // metres: fully faded / fully lit
 function spawnProjectile(pos, dir, dmg, color, corrosive=false){
   let p = projPool.find(p=>!p.active);
   if(!p){
     if(projPool.length > 40) return;
     const mesh = new THREE.Mesh(projGeo, new THREE.MeshBasicMaterial({ color:0xffffff }));
-    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.5,8,6),
-      new THREE.MeshBasicMaterial({ transparent:true, opacity:0.35, blending:THREE.AdditiveBlending, depthWrite:false }));
+    /* Billboard carrying fx.glowTexture(), not a sphere shell. A shell is something the lens can
+       end up INSIDE — a projectile flies straight at the camera by design — and once it does, a
+       flat-alpha additive layer paints the whole viewport. The near fade below is the other half:
+       a quad whose world size we own still fills the frame at 30 cm. */
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map:glowTexture(),
+      transparent:true, opacity:PROJ_HALO_OP, blending:THREE.AdditiveBlending,
+      depthWrite:false, fog:false }));
+    halo.scale.setScalar(1.5);
     mesh.add(halo); scene.add(mesh);
     p = { mesh, halo, vel:new THREE.Vector3(), active:false, dmg:0, life:0, corrosive:false };
     projPool.push(p);
@@ -86,9 +94,18 @@ function spawnProjectile(pos, dir, dmg, color, corrosive=false){
 }
 const rings = [];
 const tmpV = new THREE.Vector3();
+/* Flat alpha on an additive ring is the mapless-halo bug in annulus form: a pale plate with a
+   hard edge on BOTH sides, and at 0.8 opacity a boss's three overlapping rings washed the ground
+   to white. RingGeometry's UVs are radial (they come off the vertex position over the outer
+   radius), so fx.glowTexture() maps straight onto it and the falloff becomes the ring — which is
+   why the opacity can drop to 0.5 and still read brighter. One shared geometry: the ring is the
+   same shape every time and only its scale animates. */
+const RING_OP = 0.5;
+const ringGeo = new THREE.RingGeometry(0.62, 1.38, 48);
 function spawnRing(pos, dmg, color, delay=0){
-  const mesh = new THREE.Mesh(new THREE.TorusGeometry(1, 0.35, 8, 40),
-    new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.8, blending:THREE.AdditiveBlending, depthWrite:false }));
+  const mesh = new THREE.Mesh(ringGeo,
+    new THREE.MeshBasicMaterial({ color, map:glowTexture(), transparent:true, opacity:RING_OP,
+      blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide, fog:false }));
   mesh.rotation.x = -Math.PI/2;
   mesh.position.copy(pos); mesh.position.y = groundHeight(pos.x,pos.z)+0.5;
   scene.add(mesh);
@@ -142,8 +159,10 @@ function levelUp(silent=false){
   audio.levelup();
   game.shake(0.3);
   const gp = p.group.position;
-  particles.burst(gp.clone().setY(gp.y+1.4), 40, {r:1,g:0.85,b:0.3, spread:5, size:11, life:1.1, grav:2.5, drag:0.97});
-  particles.burst(gp.clone().setY(gp.y+1.4), 18, {r:1,g:1,b:1, spread:2.5, size:7, life:0.7});
+  // 40+18 -> 20+10. fx.js caps sprite pixel size and cut per-sprite alpha ~4x; the cap only
+  // stays loose if the burst does not hand it fifty-eight overlapping size-11 sprites to clamp.
+  particles.burst(gp.clone().setY(gp.y+1.4), 20, {r:1,g:0.85,b:0.3, spread:5, size:11, life:1.1, grav:2.5, drag:0.97});
+  particles.burst(gp.clone().setY(gp.y+1.4), 10, {r:1,g:1,b:1, spread:2.5, size:7, life:0.7});
   const el = document.getElementById('levelup');
   el.textContent = '✦ LEVEL UP! — LV ' + game.level + ' ✦';
   el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
@@ -179,32 +198,72 @@ game.damageFlash = ()=>{
   el.style.opacity = 0.9; setTimeout(()=> el.style.opacity = 0, 140);
 };
 
-/* ---------- damage numbers ---------- */
-function damageNumber(worldPos, dmg, crit, isPlayer=false){
-  const v = worldPos.clone().project(camera);
-  if(v.z > 1) return;
+/* ---------- floating numbers ----------
+   INVARIANT (the bug this exists to prevent): a hit does not get its OWN node. A three-swing
+   combo on one mushroom used to append three overlapping nodes to <body> in 300 ms, an AoE
+   finisher appended one per enemy in the radius, and nothing bounded the total — so a fight put a
+   dozen unreadable numbers on screen and a dozen unbounded DOM appends into the frame that could
+   least afford them. Two rules instead:
+     - one live node per TARGET (per kind, for the untargeted text): a running total that grows in
+       place, so a combo reads as one rising number instead of a smear;
+     - FLOAT_MAX is the fallback ceiling. A node that would exceed it is dropped, not queued —
+       the 13th number in a 0.85 s window carries no information the first twelve didn't.
+   The node's own lifetime is never extended, so it always leaves after one animation. */
+const FLOAT_LIFE = 850;         // ms; must match the .dmg CSS animation length
+const FLOAT_MAX = 12;
+const floatNodes = new Map();   // key (target object, or a text string) -> {el, total, crit, born}
+let floatLive = 0;
+const PLAYER_KEY = {};          // stable identity for the player's own damage numbers
+const _fv = new THREE.Vector3();
+function floatNode(key, cls, text, x, y){
+  const now = performance.now();
+  const rec = floatNodes.get(key);
+  if(rec && now - rec.born < FLOAT_LIFE){    // coalesce into the node already floating
+    rec.el.textContent = text;
+    rec.el.className = cls;
+    rec.el.style.left = x+'px'; rec.el.style.top = y+'px';
+    return rec;
+  }
+  if(floatLive >= FLOAT_MAX) return null;    // hard cap: drop, never queue
   const el = document.createElement('div');
-  el.className = 'dmg' + (crit?' crit':'') + (isPlayer?' player':'');
-  el.textContent = crit ? dmg+'!' : dmg;
-  el.style.left = ((v.x*0.5+0.5)*innerWidth + (Math.random()-0.5)*40)+'px';
-  el.style.top = ((-v.y*0.5+0.5)*innerHeight)+'px';
+  el.className = cls;
+  el.textContent = text;
+  el.style.left = x+'px'; el.style.top = y+'px';
   document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 850);
+  floatLive++;
+  const fresh = { el, total:0, crit:false, born:now };
+  floatNodes.set(key, fresh);
+  setTimeout(()=>{ el.remove(); floatLive--;
+    if(floatNodes.get(key) === fresh) floatNodes.delete(key); }, FLOAT_LIFE);
+  return fresh;
+}
+// `target` is the identity the total accumulates against — the enemy that got hit. Callers that
+// have no target still coalesce, just per-kind.
+function damageNumber(worldPos, dmg, crit, isPlayer=false, target=null){
+  const v = _fv.copy(worldPos).project(camera);
+  if(v.z > 1) return;
+  const key = target || (isPlayer ? PLAYER_KEY : 'dmg');
+  const x = (v.x*0.5+0.5)*innerWidth + (Math.random()-0.5)*40;
+  const y = (-v.y*0.5+0.5)*innerHeight;
+  const rec = floatNodes.get(key);
+  const running = (rec && performance.now() - rec.born < FLOAT_LIFE) ? rec : null;
+  const total = (running ? running.total : 0) + dmg;
+  const isCrit = crit || (running ? running.crit : false);
+  const out = floatNode(key, 'dmg' + (isCrit?' crit':'') + (isPlayer?' player':''),
+    isCrit ? total+'!' : ''+total, x, y);
+  if(out){ out.total = total; out.crit = isCrit; }
 }
 game.damageNumber = damageNumber;
 
 /* ---------- harvestable mushrooms + contracts ---------- */
+// same budget and the same one-node rule as damageNumber, keyed on the text: harvesting a cluster
+// fires '+1 Chanterelle' four times in a second, and that is one line moving, not four.
 function pickupText(worldPos, text, color){
-  const v = worldPos.clone().project(camera);
+  const v = _fv.copy(worldPos).project(camera);
   if(v.z > 1) return;
-  const el = document.createElement('div');
-  el.className = 'dmg harvest';
-  el.style.color = color;
-  el.textContent = text;
-  el.style.left = ((v.x*0.5+0.5)*innerWidth)+'px';
-  el.style.top = ((-v.y*0.5+0.5)*innerHeight)+'px';
-  document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 850);
+  const rec = floatNode('t:'+text, 'dmg harvest', text,
+    (v.x*0.5+0.5)*innerWidth, (-v.y*0.5+0.5)*innerHeight);
+  if(rec) rec.el.style.color = color;
 }
 /* ---------- hover tags (item 47) ----------
    Naming the thing is not enough — the tag names the VERB. "🥚 Sealed cyst" tells you nothing;
@@ -1620,7 +1679,7 @@ function victory(){
   game.state = 'win';
   audio.victory();
   game.shake(1);
-  particles.burst(game.boss.group.position.clone().setY(4), 60, {r:1,g:0.85,b:0.3, spread:8, size:12, life:1.6, grav:4});
+  particles.burst(game.boss.group.position.clone().setY(4), 30, {r:1,g:0.85,b:0.3, spread:8, size:12, life:1.6, grav:4});  // 60 -> 30, see levelUp()
   progress.advanceDepth(); // the NEXT world starts one notch harder
   // stash the current build so "NEW HUNT (NEW WORLD)" continues this run instead of starting
   // over — only dying resets level/loadout (gameOver clears this same key)
@@ -2013,6 +2072,9 @@ function tick(){
       pr.life -= sdt;
       pr.mesh.position.addScaledVector(pr.vel, sdt);
       const gp = pr.mesh.position;
+      // fade anything that gets between the lens and the world (same rule as fx.js's puffs)
+      pr.halo.material.opacity = PROJ_HALO_OP *
+        THREE.MathUtils.smoothstep(gp.distanceTo(camera.position), PROJ_HALO_NEAR, PROJ_HALO_FULL);
       if(gp.y < groundOnly(gp.x,gp.z)+0.2 || pr.life<=0){ pr.active=false; pr.mesh.visible=false;
         particles.burst(gp, 6, {r:0.8,g:0.4,b:1, spread:2, size:6, life:0.4});
         if(pr.corrosive) spawnPuddle(gp.clone(), pr.dmg*0.6, 2, 4.5);
@@ -2028,7 +2090,7 @@ function tick(){
       if(r.delay > 0){ r.delay -= sdt; r.mesh.scale.setScalar(0.1); continue; }
       r.r += r.speed*sdt;
       r.mesh.scale.set(r.r, r.r, 1);
-      r.mesh.material.opacity = Math.max(0, 0.8 - r.r/14);
+      r.mesh.material.opacity = Math.max(0, RING_OP * (1 - r.r/11.2));
       const pd = Math.hypot(p.group.position.x-r.mesh.position.x, p.group.position.z-r.mesh.position.z);
       if(!r.hitDone && Math.abs(pd - r.r) < 0.9 && p.grounded){
         r.hitDone = true; p.hurt(r.dmg, r.mesh.position, game);
