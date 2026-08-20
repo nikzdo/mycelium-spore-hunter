@@ -73,7 +73,16 @@ const projPool = [];
 const projGeo = new THREE.SphereGeometry(0.28, 8, 6);
 const PROJ_HALO_OP = 0.35;          // the FAR value; the near fade in the update loop scales it
 const PROJ_HALO_NEAR = 0.7, PROJ_HALO_FULL = 3.0;   // metres: fully faded / fully lit
-function spawnProjectile(pos, dir, dmg, color, corrosive=false){
+/* FRIENDLY vs HOSTILE, and this flag is the whole reason two weapon finishers were broken.
+   Both pools are shared between the bosses and the PLAYER — Elder Myconid's barrage and the Golden
+   Sporecleaver's nova spawn from the same function — but the update loop only ever tested collision
+   against the player. Measured before the fix: an enemy 6.5 m away took exactly 0 from a nova of
+   eight projectiles and 0 from a shockwave ring, while the player took 25 from their own nova (one
+   projectile's worth; the i-frame from that hit swallowed the other seven). So both finishers were
+   a visual effect that mildly hurt their own user.
+   `friendly` is opt-IN and defaults to false, so every existing boss call site keeps its exact
+   behaviour and only the two player call sites change. */
+function spawnProjectile(pos, dir, dmg, color, corrosive=false, friendly=false){
   let p = projPool.find(p=>!p.active);
   if(!p){
     if(projPool.length > 40) return;
@@ -87,12 +96,13 @@ function spawnProjectile(pos, dir, dmg, color, corrosive=false){
       depthWrite:false, fog:false }));
     halo.scale.setScalar(1.5);
     mesh.add(halo); scene.add(mesh);
-    p = { mesh, halo, vel:new THREE.Vector3(), active:false, dmg:0, life:0, corrosive:false };
+    p = { mesh, halo, vel:new THREE.Vector3(), active:false, dmg:0, life:0, corrosive:false, friendly:false };
     projPool.push(p);
   }
   p.mesh.material.color.set(color); p.halo.material.color.set(color);
   p.mesh.position.copy(pos); p.vel.copy(dir).multiplyScalar(14);
   p.dmg = dmg; p.life = 3.5; p.active = true; p.mesh.visible = true; p.corrosive = corrosive;
+  p.friendly = friendly;      // pooled object: this MUST be reset on every spawn, not just set once
 }
 const rings = [];
 const tmpV = new THREE.Vector3();
@@ -104,14 +114,20 @@ const tmpV = new THREE.Vector3();
    same shape every time and only its scale animates. */
 const RING_OP = 0.5;
 const ringGeo = new THREE.RingGeometry(0.62, 1.38, 48);
-function spawnRing(pos, dmg, color, delay=0){
+function spawnRing(pos, dmg, color, delay=0, friendly=false){
   const mesh = new THREE.Mesh(ringGeo,
     new THREE.MeshBasicMaterial({ color, map:glowTexture(), transparent:true, opacity:RING_OP,
       blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide, fog:false }));
   mesh.rotation.x = -Math.PI/2;
   mesh.position.copy(pos); mesh.position.y = groundHeight(pos.x,pos.z)+0.5;
   scene.add(mesh);
-  rings.push({ mesh, r:1, dmg, delay, hitDone:false, speed:9 });
+  /* `hit` is a Set for the friendly case and `hitDone` a boolean for the hostile one, and the
+     asymmetry is deliberate: a boss ring is aimed at ONE target and should land once, but a player
+     shockwave expands through a crowd and has to be able to touch every creature it passes —
+     once each. One boolean would have made it stop at the first mushroom it swept over.
+     Allocating a Set here is fine: rings spawn on a finisher, never per frame. */
+  rings.push({ mesh, r:1, dmg, delay, hitDone:false, speed:9, friendly,
+    hit: friendly ? new Set() : null });
 }
 // lingering ground hazard (Rotmaw's toxic puddles) — ticks damage while the player stands in it
 const puddles = [];
@@ -171,17 +187,52 @@ function levelUp(silent=false){
   announce('Healed to full — push deeper while it lasts', 'good');
 }
 
-/* ---------- mutations ---------- */
+/* ---------- mutations ----------
+
+   THIS FUNCTION MUST BE IDEMPOTENT, and it was not. It runs once from resetRun() on a fresh
+   Player, but ALSO every time the player buys a mutation in the Tome — on the same Player, mid-run.
+   With `*=` and unconditional re-application that compounded, and the compounding was exploitable:
+
+     - buying crimson three times gave dmgMult 1.1 x 1.2 x 1.3 = 1.716 instead of 1.30;
+     - `if(t('ironstem')) { maxHp *= ...; hp = maxHp; }` re-ran on EVERY purchase of ANY mutation,
+       so with ironstem owned, buying the cheapest thing in the Tome was a permanent max-HP
+       inflation plus a FULL HEAL — mid-boss, repeatable;
+     - every purchase re-granted all of elderblood's silent level-ups.
+
+   The fix is to apply the DELTA since the last application rather than the whole thing each time.
+   `mutApplied` remembers the tiers already folded in, keyed on the Player object so a new hunt
+   starts from zero without needing anyone to remember to reset it. Ratios rather than absolutes
+   because maxHp is also grown by level-ups, so it cannot be recomputed from a stored baseline
+   without wiping those. */
+let mutApplied = null;      // { player, crimson, swiftgill, ironstem, elderblood }
 function applyMutations(){
   const p = game.player; if(!p) return;
   const t = id=>progress.tierOf(id);
-  p.dmgMult *= 1 + 0.10*t('crimson');
-  p.speedMult *= 1 + 0.08*t('swiftgill');
-  if(t('ironstem')){ p.maxHp = Math.round(p.maxHp*(1+0.15*t('ironstem'))); p.hp = p.maxHp; }
+  const now = { crimson:t('crimson'), swiftgill:t('swiftgill'),
+                ironstem:t('ironstem'), elderblood:t('elderblood') };
+  if(!mutApplied || mutApplied.player !== p)
+    mutApplied = { player:p, crimson:0, swiftgill:0, ironstem:0, elderblood:0 };
+  const was = mutApplied;
+  if(now.crimson !== was.crimson)
+    p.dmgMult *= (1 + 0.10*now.crimson) / (1 + 0.10*was.crimson);
+  if(now.swiftgill !== was.swiftgill)
+    p.speedMult *= (1 + 0.08*now.swiftgill) / (1 + 0.08*was.swiftgill);
+  if(now.ironstem !== was.ironstem){
+    const newMax = Math.round(p.maxHp * (1 + 0.15*now.ironstem) / (1 + 0.15*was.ironstem));
+    // heal by the DIFFERENCE only. Setting hp = maxHp here is what turned any purchase into a
+    // free full heal; a tier of extra max HP should hand you that much HP, not top you off.
+    const gain = newMax - p.maxHp;
+    p.maxHp = newMax;
+    if(gain > 0) p.hp = Math.min(p.maxHp, p.hp + gain);
+    else p.hp = Math.min(p.hp, p.maxHp);
+  }
+  // absolute, so these were already idempotent
   p.magnetBoost = 0.4*t('sporelord');
   game.dropBonus = 0.10*t('luckyspore');
-  // elder blood: start at higher level (silent level-ups)
-  for(let i=0;i<t('elderblood');i++) levelUp(true);
+  // elder blood: start at a higher level. Only the NEW tiers grant levels.
+  for(let i=was.elderblood; i<now.elderblood; i++) levelUp(true);
+  mutApplied = { player:p, crimson:now.crimson, swiftgill:now.swiftgill,
+                 ironstem:now.ironstem, elderblood:now.elderblood };
 }
 
 // item 48: an announcement carries its kind, and its copy names the counterplay. "You took
@@ -2812,11 +2863,36 @@ function tick(){
         THREE.MathUtils.smoothstep(gp.distanceTo(camera.position), PROJ_HALO_NEAR, PROJ_HALO_FULL);
       if(gp.y < groundOnly(gp.x,gp.z)+0.2 || pr.life<=0){ pr.active=false; pr.mesh.visible=false;
         particles.burst(gp, 6, {r:0.8,g:0.4,b:1, spread:2, size:6, life:0.4});
-        if(pr.corrosive) spawnPuddle(gp.clone(), pr.dmg*0.6, 2, 4.5);
+        // a friendly projectile must not leave a puddle: puddles only ever damage the PLAYER, so
+        // one dropped by the player's own finisher would be a hazard they made for themselves
+        if(pr.corrosive && !pr.friendly) spawnPuddle(gp.clone(), pr.dmg*0.6, 2, 4.5);
         continue; }
-      tmpV.copy(p.group.position); tmpV.y += 1;
-      if(gp.distanceTo(tmpV) < 1.1){
-        p.hurt(pr.dmg, gp, game); pr.active=false; pr.mesh.visible=false;
+      if(pr.friendly){
+        // scaled by the target: a Mythic is 2.35x scale, and a fixed 1.1 m radius means a
+        // projectile can pass visibly through a big creature without touching it.
+        // SQUARED distance, no sqrt: this runs per projectile per enemy per SUBSTEP, so a nova of
+        // eight into a crowd of sixty is ~2900 tests a frame. Same rule surfaceAt() follows.
+        for(const m of game.enemies){
+          if(m.dead) continue;
+          const rr = 1.1 + 0.9*m.R.scale;
+          const mp = m.group.position;
+          const ddx = gp.x - mp.x, ddz = gp.z - mp.z;
+          if(ddx*ddx + ddz*ddz > rr*rr) continue;          // cheap plan test first
+          const ddy = gp.y - (mp.y + 1.0*m.R.scale);
+          if(ddx*ddx + ddy*ddy + ddz*ddz > rr*rr) continue;
+          m.hit(pr.dmg, gp, game, 1);
+          // through the same door a sword hit uses, so a nova kill pays essence, coins and XP and
+          // counts toward the chain exactly like any other hit the player landed
+          if(game.comboHit) game.comboHit({ killed: m.dead });
+          pr.active=false; pr.mesh.visible=false;
+          particles.burst(gp, 6, {r:1,g:0.8,b:0.4, spread:2, size:6, life:0.4});
+          break;
+        }
+      } else {
+        tmpV.copy(p.group.position); tmpV.y += 1;
+        if(gp.distanceTo(tmpV) < 1.1){
+          p.hurt(pr.dmg, gp, game); pr.active=false; pr.mesh.visible=false;
+        }
       }
     }
     // AOE rings
@@ -2826,9 +2902,29 @@ function tick(){
       r.r += r.speed*sdt;
       r.mesh.scale.set(r.r, r.r, 1);
       r.mesh.material.opacity = Math.max(0, RING_OP * (1 - r.r/11.2));
-      const pd = Math.hypot(p.group.position.x-r.mesh.position.x, p.group.position.z-r.mesh.position.z);
-      if(!r.hitDone && Math.abs(pd - r.r) < 0.9 && p.grounded){
-        r.hitDone = true; p.hurt(r.dmg, r.mesh.position, game);
+      if(r.friendly){
+        /* Each creature once, tracked per ring. No `p.grounded` gate either: that clause exists so
+           a player can DASH-JUMP a boss ring, and a shockwave the player themselves cast should not
+           be dodgeable by the thing it is aimed at. */
+        for(const m of game.enemies){
+          if(m.dead || r.hit.has(m)) continue;
+          // a ring is a BAND, so this one genuinely needs the distance rather than its square —
+          // but the band test can still reject on squares first, which is what skips the sqrt for
+          // every creature that is nowhere near the expanding edge.
+          const band = 0.9 + 0.6*m.R.scale;
+          const mp = m.group.position, rp = r.mesh.position;
+          const ddx = mp.x - rp.x, ddz = mp.z - rp.z, d2 = ddx*ddx + ddz*ddz;
+          const lo = r.r - band, hi = r.r + band;
+          if(d2 > hi*hi || (lo > 0 && d2 < lo*lo)) continue;
+          r.hit.add(m);
+          m.hit(r.dmg, r.mesh.position, game, 1.2);   // knocked outward from the ring's centre
+          if(game.comboHit) game.comboHit({ killed: m.dead });
+        }
+      } else {
+        const pd = Math.hypot(p.group.position.x-r.mesh.position.x, p.group.position.z-r.mesh.position.z);
+        if(!r.hitDone && Math.abs(pd - r.r) < 0.9 && p.grounded){
+          r.hitDone = true; p.hurt(r.dmg, r.mesh.position, game);
+        }
       }
       if(r.r > 14){ scene.remove(r.mesh); rings.splice(i,1); }
     }

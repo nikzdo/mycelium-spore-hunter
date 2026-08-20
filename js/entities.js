@@ -1087,8 +1087,11 @@ export class Player {
             } else if(fin.type==='nova'){
               for(let i=0;i<fin.count;i++){
                 const ang = (i/fin.count)*Math.PI*2;
+                // friendly: this is the PLAYER's nova. Shared pool with the boss barrage, so the
+                // flag is the only thing that decides who it can hit — see spawnProjectile.
                 game.spawnProjectile(g.position.clone().setY(g.position.y+1),
-                  new THREE.Vector3(Math.sin(ang),0,Math.cos(ang)), Math.round(dmgBase*fin.mult), wdef.color);
+                  new THREE.Vector3(Math.sin(ang),0,Math.cos(ang)), Math.round(dmgBase*fin.mult), wdef.color,
+                  false, true);
               }
             } else if(fin.type==='devour' && killedAny){
               this.hp = Math.min(this.maxHp, this.hp + this.maxHp*fin.killHealFrac);
@@ -1096,7 +1099,8 @@ export class Player {
           }
         }
         if(isFinisher && fin && fin.type==='shockwave'){
-          game.spawnRing(g.position.clone(), Math.round(dmgBase*fin.mult), wdef.color);
+          // friendly: the PLAYER's shockwave. Same shared pool as the boss ring burst.
+          game.spawnRing(g.position.clone(), Math.round(dmgBase*fin.mult), wdef.color, 0, true);
           game.audio.hit(); game.shake(0.4);
         }
       }

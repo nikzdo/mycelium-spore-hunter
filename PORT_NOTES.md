@@ -337,3 +337,49 @@ work provably is, not by a speedup that cannot appear here.
   and the bob-tracked `bot`. Not worth 23 calls.
 - **Ink hull merging.** Blocked by the same per-part animation as the fauna merge.
 - **groundHeight caching.** 0.31 us, and the call sites that run hottest are now throttled.
+
+## OPTIMIZATION ROUND 2 + damage audit
+
+### Damage bugs found and fixed
+1. **Both projectile finishers dealt zero damage to enemies.** `projPool` and `rings` are shared
+   between the bosses and the player, but the update loop only ever tested collision against the
+   PLAYER. Measured before: an enemy 6.5 m away took exactly 0 from a nova of eight projectiles and
+   0 from a shockwave ring, while the player took 25 from their own nova (one projectile's worth —
+   the i-frame from that hit swallowed the other seven). Golden Sporecleaver and Regal Warblade both
+   had a legendary finisher that was a visual effect which mildly hurt its own user. Fixed with an
+   opt-in `friendly` flag so every boss call site is untouched.
+   After: nova 8/8 targets hit for exactly 40 each; shockwave hits targets at 3/5/7 m for 55 each,
+   once apiece; hostile ring still deals 27 to the player; friendly ring deals 0 to the player.
+2. **`applyMutations()` was not idempotent, and it was exploitable.** It runs from `resetRun()` on a
+   fresh Player but ALSO on every mutation purchase in the Tome, on the same Player, with `*=`:
+   - crimson x3 gave dmgMult 1.1 x 1.2 x 1.3 = **1.716** instead of 1.30;
+   - `if(t('ironstem')){ maxHp *= ...; hp = maxHp; }` re-ran on EVERY purchase of ANY mutation, so
+     owning ironstem made buying the cheapest thing in the Tome a permanent max-HP inflation **plus a
+     full heal**, repeatable mid-boss;
+   - every purchase re-granted all of elderblood's silent level-ups.
+   Now applies only the DELTA since the last application, keyed on the Player object. Verified
+   through the real Tome button: 1.1 -> 1.2 -> 1.3, and buying at 20/115 HP leaves HP at 20.
+
+### Audited and found correct
+The damage formula multiplies every modifier exactly once — weapon dmg, dmgMult, gear mult (stars +
+levels), power potion, damage orb, armour dmg, combo-3 x2.2, then jitter and crit. Measured ratios
+at natural damage levels landed within ~2.5% of expected, the residual being integer rounding at a
+base of 27. Armour `dmgReduction` is capped at 0.6 so armour cannot zero out damage. All kill paths
+(melee, burst, nova, shockwave, burn tick, ring cone) route through `Mushroom.hit` -> `die` ->
+`game.onKill`, so essence/coins/XP/counters cannot diverge by damage source.
+
+**Harness warning:** driving swings by writing `attackT`/`didHit` and scaling `dmgMult` to 40 gives
+garbage — knockback is `6 + dmg*0.15`, so at high damage the target is launched out of range and
+swings 2-3 of a combo miss. Measure damage at NATURAL values and accept the rounding.
+
+### Optimization
+- Squared-distance early-outs in the two new friendly-collision loops. They run per projectile per
+  enemy per SUBSTEP: a nova of eight into a crowd of sixty is ~2900 tests a frame, and `distanceTo`
+  and `Math.hypot` were both taking a sqrt each.
+- **The biggest remaining bucket, measured and NOT taken: `world` at 117 draw calls across 199
+  separate scene roots** — mostly 3-mesh groups of ~190 triangles and single meshes of 24-34
+  triangles, each costing 2-5 calls. The fix is exactly the pattern rockgen already proves (133
+  rocks -> 3 calls: merged fill + separately merged ink hull, tint baked into vertex colours).
+  That is a large world.js refactor across many prop types for draw calls this machine cannot feel
+  (see round 1: vsync-locked at 8.3 ms up to 14.25 megapixels), so it is left documented rather than
+  attempted. It is the right next optimization if a weaker device ever drops frames.
