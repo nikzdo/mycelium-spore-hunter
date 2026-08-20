@@ -68,7 +68,13 @@ export const PARAMS = {
      hour — a noon world wants dark canopies and a gloaming world pale ones, and one authored
      range cannot be both. `theme.canopyL` is the drop-in [min, var] pair if a panel ever needs it. */
   // atmosphere + light rig (items 06, 43)
-  fogDensity: 0.0030, shadowMap: 2048, shadowBox: 120, shadowBias: -0.0007, shadowNormalBias: 0.4,
+  // shadowBox is the RESOLUTION dial, not a coverage dial: main.js retargets the sun at the player
+  // every frame, so the box only ever has to cover what is near them. The same map over a smaller
+  // box is a sharper shadow everywhere one can actually be seen, and sharpness is most of what
+  // separates "shadow" from "smudge". 120 -> 95 takes 2048 from 8.5 to 10.8 texels per metre.
+  // Not tighter: a shadow outside the box stops existing, and at 95 m that edge is deep in the fog,
+  // whereas at 70 it fell on ground the player can still read and the shadows visibly popped in.
+  fogDensity: 0.0030, shadowMap: 2048, shadowBox: 95, shadowBias: -0.0007, shadowNormalBias: 0.4,
   // ravine: the bridge-crossing layout feature. not every world gets one.
   ravChance: 0.6, ravDMin: 45, ravDVar: 70, ravSegMin: 30, ravSegVar: 30,
   ravBend: 1.6, ravWMin: 5, ravWVar: 3, ravDepthMin: 5, ravDepthVar: 3,

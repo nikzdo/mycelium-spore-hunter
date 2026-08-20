@@ -134,6 +134,47 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   to{box-shadow:0 0 0 6px rgba(255,120,100,.55),0 3px 0 var(--ink)}}
 @media (prefers-reduced-motion: reduce){ .potslot.urgent{animation:none} }
 #contracts{display:flex;flex-direction:column;gap:6px}
+/* ---- the hit combo counter ----
+   Everything here animates via transform/opacity/filter only, so a 40-hit chain never touches
+   layout. The one colour the whole widget wears is --ch, set per tier from main.js, which is why
+   the number, the label and the bar can never disagree about what tier you are on.
+   `transform-origin: left center` on the wrapper: a counter that grows from its centre drifts
+   away from the number's own left edge as the digit count changes, and the pop then reads as the
+   whole widget sliding rather than punching. */
+#combo{position:absolute;left:2.6%;top:37%;pointer-events:none;
+  opacity:0;transform:translateX(-14px) scale(.72) rotate(-3deg);
+  transition:opacity .16s ease-out, transform .22s cubic-bezier(.2,1.5,.35,1)}
+#combo.on{opacity:1;transform:translateX(0) scale(1) rotate(-3deg)}
+/* the lapse: fall away and out, so a chain ending has a shape instead of just vanishing */
+#combo.done{opacity:0;transform:translateX(0) translateY(16px) scale(.86) rotate(-3deg);
+  transition:opacity .34s ease-in, transform .34s ease-in}
+#combowrap{display:flex;align-items:baseline;gap:2px;transform-origin:left center}
+#combonum{font-family:'Gochi Hand',cursive;font-size:76px;line-height:.86;font-weight:400;
+  color:var(--ch,#fff6e3);font-variant-numeric:tabular-nums;
+  /* a heavy ink outline, not a glow: the number sits over open terrain of any brightness and the
+     toon look is drawn with ink, so it is drawn with ink here too */
+  text-shadow:0 0 0 var(--ink),3px 0 0 var(--ink),-3px 0 0 var(--ink),0 3px 0 var(--ink),
+    0 -3px 0 var(--ink),3px 3px 0 var(--ink),-3px 3px 0 var(--ink),3px -3px 0 var(--ink),
+    -3px -3px 0 var(--ink),0 7px 0 rgba(0,0,0,.35)}
+#combox{font-family:'Gochi Hand',cursive;font-size:38px;line-height:1;color:var(--ch,#fff6e3);
+  opacity:.85;text-shadow:2px 0 0 var(--ink),-2px 0 0 var(--ink),0 2px 0 var(--ink),0 -2px 0 var(--ink)}
+/* The label needs the SAME multi-directional ink as the number, not a drop shadow. It sits over
+   whatever terrain the fight happens on — measured against dense grass, a single 0 2px shadow left
+   "BRUTAL" almost unreadable while the outlined number beside it stayed crisp. Letter-spacing is
+   what makes the outline affordable here: spaced caps have gaps for the ink to sit in. */
+#combolabel{margin-top:-1px;font-size:14px;font-weight:700;letter-spacing:.3em;
+  color:var(--ch,#fff6e3);
+  text-shadow:2px 0 0 var(--ink),-2px 0 0 var(--ink),0 2px 0 var(--ink),0 -2px 0 var(--ink),
+    2px 2px 0 var(--ink),-2px 2px 0 var(--ink),2px -2px 0 var(--ink),-2px -2px 0 var(--ink)}
+#combobar{margin-top:5px;width:104px;height:6px;border:2px solid var(--ink);border-radius:999px;
+  background:rgba(0,0,0,.45);overflow:hidden}
+/* scaleX from the left, driven by ONE WAAPI animation per hit rather than a width write per frame */
+#combofill{height:100%;width:100%;transform-origin:left center;background:var(--ch,#fff6e3);
+  border-radius:999px}
+@media (prefers-reduced-motion: reduce){
+  #combo,#combo.done{transition:opacity .18s linear}
+}
+
 /* item 05 — the elemental ring chip. Anchored to the bottom-right of the action bar, so the two
    things you spend in a fight (potions, ring) are in one place. `firing` is the only animated
    state: a charge that visibly drains is what makes "seconds of holding" legible as a cost. */
@@ -452,6 +493,13 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   #curow{gap:5px}
   #curow .cur{font-size:13px;padding:2px 6px}
   #worldline{font-size:10px;margin-top:7px}
+  /* At 700px the harvest prompt (top 51%, up to 86vw wide) reaches most of the way across, so the
+     counter moves UP out of its band and shrinks — it is still the biggest thing on the left. */
+  #combo{left:2%;top:25%}
+  #combonum{font-size:54px}
+  #combox{font-size:28px}
+  #combolabel{font-size:11px;letter-spacing:.22em}
+  #combobar{width:82px}
   /* At this width the strip ABOVE the action bar is already taken — #bottomstack (zone +
      objective) ends 4px from where a chip placed there would start, and the objective line is a
      wrapping sentence, so "just nudge it up" only moves the collision. The action bar is centred
@@ -558,6 +606,16 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   <div id="bottomstack">
     <div id="zone"></div>
     <div id="objective">Hunt the Bloom</div>
+  </div>
+  <!-- The hit combo. Mid-left because it is the only large clear space on screen: the right
+       column is the wallet, the bottom is the action bar and the objective, the top-left is the
+       health/XP/dash stack. Deliberately OUTSIDE #hud's flow so its pop animation cannot reflow
+       anything — it scales and rotates, and a transform on an absolutely-positioned element is a
+       compositor-only change. -->
+  <div id="combo">
+    <div id="combowrap"><span id="combonum">0</span><span id="combox">×</span></div>
+    <div id="combolabel">HITS</div>
+    <div id="combobar"><div id="combofill"></div></div>
   </div>
   <!-- item 05 — the elemental ring slot. It sits beside the potion bar rather than in it because
        it is not a potion: it is HELD, it has a charge rather than a count, and it has exactly one

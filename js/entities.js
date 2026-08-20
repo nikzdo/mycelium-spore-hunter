@@ -1033,6 +1033,8 @@ export class Player {
             if(game.addXP) game.addXP(e.isBoss ? 'boss' : e.rarity);
             _tip.copy(e.group.position); _tip.y += 2*e.R.scale;
             game.damageNumber(_tip, dmg, crit, false, e);   // keyed on the enemy: a combo is ONE growing number
+            // one per ENEMY struck, not one per swing: see the rule list on game.comboHit
+            if(game.comboHit) game.comboHit({ crit, killed: e.dead });
             hitAny = true; if(crit) critAny = true;
             hitList.push(e);
           }
@@ -1052,6 +1054,7 @@ export class Player {
                   e.hit(dmg2, g.position, game, 1);
                   _tip.copy(e.group.position); _tip.y += 2*e.R.scale;
                   game.damageNumber(_tip, dmg2, false, e);
+                  if(game.comboHit) game.comboHit({ killed: e.dead });
                 }
               }
             } else if(fin.type==='chainhit' && critAny){

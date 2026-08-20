@@ -44,6 +44,26 @@ what keep it fast:
 - **Diff-based DOM updates.** HUD widgets touch the DOM only when their displayed state actually
   changes, never once per frame.
 
+## Shadow policy
+
+Two rules, and they are why the ground reads as shadow rather than as dirt:
+
+1. **A thing casts only if its shadow would read as a shape.** The rig is one 2048 map over a
+   190 m ortho box — about 10.8 texels per metre — so a 40 cm prop projects into four texels of
+   smear. `shadowize()` enforces a minimum caster radius (`SHADOW_MIN_R`); everything under it
+   still *receives*, which is the effect that actually matters. Subtrees whose whole point is to be
+   a small solid object can opt down (`{ minR }`) — props.js does, because a floating pod's shadow
+   is how the player reads that it is floating.
+2. **One shadow per character.** Anything that walks carries a blob (a soft mapped disc that
+   tracks the surface). Letting it also cast into the map gives every creature two unrelated
+   shadows — a contact disc plus a long skewed projection — on exactly the things the eye follows.
+   The blob wins; characters pass `{ noCast: true }`. Bosses are the deliberate exception.
+
+`shadowBox` in `world.js` PARAMS is a **resolution** dial, not a coverage dial: main.js retargets
+the sun at the player every frame, so shrinking the box sharpens every shadow you can actually see.
+Don't shrink it past the fog, though — a shadow outside the box stops existing, and the edge
+becomes visible popping.
+
 ## Habits
 
 Adopted from a code review of a sibling procedural-island prototype. They are why that file stays

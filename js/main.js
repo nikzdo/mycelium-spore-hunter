@@ -476,7 +476,10 @@ function buildRunContent(){
   for(const v of props.vents) game.hoverTags.register(v.mesh, ()=> '🌀 Vent — stand on it, [' + INTERACT_LABEL + '] to ride it', { range:20, lift:2.2 });
   for(const t of props.treasures) game.hoverTags.register(t.mesh, m=>props.labelFor(m), { range:24, lift:1.4 });
   for(const root of fauna.hoverTargets()) game.hoverTags.register(root, o=>fauna.labelFor(o), { range:20, lift:1.4 });
-  shadowize(props.root); shadowize(fauna.group);
+  // props opt BELOW the size floor: a pod is a 1 m flower hanging in the air, and its shadow
+  // on the ground is how the player reads that it is hanging there at all.
+  shadowize(props.root, { minR: 0.5 });
+  shadowize(fauna.group, { noCast: true });         // rule 2: critters carry their own blobs
 }
 // dev-panel prerequisite: every live tuning object in one place, same convention as world.PARAMS
 game.tuning = { world: WORLD_PARAMS, props: PROP_PARAMS, fauna: FAUNA };
@@ -662,10 +665,152 @@ function payoutStomp(s){
     // ring and never meets the other
     dropRing(c.group.position, RINGS[game.ringsFound % RINGS.length].id);
   }
+  game.comboHit({ killed: true });          // landing on one is a hit you aimed
   if(r.chain > 0) audio.gearUp(Math.min(6, r.chain + 1)); else audio.powerup();
   game.shake(0.12 + Math.min(0.28, r.chain*0.08));
   game.hitStop(0.03);
   updateHUD();
+}
+
+/* ================= the hit combo counter =================
+   ONE CHOKEPOINT, and it has to be one, because "a hit" is reported from five different places
+   (three melee paths, the finisher burst, a stomp) and a counter that half of them forget to call
+   is worse than no counter: it reads as the game dropping your inputs.
+
+   WHAT COUNTS AS A HIT is the whole design decision here, so it is written down rather than left
+   to whichever call site happened to get wired:
+     - ONE PER ENEMY STRUCK, not one per swing. A cleave that catches three mushrooms is worth
+       three, which is what makes wading into a group feel different from duelling — and it is the
+       only rule under which the number ever reaches the high tiers.
+     - A STOMP COUNTS. Landing on a critter is a hit you aimed, and it is the one hit you can land
+       while airborne, so it is how a combo survives a gap between enemies.
+     - CONTINUOUS DAMAGE DOES NOT COUNT. The ring cone and the burn tick every frame or every
+       0.4 s, so counting them would turn "hold Z" into a number that scrolls, and the tier names
+       would mean nothing. Instead the cone KEEPS THE COMBO ALIVE without incrementing it
+       (comboKeepAlive) — you are still fighting, so you should not be punished for it, but the
+       ring is not a way to farm the counter either.
+
+   PURELY A DISPLAY. It grants no damage bonus and gates nothing: this is a readout of something
+   the player is already doing, and hanging a multiplier off it would silently rebalance every
+   weapon in the game. */
+const COMBO_WINDOW = 2.8;        // seconds since the last hit before the chain lapses
+const COMBO_SHOW_AT = 2;         // a "1x combo" is not a combo — the widget appears on the second hit
+/* Tiers are FAR apart on purpose. If the labels came every three hits they would flicker past and
+   stop being rewards; at 5/10/18/30/50 each one is a thing that happens rarely enough to notice,
+   and 50 is deliberately only reachable in a real crowd. `hue` is the one colour the whole widget
+   takes, so the tier is legible from the number alone without reading the word. */
+const COMBO_TIERS = [
+  { at:0,  label:'HITS',   hue:'#fff6e3' },
+  { at:5,  label:'NICE',   hue:'#9be26e' },
+  { at:10, label:'SHARP',  hue:'#6bd8ff' },
+  { at:18, label:'BRUTAL', hue:'#ffd94a' },
+  { at:30, label:'SAVAGE', hue:'#ff8a3a' },
+  { at:50, label:'UNREAL', hue:'#ff5ad0' },
+];
+function comboTierOf(n){
+  let i = 0;
+  for(let k=0;k<COMBO_TIERS.length;k++) if(n >= COMBO_TIERS[k].at) i = k;
+  return i;
+}
+const combo = { n:0, t:0, best:0, tier:0 };
+game.comboState = combo;
+
+// Respect the OS switch. Checked once and cached: this is read on every hit, and matchMedia in a
+// hot path is a needless layout-adjacent call.
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let comboDrain = null;           // the live WAAPI drain animation, so a new hit can cancel it
+let comboShown = false, comboNumShown = '', comboLabelShown = '', comboTierShown = -1;
+
+/* THE chokepoint. `opts.crit` and `opts.killed` only change how hard it pops — the count is the
+   count. Returns the new total so a caller can size its own feedback off the same number. */
+game.comboHit = (opts)=>{
+  if(game.state !== 'play') return combo.n;
+  combo.n++;
+  combo.t = COMBO_WINDOW;
+  if(combo.n > combo.best) combo.best = combo.n;
+  const tier = comboTierOf(combo.n);
+  const tierUp = tier > combo.tier;
+  combo.tier = tier;
+  // a tier-up is the only moment this system makes a sound, and it rises with the tier so the
+  // ladder is audible without a label being read
+  if(tierUp && combo.n >= COMBO_SHOW_AT){ audio.gearUp(Math.min(6, tier + 1)); game.shake(0.12); }
+  drawCombo(tierUp, !!(opts && (opts.crit || opts.killed)));
+  return combo.n;
+};
+/* The ring cone's door: refresh the window, never the count. Called while a held beam is touching
+   something, so a fight you are winning with the ring does not silently drop the chain you built
+   with the blade. Does nothing if there is no chain to keep alive — it must not be able to START
+   one, or holding Z next to nothing would put a "1×" on screen forever. */
+game.comboKeepAlive = ()=>{
+  if(combo.n <= 0) return;
+  combo.t = COMBO_WINDOW;
+  if(comboDrain) comboDrain.cancel();
+  comboDrain = startComboDrain();
+};
+function comboReset(){
+  combo.n = 0; combo.t = 0; combo.tier = 0;
+  if(comboDrain){ comboDrain.cancel(); comboDrain = null; }
+  drawCombo(false, false);
+}
+game.comboReset = comboReset;
+
+// the drain: ONE animation for the whole window, so the bar costs two calls per hit instead of a
+// width write per frame. Same reason the rest of the HUD is diff-based — this is that rule applied
+// to something continuously changing, by handing the continuity to the compositor.
+function startComboDrain(){
+  const fill = document.getElementById('combofill');
+  if(!fill || !fill.animate) return null;
+  return fill.animate([{ transform:'scaleX(1)' }, { transform:'scaleX(0)' }],
+    { duration: COMBO_WINDOW*1000, easing:'linear', fill:'forwards' });
+}
+/* All the DOM this system touches. Diff-guarded field by field: on a normal hit only the number
+   changes, so a 40-hit chain is 40 text writes and 40 cheap compositor animations — no layout
+   thrash, no innerHTML. */
+function drawCombo(tierUp, hard){
+  const el = document.getElementById('combo');
+  if(!el) return;
+  const on = combo.n >= COMBO_SHOW_AT;
+  if(on !== comboShown){
+    comboShown = on;
+    el.classList.toggle('on', on);
+    // `.done` plays the drop-and-fade. Only on a chain worth mourning: flashing it after every
+    // two-hit exchange would make the flourish meaningless.
+    el.classList.toggle('done', !on && combo.best >= 5);
+  }
+  if(!on) return;
+  const t = COMBO_TIERS[combo.tier];
+  const num = String(combo.n);
+  if(num !== comboNumShown){ comboNumShown = num; setText(document.getElementById('combonum'), num); }
+  if(t.label !== comboLabelShown){ comboLabelShown = t.label; setText(document.getElementById('combolabel'), t.label); }
+  if(combo.tier !== comboTierShown){
+    comboTierShown = combo.tier;
+    el.style.setProperty('--ch', t.hue);
+  }
+  if(comboDrain) comboDrain.cancel();
+  comboDrain = startComboDrain();
+  if(REDUCED_MOTION) return;
+  /* The punch. WAAPI rather than a CSS class toggle: an animation object can be replaced
+     mid-flight, so a fast chain re-pops cleanly instead of needing the remove-class/force-reflow/
+     add-class dance, and nothing is left on the element between hits.
+     The tilt alternates by parity so consecutive hits kick opposite ways — a pop that always
+     leans the same direction reads as a loop, and two directions read as impact. */
+  const wrap = document.getElementById('combowrap');
+  const lean = (combo.n % 2 ? 1 : -1) * (hard ? 5 : 3);
+  const peak = tierUp ? 1.55 : hard ? 1.34 : 1.22;
+  if(wrap && wrap.animate) wrap.animate([
+      { transform:`scale(1) rotate(0deg)` },
+      { transform:`scale(${peak}) rotate(${lean}deg)`, offset: 0.28 },
+      { transform:`scale(1) rotate(0deg)` },
+    ], { duration: tierUp ? 420 : 210, easing:'cubic-bezier(.2,1.5,.35,1)' });
+  if(tierUp && el.animate) el.animate([
+      { filter:'brightness(2.6)' }, { filter:'brightness(1)' },
+    ], { duration: 460, easing:'ease-out' });
+}
+// the lapse, driven from the frame loop. One class toggle at the crossing and nothing in between.
+function updateCombo(dt){
+  if(combo.n <= 0) return;
+  combo.t -= dt;
+  if(combo.t <= 0) comboReset();
 }
 
 /* ================= elemental rings (rings.js) =================
@@ -729,7 +874,7 @@ function updateRing(dt){
     m.applyElement(ring.kind, ring);
     touched++;
   }
-  if(touched) game.shake(0.02);
+  if(touched){ game.shake(0.02); game.comboKeepAlive(); }
   if(p.ringCharge <= 0){
     // spent. Clearing the slot rather than leaving an empty ring on screen: an inert HUD chip with
     // a key label under it is a control that lies about being available.
@@ -877,7 +1022,8 @@ function zoneMultAt(pos){
 function spawnEnemy(rarityIdx, pos, forcedMult=null){
   const m = new Mushroom(scene, rarityIdx, pos, forcedMult ?? zoneMultAt(pos));
   game.enemies.push(m);
-  tagEnemy(m); shadowize(m.group);
+  // rule 2: the blob is this creature's shadow. Bosses are the exception — see the policy.
+  tagEnemy(m); shadowize(m.group, { noCast: !m.isBoss });
   return m;
 }
 // item 47: the tag says what the thing is FOR, not just what it is
@@ -890,7 +1036,9 @@ function tagEnemy(m){
 // every drop lands here, so the payout pop, the hover tag and the list membership can't drift
 function addDrop(pw){
   game.powerups.push(pw);
-  shadowize(pw.group);
+  // a drop is small, transient, and already carries its own glow pillar — exactly the class of
+  // thing rule 1 exists to keep out of the map, and it appears and vanishes in bursts.
+  shadowize(pw.group, { noCast: true });
   const d = pw.def;
   const verb = d.isCoin ? `${d.amount} coin${d.amount === 1 ? '' : 's'} — walk over it to bank ${d.amount === 1 ? 'it' : 'them'}`
     : d.isEssence ? `${d.name} ×${d.amount} — walk over it, spend it on mutations in the Tome`
@@ -1020,7 +1168,7 @@ game.onKill = (m)=>{
       const isGlutton = archetype === 'glutton';
       game.boss = isGlutton ? new GluttonBoss(scene, pos, trait, mult) : new Boss(scene, pos, trait, mult);
       game.enemies.push(game.boss);
-      tagEnemy(game.boss); shadowize(game.boss.group);
+      tagEnemy(game.boss); shadowize(game.boss.group);   // a boss is landmark-sized: it casts
       const bossLabel = (game.boss.R.name + (trait ? ' · ' + trait.name : '')).toUpperCase();
       announce('⚠ ' + bossLabel + ' — dash through its rings, hit it on the recovery', 'bad');
       audio.bossSpawn(); game.shake(1);
@@ -1797,6 +1945,12 @@ function startRun(){
   const floor = progress.ensureLockpickFloor();
   if(floor.granted) setTimeout(()=>{ if(game.state === 'play')
     announce('🗝️ Spare lockpick — one chest is always in reach', 'good'); }, 2800);
+  /* ?god belongs HERE, not in demoAutoStart(). It was only applied on the ?demo path, so the
+     documented "player takes no effective damage" param did nothing at all on a hand-driven run —
+     which is exactly the run you use it for (framing a shot, holding a state still long enough to
+     look at it). A debug param that silently does nothing is worse than one that does not exist,
+     because you spend the session blaming the thing you were trying to observe. */
+  if(PARAMS.has('god')){ game.player.hp = 99999; game.player.maxHp = 99999; }
   grabPointer();
   spawnWave(7);
   updateHUD(); updateBuffs(); updateBackpack(); updateContracts(); updateRingHud();
@@ -1826,6 +1980,9 @@ function resetRun(){
   // spent within the hunt it was found in, so carrying its drop history across runs would make
   // the first stomp of a fresh world feel arbitrary.
   game.stompCount = 0; game.ringsFound = 0;
+  combo.n = 0; combo.t = 0; combo.best = 0; combo.tier = 0;
+  comboShown = false; comboNumShown = ''; comboLabelShown = ''; comboTierShown = -1;
+  { const el = document.getElementById('combo'); if(el) el.classList.remove('on','done'); }
   ringHudKey = '';   // the diff-based chip must not think it is still showing last run's ring
   // seeded spawn table: rarity weights jittered + zone density scaled per world
   const sRng = mulberry32(deriveSeed(game.seed, 77));
@@ -1856,7 +2013,7 @@ function resetRun(){
     audio.jump();
     particles.burst(p.group.position.clone(), 6, {r:1,g:1,b:1, spread:1.5, size:5, life:0.4});
   };
-  shadowize(game.player.group);
+  shadowize(game.player.group, { noCast: true });   // rule 2: the player's blob is the shadow
   /* The boom's floor is the player's OWN silhouette — cap, ink hull and all — measured instead of
      guessed, because a guessed 0.3 m is how the lens ended up inside the hat. */
   { const b = new THREE.Box3().setFromObject(game.player.group);
@@ -2127,7 +2284,10 @@ function initShadows(){
   sh.mapSize.set(SHADOW_SIZE, SHADOW_SIZE);   // quality tier is this file's call
   const c = sh.camera;
   if(c.right <= 5){ // still at three.js defaults, i.e. world.js has not configured it yet
-    c.left = -120; c.right = 120; c.top = 120; c.bottom = -120;
+    /* Only reached if world.js never configured the rig. Keep these numbers in step with
+       world.js PARAMS.shadowBox — the reason this branch exists is so the two waves can land in
+       either order, not so the two files can hold different opinions about the box. */
+    c.left = -95; c.right = 95; c.top = 95; c.bottom = -95;
     c.near = 1; c.far = 520;
     c.updateProjectionMatrix();
     sh.bias = -0.0007; sh.normalBias = 0.4;
@@ -2145,24 +2305,54 @@ game.shadowInfo = ()=>{ // for verification
     bias: sun ? sun.shadow.bias : null, normalBias: sun ? sun.shadow.normalBias : null,
     casters, receivers, programs: renderer.info.programs.length };
 };
-/* Opt-in pass over an existing subtree. Idempotent, so world.js setting its own flags later
-   costs nothing, and it is called on spawn — never per frame. Exclusions matter more than the
-   inclusions: additive shells and BackSide ink would cast solid black, and a vertex-animated
-   ShaderMaterial casts from its un-animated pose because the depth pass is a different program. */
-function shadowize(root){
+/* THE SHADOW POLICY. Two rules, and they exist because "everything casts" produced a ground
+   covered in overlapping sub-pixel smudges that read as dirt rather than as shadow.
+
+   RULE 1 — A THING CASTS ONLY IF ITS SHADOW WOULD READ AS A SHAPE. The rig is a 2048 map over a
+   190 m ortho box, i.e. ~10.8 texels per metre. A prop 40 cm across therefore projects into about
+   four texels: not a small shadow, a smear. Measured before this rule, 349 meshes were casting and
+   roughly 650 of the instances behind them were under a metre wide — pebbles, flowers, moss,
+   undergrowth, decorative caps. Every one of them cost a shadow-map draw to produce noise. So
+   there is a minimum caster size, and everything under it still RECEIVES: small scatter sitting in
+   the shade of a tree is the effect that actually matters, and it costs nothing.
+
+   RULE 2 — ONE SHADOW PER CHARACTER. Anything that walks already carries a blob: a soft mapped
+   disc that tracks the surface underneath it (entities.js makeBlobShadow, fauna.js's own). Letting
+   it ALSO cast into the map gives every creature two unrelated shadows — a crisp contact disc plus
+   a long projection skewed off toward the sun — which is the single biggest source of the mess,
+   because it is doubled on the things the eye follows. The blob is the better of the two for a
+   creature that hops and bobs (it stays in contact, which is the whole job of a contact shadow), so
+   the blob wins and the projection goes. Bosses are the deliberate exception: at scale 3.4 they are
+   landmark-sized, the projection reads as a shape, and it is worth the drama.
+
+   The material exclusions below are older and still load-bearing: additive shells and BackSide ink
+   hulls would cast solid black, and a vertex-animated ShaderMaterial casts from its UN-animated
+   pose because the depth pass is a different program.
+
+   `opts.noCast` = receive only (characters). `opts.minR` overrides the size floor for a subtree
+   whose whole point is to be a small solid object — props.js's pods are 1 m flowers hanging in the
+   air, and a floating thing's shadow is how you know it is floating, so props opt down. */
+const SHADOW_MIN_R = 1.15;    // metres of bounding-sphere radius; see rule 1
+function shadowize(root, opts){
   if(!SHADOW_SIZE || !sun) return;
+  const noCast = !!(opts && opts.noCast);
+  const minR = opts && opts.minR !== undefined ? opts.minR : SHADOW_MIN_R;
   root.traverse(o=>{
-    if(!o.isMesh || o.userData.noShadow) return;
+    if(!o.isMesh) return;
     const m = o.material;
     if(!m || Array.isArray(m)) return;
     if(m.transparent || m.blending !== THREE.NormalBlending || m.depthWrite === false) return;
     if(m.isShaderMaterial || m.isRawShaderMaterial) return;
-    if(m.side === THREE.BackSide) return;
     const geo = o.geometry;
     if(geo && !geo.boundingSphere) geo.computeBoundingSphere();
     const r = geo && geo.boundingSphere ? geo.boundingSphere.radius : 0;
     if(r > 320) return; // sky dome and cloud shell: outside the rig entirely
-    o.receiveShadow = true;
+    // BackSide ink must never cast, but it SHOULD still receive — an unlit outline hull reads as a
+    // bright rim once the fill behind it goes into shadow.
+    if(m.side !== THREE.BackSide) o.receiveShadow = true;
+    if(o.userData.noShadow || noCast) return;
+    if(m.side === THREE.BackSide) return;
+    if(r < minR) return;                                   // rule 1
     o.castShadow = true;
   });
 }
@@ -2351,6 +2541,7 @@ function tick(){
     } // end substep loop
     // animation + the 20 s respawn clock + the treasure pickup test: once per rendered frame, not
     // per substep — none of it is physics, and running it six times would just spin the clocks.
+    updateCombo(dt);
     updateRing(dt);
     if(fauna) fauna.update(dt, elapsed, p.group.position, p.vy);
     if(props) props.update(dt, elapsed, camera, p.group.position);
@@ -2412,8 +2603,7 @@ boot();
 function demoAutoStart(){
   audio.init = ()=>{}; // no audio context in headless
   setTimeout(()=>{
-    show(null); startRun();
-    if(PARAMS.has('god')){ game.player.hp = 99999; game.player.maxHp = 99999; }
+    show(null); startRun();          // startRun() applies ?god for every path, demo included
     if(PARAMS.has('tome')){ // open the spore tome for UI verification (?tome=SECONDS to delay)
       const at = (parseFloat(PARAMS.get('tome')) || 2.5) * 1000;
       setTimeout(()=>{ game.player.hp = 99999; game.player.maxHp = 99999; openTome(); }, at);
