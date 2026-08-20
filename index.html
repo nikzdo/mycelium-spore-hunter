@@ -315,6 +315,12 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .dmg.player{color:#ff6b6b}
 @keyframes dmgpop{0%{transform:translate(-50%,0) scale(.4);opacity:0}15%{opacity:1;transform:translate(-50%,-14px) scale(1.25)}
   100%{transform:translate(-50%,-70px) scale(.9);opacity:0}}
+/* floating world-space health bars over damaged mushrooms (incl. the boss) */
+.enemyhp{position:fixed;z-index:25;pointer-events:none;width:52px;height:7px;
+  border:1px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.45);overflow:hidden;
+  transform:translate(-50%,-100%);box-shadow:0 2px 0 rgba(0,0,0,.3)}
+.enemyhp.boss{width:96px;height:9px}
+.enemyhp .fill{height:100%;background:linear-gradient(180deg,#ff8a7a,#e33e3e);transition:width .12s ease-out}
 /* The announce line stopped being two words ("LEVEL UP!") the moment it started naming the
    counterplay ("Nearly out — F drinks Vitality, Shift dashes you clear"). A sentence set at 58px
    with `nowrap` and no max-width can only run off both edges, so this is a sentence-sized banner

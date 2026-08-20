@@ -477,7 +477,7 @@ export class Boss extends Mushroom {
     this.dmg = this.R.dmg * mult.dmg; this.speed = this.R.speed * mult.speed;
     this.baseDmg = this.dmg; // wrathful ramps this live off missing-hp; everything else keeps it fixed
     this.group.scale.setScalar(3.4/1.7);
-    this.isBoss = true; this.bossWeaponId = 'sporecleaver'; this.ringCd = 5; this.summonCd = 9;
+    this.isBoss = true; this.bossWeaponId = 'sporecleaver'; this.ringCd = 5; this.summonCd = 9; this.fireballCd = 6;
     this._prevHp = this.hp; this._sinceHitT = 0;
     this.cap.material = toonMat({ color:this.R.color, map:capTexture(this.R.color),
       rim:0.7, rimColor:'#'+new THREE.Color(this.R.glow).getHexString(), emissive:0x220a44, emissiveIntensity:0.6 });
@@ -512,15 +512,25 @@ export class Boss extends Mushroom {
       game.shake(0.5);
     }
     if(this.summonCd <= 0){
-      this.summonCd = isTrait('swarming') ? 7 : 11;
+      this.summonCd = isTrait('swarming') ? 7 : (isTrait('fusion') ? 9 : 11);
       game.audio.roar(1);
-      const count = isTrait('swarming') ? 4 : 3;
+      const count = isTrait('swarming') ? 4 : (isTrait('fusion') ? 4 : 3);
       for(let i=0;i<count;i++){
         const a = Math.random()*Math.PI*2;
         const p = this.group.position.clone().add(new THREE.Vector3(Math.cos(a)*8, 0, Math.sin(a)*8));
-        game.spawnEnemy(Math.min(3, (Math.random()*4)|0), p, 1);
+        const minion = game.spawnEnemy(Math.min(3, (Math.random()*4)|0), p, 1);
+        if(isTrait('fusion')){ minion.isMinion = true; minion.mergeReady = 1.2; }
       }
       game.announce('The Elder calls its brood!');
+    }
+
+    this.fireballCd -= dt;
+    if(isTrait('pyroclast') && this.fireballCd <= 0 && game.player){
+      this.fireballCd = 7 + Math.random()*2;
+      game.spawnFireball(this.group.position.clone().setY(this.group.position.y+1.4*this.R.scale),
+        game.player.group.position.clone(), this.dmg*0.85, this.trait.glow);
+      game.audio.spit();
+      game.announce('⚠ The Elder hurls cinderfire! ⚠');
     }
   }
 }
@@ -547,10 +557,15 @@ export class GluttonBoss extends Mushroom {
     belly.material.color.offsetHSL(0, 0, -0.12);
     belly.position.y = 0.55; belly.scale.set(1.3, 1.05, 1.3); addOutline(belly, 0.06);
     this.body.add(belly); this.belly = belly;
+    /* MERGE NOTE: main still tinted a THREE.PointLight here (`this.light`). That light was removed
+       on this branch on purpose — a boss appearing or dying changed the scene's light count and
+       recompiled every lit material, which measured as a single 4.8 s frame. The aura sprite and
+       the mapped ground ring below replace it, so the PointLight is deliberately NOT restored.
+       main's fireballCd (the new pyroclast trait) is kept. */
     if(this.aura){ this.aura.material.color.set(this.R.glow); this.aura.material.opacity = 0.30;
       this.aura.scale.setScalar(8.5); this.aura.position.y = 1.8; }   // see Boss: no PointLight
     if(this.groundRing) this.groundRing.material.color.set(this.R.glow);
-    this.chargeCd = 8; this.vomitCd = 5; this.puddleCd = 10; this.summonCd = 13;
+    this.chargeCd = 8; this.vomitCd = 5; this.puddleCd = 10; this.summonCd = 13; this.fireballCd = 7;
     this.charging = false; this.telegraphT = 0;
   }
   hit(dmg, from, game, kbMult=1){
@@ -576,7 +591,7 @@ export class GluttonBoss extends Mushroom {
       }
       return;
     }
-    this.chargeCd -= dt; this.vomitCd -= dt; this.puddleCd -= dt; this.summonCd -= dt;
+    this.chargeCd -= dt; this.vomitCd -= dt; this.puddleCd -= dt; this.summonCd -= dt; this.fireballCd -= dt;
     if(this.charging && this.state !== 'lunge'){ this.charging = false; }
     if(!this.charging && this.chargeCd <= 0){
       let cd = 9 - Math.min(3, (1-this.hp/this.maxHp)*3.5);
@@ -608,14 +623,24 @@ export class GluttonBoss extends Mushroom {
       game.audio.roar(0.4);
     }
     if(this.summonCd <= 0){
-      this.summonCd = 14;
+      this.summonCd = isTrait('fusion') ? 11 : 14;
       game.audio.roar(1);
-      for(let i=0;i<2;i++){
+      const count = isTrait('fusion') ? 3 : 2;
+      for(let i=0;i<count;i++){
         const a = Math.random()*Math.PI*2;
         const p = this.group.position.clone().add(new THREE.Vector3(Math.cos(a)*8, 0, Math.sin(a)*8));
-        game.spawnEnemy(Math.min(3, (Math.random()*4)|0), p, 1);
+        const minion = game.spawnEnemy(Math.min(3, (Math.random()*4)|0), p, 1);
+        if(isTrait('fusion')){ minion.isMinion = true; minion.mergeReady = 1.2; }
       }
       game.announce('Rotmaw burps up its brood!');
+    }
+
+    if(isTrait('pyroclast') && this.fireballCd <= 0 && game.player){
+      this.fireballCd = 8 + Math.random()*2;
+      game.spawnFireball(this.group.position.clone().setY(this.group.position.y+1.2),
+        game.player.group.position.clone(), this.dmg*0.9, this.trait.glow);
+      game.audio.spit();
+      game.announce('⚠ Rotmaw spits searing magma! ⚠');
     }
   }
 }
@@ -882,6 +907,7 @@ export class Player {
     if(armorReduce > 0) dmg = Math.round(dmg * (1 - armorReduce));
     this.hp -= dmg; this.iframe = 0.8;
     game.audio.hurt(); game.shake(0.45); game.damageFlash();
+    game.damageNumber(this.group.position.clone().setY(1.7), Math.round(dmg), false, true);
     game.particles.burst(this.group.position.clone().setY(1.2), 12, {r:1,g:0.3,b:0.2, spread:4, size:8, life:0.6});
     const dir = this.group.position.clone().sub(from).setY(0).normalize();
     this.vel.addScaledVector(dir, 10);
