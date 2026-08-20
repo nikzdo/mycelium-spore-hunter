@@ -1,7 +1,7 @@
 // main.js — MYCELIUM: Spore Hunter — game orchestration
 import * as THREE from 'three';
-import { ParticlePool } from './fx.js';
-import { buildWorld, groundHeight } from './world.js';
+import { ParticlePool, RewardPops } from './fx.js';
+import { buildWorld, groundHeight, groundOnly } from './world.js';
 import { Mushroom, Boss, GluttonBoss, Player, Powerup, POWERUPS, RARITIES } from './entities.js';
 import { GameAudio } from './audio.js';
 import { mulberry32, deriveSeed, randomSeed } from './rng.js';
@@ -31,19 +31,36 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.28;
+/* ---- sun shadows (item 06) ----
+   Every shadow decision is made HERE, before the first frame. Flipping shadowMap.enabled or
+   resizing the map after materials have compiled invalidates every program in the scene, which
+   is the same hitch as adding a light mid-run — so the tier is picked from QUALITY once and
+   never touched again. `?shadows=off|low|med|high` overrides it for testing on weak GPUs. */
+const SHADOW_SIZES = { off:0, low:512, med:1024, high:2048 };
+const SHADOW_TIER = SHADOW_SIZES[PARAMS.get('shadows')] !== undefined ? PARAMS.get('shadows')
+  : QUALITY >= 1 ? 'high' : QUALITY >= 0.7 ? 'med' : QUALITY > 0 ? 'low' : 'off';
+const SHADOW_SIZE = SHADOW_SIZES[SHADOW_TIER];
+renderer.shadowMap.enabled = SHADOW_SIZE > 0;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('game').appendChild(renderer.domElement);
+window.__renderer = renderer; // for verification
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe8b07a);
 const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 1200);
+window.__camera = camera; // for verification
 addEventListener('resize', ()=>{
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-const world = buildWorld(scene, QUALITY, SEED);
-window.__world = world; // for verification
+// item 50: generation is one long blocking frame, so it can't run during module eval any more —
+// the #boot overlay has to paint FIRST. boot() below builds the world and starts the loop.
+let world = null;
 const particles = new ParticlePool(scene, 700);
+// item 19: one pool for every payout, so a coin, an essence and a contract payout all read
+// as the same "you got paid" beat.
+const rewardPops = new RewardPops(scene);
 const audio = new GameAudio();
 const progress = new Progress(); // meta progression (essences + mutations, localStorage)
 
@@ -95,7 +112,7 @@ const game = {
   kills:[0,0,0,0,0,0], totalKills:0, rareKills:0,
   startTime:0, hitStopT:0, shakeT:0, shakeAmp:0,
   bossSpawned:false, zone:0,
-  seed:SEED, theme:world.theme, progress,
+  seed:SEED, theme:null, progress, // theme is filled in by boot(), once the world exists
   level:1, xp:0, runEssences:[0,0,0,0,0,0],
   dropBonus:0, rarityJitter:[1,1,1,1,1], density:1,
   nearestHarvest:null,
@@ -128,7 +145,7 @@ function levelUp(silent=false){
   const el = document.getElementById('levelup');
   el.textContent = '✦ LEVEL UP! — LV ' + game.level + ' ✦';
   el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
-  announce('+'+12+' Max HP · +1.5 Damage · Fully Healed');
+  announce('Healed to full — push deeper while it lasts', 'good');
 }
 
 /* ---------- mutations ---------- */
@@ -144,10 +161,13 @@ function applyMutations(){
   for(let i=0;i<t('elderblood');i++) levelUp(true);
 }
 
-function announce(txt){
+// item 48: an announcement carries its kind, and its copy names the counterplay. "You took
+// damage" tells the player nothing they didn't feel; "drink Fortify" tells them what to do.
+// kind: '' neutral | 'good' reward | 'bad' threat | 'cool' rare find.
+function announce(txt, kind=''){
   const el = document.getElementById('announce');
   el.textContent = txt;
-  el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
+  el.className = ''; void el.offsetWidth; el.className = 'show' + (kind ? ' ' + kind : '');
 }
 game.announce = announce;
 game.shake = (a)=>{ game.shakeT = Math.max(game.shakeT, 0.3); game.shakeAmp = Math.max(game.shakeAmp, a); };
@@ -184,6 +204,93 @@ function pickupText(worldPos, text, color){
   document.body.appendChild(el);
   setTimeout(()=>el.remove(), 850);
 }
+/* ---------- hover tags (item 47) ----------
+   Naming the thing is not enough — the tag names the VERB. "🥚 Sealed cyst" tells you nothing;
+   "🥚 Sealed cyst — [E] pry with a spine (3 held)" tells you what to do about it. Props join a
+   registry with a label provider, so a later wave's pods/cysts/vents get tags for free:
+
+     const off = game.hoverTags.register(prop.group, ()=> '🪙 12 coins — walk over it',
+                                         { range: 20, lift: 1.4 });
+
+   label(root) returning null/'' means "nothing to say right now" (spent, dead, no charges).
+   Entries whose root has left the scene are pruned here, so a prop that despawns with
+   scene.remove() never has to remember to unregister. */
+const hoverTags = [];
+game.hoverTags = {
+  register(root, label, opts={}){
+    const e = { root, label, range: opts.range ?? 22, lift: opts.lift ?? 1.6 };
+    hoverTags.push(e);
+    return ()=>{ const i = hoverTags.indexOf(e); if(i >= 0) hoverTags.splice(i,1); };
+  },
+  clear(){ hoverTags.length = 0; },
+};
+// The chip is built here rather than in index.html because it is created by whoever owns the
+// raycast; it borrows the harvest-prompt language so the two read as one system.
+const tagEl = document.createElement('div');
+tagEl.id = 'hovertag';
+tagEl.style.cssText = 'position:fixed;z-index:31;display:none;pointer-events:none;font-size:14px;' +
+  "font-weight:700;font-family:'Fredoka',sans-serif;color:#fff6e3;background:rgba(20,12,26,.72);" +
+  'border:2px solid rgba(255,246,227,.4);border-radius:999px;padding:4px 12px;white-space:nowrap;' +
+  'transform:translate(-50%,-100%);text-shadow:0 2px 0 #1c1410';
+document.body.appendChild(tagEl);
+const tagRay = new THREE.Raycaster();
+const tagNdc = new THREE.Vector2();
+const tagRoots = [];              // candidate list, rebuilt in place — no per-frame allocation
+const tagAnchor = new THREE.Vector3();
+let pointerX = innerWidth/2, pointerY = innerHeight/2;
+addEventListener('pointermove', e=>{ pointerX = e.clientX; pointerY = e.clientY; });
+let tagEntry = null, tagText = '', tagCd = 0, tagL = -1, tagT = -1;
+function entryFor(obj){
+  for(let o = obj; o; o = o.parent){
+    for(const e of hoverTags) if(e.root === o) return e;
+  }
+  return null;
+}
+function hideHoverTag(){
+  if(tagEntry || tagText){ tagEntry = null; tagText = ''; tagEl.style.display = 'none'; }
+}
+function updateHoverTag(dt){
+  if(game.state !== 'play' || !hoverTags.length){ hideHoverTag(); return; }
+  tagCd -= dt;
+  if(tagCd <= 0){
+    tagCd = 0.07; // raycast at ~14 Hz; the chip still tracks its anchor every frame
+    for(let i=hoverTags.length-1;i>=0;i--) if(!hoverTags[i].root.parent) hoverTags.splice(i,1);
+    const pp = game.player.group.position;
+    tagRoots.length = 0;
+    for(const e of hoverTags){
+      const rp = e.root.position;
+      if(Math.abs(rp.x-pp.x) > e.range || Math.abs(rp.z-pp.z) > e.range) continue;
+      tagRoots.push(e.root);
+    }
+    // pointer-locked look has no cursor, so the screen centre IS the pointer
+    const locked = !!document.pointerLockElement;
+    const sx = locked ? innerWidth*0.5 : pointerX, sy = locked ? innerHeight*0.5 : pointerY;
+    tagNdc.set(sx/innerWidth*2-1, -(sy/innerHeight)*2+1);
+    tagRay.setFromCamera(tagNdc, camera);
+    let entry = null;
+    if(tagRoots.length){
+      const hits = tagRay.intersectObjects(tagRoots, true);
+      for(const h of hits){ entry = entryFor(h.object); if(entry) break; }
+    }
+    const txt = entry ? (entry.label(entry.root) || '') : '';
+    if(!txt) hideHoverTag();
+    else if(entry !== tagEntry || txt !== tagText){ // diff-based: the DOM only sees real changes
+      tagEntry = entry; tagText = txt;
+      tagEl.textContent = txt;
+      tagEl.style.display = 'block';
+    }
+  }
+  if(!tagEntry) return;
+  tagAnchor.copy(tagEntry.root.position); tagAnchor.y += tagEntry.lift;
+  tagAnchor.project(camera);
+  if(tagAnchor.z > 1){ hideHoverTag(); return; }
+  // A big prop can have its origin off-screen while its body fills the middle of the view, so the
+  // chip is clamped into the viewport instead of hidden — an off-screen tag is just a silent bug.
+  const l = Math.round(THREE.MathUtils.clamp((tagAnchor.x*0.5+0.5)*innerWidth, 90, innerWidth-90));
+  const t = Math.round(THREE.MathUtils.clamp((-tagAnchor.y*0.5+0.5)*innerHeight, 40, innerHeight-40));
+  if(l !== tagL || t !== tagT){ tagL = l; tagT = t; tagEl.style.left = l+'px'; tagEl.style.top = t+'px'; }
+}
+
 function updateContracts(){
   const el = $('contracts'); if(!el) return;
   el.innerHTML = progress.contracts.map(c=>{
@@ -234,8 +341,10 @@ function tryHarvest(){
   updateContracts();
   updateHUD();
   if(completed.length){
-    audio.mutate();
-    announce('Contract Complete! +'+completed.reduce((a,c)=>a+c.reward,0)+' 🌿 Mycelium');
+    const paid = completed.reduce((a,c)=>a+c.reward,0);
+    audio.contract(); // its own cue — a contract payout is not an alchemy purchase
+    rewardPops.pop(pos.x, pos.y, pos.z, 6);
+    announce('Contract paid — +' + paid + ' 🌿 spend it in the Tome', 'good');
   }
 }
 
@@ -249,7 +358,29 @@ function zoneMultAt(pos){
 function spawnEnemy(rarityIdx, pos, forcedMult=null){
   const m = new Mushroom(scene, rarityIdx, pos, forcedMult ?? zoneMultAt(pos));
   game.enemies.push(m);
+  tagEnemy(m); shadowize(m.group);
   return m;
+}
+// item 47: the tag says what the thing is FOR, not just what it is
+function tagEnemy(m){
+  game.hoverTags.register(m.group, ()=> m.dead ? null : m.isBoss
+    ? `⚠ ${m.R.name} · ${Math.ceil(m.hp)} HP — punish the wind-up, then swing`
+    : `${m.R.name} · ${Math.ceil(m.hp)} HP — cut it down for ✦ ${ESS_NAMES[m.rarity]}`,
+    { range: 26, lift: 1.4 + m.R.scale });
+}
+// every drop lands here, so the payout pop, the hover tag and the list membership can't drift
+function addDrop(pw){
+  game.powerups.push(pw);
+  shadowize(pw.group);
+  const d = pw.def;
+  const verb = d.isCoin ? `${d.amount} coin${d.amount === 1 ? '' : 's'} — walk over it to bank ${d.amount === 1 ? 'it' : 'them'}`
+    : d.isEssence ? `${d.name} ×${d.amount} — walk over it, spend it on mutations in the Tome`
+    : d.isWeapon ? `${d.name} — walk over it to slot it on 1-7`
+    : d.isPotion ? `${d.name} — walk over it, then press ${POTIONS_BY_ID[d.potionId].key} to drink`
+    : d.isArmor ? `${d.name} — walk over it to fill your ${d.slot} slot`
+    : `${d.name} — walk over it for a timed boost`;
+  game.hoverTags.register(pw.group, ()=> pw.dead ? null : `${d.icon} ${verb}`, { range: 22, lift: 1.1 });
+  return pw;
 }
 game.spawnEnemy = spawnEnemy;
 function weightedRarity(dist){
@@ -283,8 +414,7 @@ function dropPowerup(pos, rarity){
   let sum=0; for(const p of POWERUPS) sum+=p.w;
   let roll = Math.random()*sum, def = POWERUPS[0];
   for(const p of POWERUPS){ roll-=p.w; if(roll<=0){ def=p; break; } }
-  const pw = new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1), def);
-  game.powerups.push(pw);
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1), def));
 }
 function dropWeapon(pos, rarity, force=false, forceId=null){
   // rarer weapons are rarer drops; every weapon of this rarity can appear (forging is purely an optional stat upgrade)
@@ -295,16 +425,14 @@ function dropWeapon(pos, rarity, force=false, forceId=null){
   else { const pool = WEAPONS.filter(x=>x.rarity===rarity); w = pool[(Math.random()*pool.length)|0]; }
   if(!w) return;
   const def = { id:'weapon_'+w.id, icon:w.icon, name:w.name, color:RARITY_COLORS[w.rarity], isWeapon:true, weaponId:w.id };
-  const pw = new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.4), def);
-  game.powerups.push(pw);
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.4), def));
 }
 function dropPotion(pos, rarity, force=false){
   const chance = 0.07 + rarity*0.02;
   if(!force && Math.random() > chance + effDropBonus()*0.2) return;
   const def = POTIONS[(Math.random()*POTIONS.length)|0];
   const pdef = { id:'potion_'+def.id, icon:def.icon, name:def.name, color:def.color, isPotion:true, potionId:def.id };
-  const pw = new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.1), pdef);
-  game.powerups.push(pw);
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.1), pdef));
 }
 function dropArmor(pos, rarity, force=false){
   const chance = rarity>=3 ? 0.45 : rarity===2 ? 0.18 : rarity===1 ? 0.06 : 0.025;
@@ -313,22 +441,22 @@ function dropArmor(pos, rarity, force=false){
   if(!pool.length) return;
   const a = pool[(Math.random()*pool.length)|0];
   const def = { id:'armor_'+a.id, icon:a.icon, name:a.name, color:RARITY_COLORS[a.rarity], isArmor:true, armorId:a.id, slot:a.slot };
-  const pw = new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.2), def);
-  game.powerups.push(pw);
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.2), def));
 }
 function dropEssence(pos, rarity, isBoss){
   const amount = isBoss ? 5 : 1;
   const def = { id:'essence_'+rarity, icon:'✦', name:RARITIES[rarity].name+' Essence', color:RARITY_COLORS[rarity],
     shape:'gem', isEssence:true, rarity, amount };
-  const pw = new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+0.9), def);
-  game.powerups.push(pw);
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+0.9), def));
+  rewardPops.pop(pos.x, groundHeight(pos.x,pos.z)+1.1, pos.z, 1 + (isBoss?4:0));
 }
 function dropCoin(pos, rarity, isBoss){
   if(!isBoss && Math.random() > 0.85) return; // most kills still drop one, but not every single time
   const amount = (isBoss ? 20 : 1 + rarity*2) * ((rarity>=2 && Math.random()<0.15) ? 3 : 1);
   const def = { id:'coin', icon:'🪙', name:'Coins', color:0xffd94a, shape:'coin', isCoin:true, amount };
-  const pw = new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+0.7), def);
-  game.powerups.push(pw);
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+0.7), def));
+  // item 19: the payout throws something out of the thing you hit, at the thing you hit
+  rewardPops.pop(pos.x, groundHeight(pos.x,pos.z)+1.1, pos.z, Math.min(6, 1+(amount/4|0)));
 }
 game.onKill = (m)=>{
   game.kills[m.rarity]++; game.totalKills++;
@@ -343,6 +471,8 @@ game.onKill = (m)=>{
   updateHUD();
   if(!game.bossSpawned && game.rareKills >= 8){
     game.bossSpawned = true;
+    audio.telegraph(1.4); // the 1.2s gap before it lands is the wind-up — make it audible
+    announce('Something huge is waking — find open ground', 'bad');
     setTimeout(()=>{
       if(game.state !== 'play') return;
       const a = Math.random()*Math.PI*2;
@@ -352,8 +482,9 @@ game.onKill = (m)=>{
       const isGlutton = archetype === 'glutton';
       game.boss = isGlutton ? new GluttonBoss(scene, pos, trait, mult) : new Boss(scene, pos, trait, mult);
       game.enemies.push(game.boss);
+      tagEnemy(game.boss); shadowize(game.boss.group);
       const bossLabel = (game.boss.R.name + (trait ? ' · ' + trait.name : '')).toUpperCase();
-      announce('⚠ ' + bossLabel + ' AWAKENS ⚠');
+      announce('⚠ ' + bossLabel + ' — dash through its rings, hit it on the recovery', 'bad');
       audio.bossSpawn(); game.shake(1);
       document.getElementById('bossname').textContent = bossLabel;
       document.getElementById('bosswrap').style.display = 'block';
@@ -363,8 +494,8 @@ game.onKill = (m)=>{
 };
 game.applyPowerup = (def)=>{
   const p = game.player;
-  audio.pickup();
-  particles.burst(p.group.position.clone().setY(1.2), 10,
+  const pp = p.group.position;
+  particles.burst(pp.clone().setY(1.2), 10,
     {r:1,g:0.9,b:0.4, spread:3, size:6, life:0.6});
   if(def.isWeapon){
     const w = WEAPONS_BY_ID[def.weaponId];
@@ -372,12 +503,14 @@ game.applyPowerup = (def)=>{
     if(!p.weapons.includes(def.weaponId)) p.addWeapon(def.weaponId); // always usable this hunt once found
     if(hadBefore){
       const r = progress.addDupe('weapon', def.weaponId, w.rarity);
-      announce(r.starredTo ? `⭐ ${def.name} reached ${r.starredTo} stars!`
-        : r.maxed ? `✦ Duplicate ${def.name} — refined to coins`
-        : `+1 ${def.name} shard (${r.dupes}/${r.need})`);
+      audio.gearUp(r.starredTo || 1); // a star-up is not a UI click
+      announce(r.starredTo ? `⭐ ${def.name} ★${r.starredTo} — stronger in every hunt from now on`
+        : r.maxed ? `✦ ${def.name} is maxed — this dupe refined into coins`
+        : `${def.name} shard ${r.dupes}/${r.need} — find ${r.need-r.dupes} more for ★`, r.starredTo ? 'cool' : 'good');
     } else {
       progress.ownGear('weapon', def.weaponId);
-      announce(def.icon + ' Found ' + def.name + '!');
+      audio.unlock();
+      announce(def.icon + ' ' + def.name + ' unlocked — press ' + (p.weapons.indexOf(def.weaponId)+1) + ' to wield it', 'cool');
     }
     updateBackpack(); updateHUD();
     return;
@@ -385,7 +518,8 @@ game.applyPowerup = (def)=>{
   if(def.isPotion){
     const pdef = POTIONS_BY_ID[def.potionId];
     p.addPotion(def.potionId);
-    announce(def.icon + ' Found ' + def.name + ' (' + pdef.key + ')');
+    audio.powerup();
+    announce(def.icon + ' ' + def.name + ' — press ' + pdef.key + ' when you need it', 'good');
     updateBackpack();
     return;
   }
@@ -395,12 +529,14 @@ game.applyPowerup = (def)=>{
     if(!p.armorOwned[def.slot].includes(def.armorId)) p.addArmor(def.slot, def.armorId);
     if(hadBefore){
       const r = progress.addDupe('armor', def.armorId, a.rarity);
-      announce(r.starredTo ? `⭐ ${def.name} reached ${r.starredTo} stars!`
-        : r.maxed ? `✦ Duplicate ${def.name} — refined to coins`
-        : `+1 ${def.name} shard (${r.dupes}/${r.need})`);
+      audio.gearUp(r.starredTo || 1);
+      announce(r.starredTo ? `⭐ ${def.name} ★${r.starredTo} — stronger in every hunt from now on`
+        : r.maxed ? `✦ ${def.name} is maxed — this dupe refined into coins`
+        : `${def.name} shard ${r.dupes}/${r.need} — find ${r.need-r.dupes} more for ★`, r.starredTo ? 'cool' : 'good');
     } else {
       progress.ownGear('armor', def.armorId);
-      announce(def.icon + ' Found ' + def.name + '!');
+      audio.unlock();
+      announce(def.icon + ' ' + def.name + ' unlocked — equip it from the Backpack (B)', 'cool');
     }
     updateBackpack(); updateHUD();
     return;
@@ -409,12 +545,15 @@ game.applyPowerup = (def)=>{
     game.runEssences[def.rarity] += def.amount;
     progress.collect(def.rarity, def.amount);
     audio.essence(def.rarity);
+    rewardPops.pop(pp.x, pp.y+1.2, pp.z, Math.min(4, def.amount));
     updateHUD();
     return;
   }
   if(def.isCoin){
     progress.coins += def.amount;
     progress.saveCoins();
+    audio.pickup();
+    rewardPops.pop(pp.x, pp.y+1.2, pp.z, Math.min(5, 1+(def.amount/4|0)));
     updateHUD();
     return;
   }
@@ -428,11 +567,43 @@ game.applyPowerup = (def)=>{
     case 'magnet': p.boostTimers.magnet = Math.min(BOOST_CAP, p.boostTimers.magnet + BOOST_DUR); break;
     case 'hp': p.hp = Math.min(p.maxHp, p.hp+25); break;
   }
-  announce(def.icon + ' ' + def.name);
+  audio.powerup();
+  announce(def.icon + ' ' + def.name + ' — ' + BOOST_HINT[def.id], 'good');
   updateHUD(); updateBuffs();
+};
+// item 48: a pickup banner should tell you what to DO with the thing you just picked up
+const BOOST_HINT = {
+  dmg:'swing into the pack while it lasts', spd:'outrun the lunges now',
+  dash:'dash is ready — use it through a ring', shield:'take one hit for free',
+  jump:'double-jump the ledges you skipped', magnet:'sweep the drops you left behind',
+  hp:'topped up — push deeper',
 };
 game.updateBuffs = updateBuffs;
 game.updateBackpack = ()=>updateBackpack();
+/* item 45: a HUD slot IS the control. Clicking it and pressing its key are the same action,
+   routed through one function each so the two can never diverge. */
+function selectWeapon(id){
+  const p = game.player;
+  if(game.state !== 'play' || !p || !id || !p.weapons.includes(id) || id === p.equipped) return false;
+  p.equipWeapon(id); updateBackpack(); audio.click();
+  return true;
+}
+function drinkPotion(id){
+  const p = game.player;
+  if(game.state !== 'play' || !p || !p.usePotion(id, game)) return false;
+  updateBackpack();
+  return true;
+}
+// A slot has to be reachable without a mouse. stopPropagation matters: Space is also jump, and
+// the window-level handler would otherwise fire on top of the activation.
+function makeActivatable(el, fn){
+  el.tabIndex = 0;
+  el.onclick = fn;
+  el.onkeydown = e=>{
+    if(e.code !== 'Enter' && e.code !== 'Space') return;
+    e.preventDefault(); e.stopPropagation(); fn();
+  };
+}
 function updateBackpack(){
   const p = game.player; if(!p) return;
   // weapon slots (1-7)
@@ -441,12 +612,16 @@ function updateBackpack(){
   p.weapons.forEach((id, i)=>{
     const w = WEAPONS_BY_ID[id];
     const stars = (progress.gearOf('weapon', id) || {}).stars || 0;
+    const eq = id === p.equipped;
     const d = document.createElement('div');
-    d.className = 'hotslot' + (id===p.equipped ? ' active' : '');
+    d.className = 'hotslot' + (eq ? ' active sel' : '');
     d.style.setProperty('--rc', RARITY_COLORS[w.rarity]);
-    d.title = w.name;
+    d.dataset.weapon = String(i+1);      // the CSS hover/active/focus states hang off these,
+    d.dataset.weaponId = id;             // and they double as the playwright/keyboard handle
+    d.title = w.name + ' — press ' + (i+1) + ' or click to wield';
+    d.setAttribute('aria-label', d.title);
     d.innerHTML = `<span class="hnum">${i+1}</span>${w.icon}${stars>0?`<span class="htier">★${stars}</span>`:''}`;
-    d.onclick = ()=>{ if(game.state==='play'){ p.equipWeapon(id); updateBackpack(); audio.click(); } };
+    makeActivatable(d, ()=> selectWeapon(id));
     wEl.appendChild(d);
   });
   // potion slots (fixed Q/E/R/F/G — always shown so the player learns the layout, greyed out at 0)
@@ -456,13 +631,17 @@ function updateBackpack(){
     const count = p.potions[def.id] || 0;
     const timer = p.potionTimers[def.id] || 0;
     const d = document.createElement('div');
-    d.className = 'potslot' + (count>0 ? ' has' : '') + (timer>0 ? ' active' : '');
+    // a count of 0 is information, so say it with .zero instead of leaving the slot ambiguous
+    d.className = 'potslot' + (count>0 ? ' has' : ' zero') + (timer>0 ? ' active sel' : '');
     d.style.setProperty('--pc', '#'+def.color.toString(16).padStart(6,'0'));
-    d.title = def.name + ' — ' + def.desc;
+    d.dataset.potion = def.id;
+    d.dataset.potionKey = def.key;
+    d.title = def.name + ' — ' + def.desc + (count>0 ? ' · press ' + def.key + ' or click' : ' · none held');
+    d.setAttribute('aria-label', d.title);
     d.innerHTML = `<span class="pkey">${def.key}</span>${def.icon}` +
       (count>0 ? `<span class="pcnt">${count}</span>` : '') +
       (timer>0 ? `<span class="ptimer">${Math.ceil(timer)}s</span>` : '');
-    d.onclick = ()=>{ if(game.state==='play' && p.usePotion(def.id, game)) updateBackpack(); };
+    makeActivatable(d, ()=> drinkPotion(def.id));
     pEl.appendChild(d);
   }
   updateGearHud();
@@ -474,17 +653,21 @@ function updateGearHud(){
   for(const slot of ARMOR_SLOTS){
     const id = p.armor[slot];
     const d = document.createElement('div');
-    d.className = 'gearslot' + (id ? ' on' : '');
+    d.className = 'gearslot' + (id ? ' on sel' : ' zero');
+    d.dataset.gear = slot;
     if(id){
       const a = ARMOR_BY_ID[id];
       const stars = (progress.gearOf('armor', id) || {}).stars || 0;
       d.style.setProperty('--rc', RARITY_COLORS[a.rarity]);
-      d.title = a.name;
+      d.title = a.name + ' — click to swap your ' + slot + ' in the Backpack';
       d.innerHTML = a.icon + (stars>0?`<span class="gt">★${stars}</span>`:'');
     } else {
       d.innerHTML = SLOT_ICON[slot];
-      d.title = 'No ' + slot + ' equipped';
+      d.title = 'No ' + slot + ' equipped — click to open the Backpack';
     }
+    d.setAttribute('aria-label', d.title);
+    // the slot names the thing you change; clicking it goes where you change it
+    makeActivatable(d, ()=>{ if(game.state === 'play' || game.state === 'inventory') openInventory(); });
     el.appendChild(d);
   }
 }
@@ -521,14 +704,66 @@ function updateBuffs(){
 
 /* ---------- HUD ---------- */
 const RARITY_COLORS = ['#8a6a42','#4aa832','#db3a3a','#3a7fe0','#9a3ae0','#ff5ad0'];
+// updateHUD() runs every frame, so every write below is diffed against what is already on the
+// element. The expando is deliberate: it keeps the last-written value next to the node it
+// belongs to, so no bookkeeping table can fall out of sync with the DOM.
+function setText(el, txt){ if(el.__t !== txt){ el.__t = txt; el.textContent = txt; } }
+function setWidth(el, pct){ const w = pct.toFixed(1)+'%'; if(el.__w !== w){ el.__w = w; el.style.width = w; } }
+/* ---------- eased counters (item 44) ----------
+   A payout that snaps reads as a number changing. A payout that counts up reads as a payout.
+   The DISPLAYED value chases the true one and snaps inside an epsilon; the DOM is touched only
+   when the rounded display changes, so a value that isn't moving costs nothing per frame. */
+const counters = {};
+function counter(id, el, fmt, opts={}){
+  counters[id] = { el, fmt, shown:0, target:0, last:null, zeroEl: opts.zero === true ? el : opts.zero || null };
+  return counters[id];
+}
+function setCounter(id, value){ const c = counters[id]; if(c) c.target = value; }
+function repaintCounter(id){ const c = counters[id]; if(c) c.last = null; } // label text changed under us
+function tickCounters(dt){
+  const k = Math.min(1, dt*8); // ~0.35s to close a payout — long enough to see, short enough to trust
+  for(const id in counters){
+    const c = counters[id];
+    const d = c.target - c.shown;
+    if(d !== 0) c.shown = Math.abs(d) < 0.6 ? c.target : c.shown + d*k;
+    const v = Math.round(c.shown);
+    if(v === c.last) continue;
+    c.last = v;
+    c.el.textContent = c.fmt(v);
+    if(c.zeroEl) c.zeroEl.classList.toggle('zero', v === 0);
+  }
+}
+counter('coins', document.getElementById('coinhud'), v=>'🪙 '+v, { zero:true });
+counter('myco',  document.getElementById('mycohud'), v=>'🌿 '+v, { zero:true });
+// kills: six rows built once. This used to be an innerHTML rebuild every single frame.
+{
+  const k = document.getElementById('kills');
+  k.innerHTML = RARITY_COLORS.map(c=>
+    `<div class="row"><span class="kn">0</span> <span class="dot" style="background:${c}"></span></div>`).join('');
+  for(let i=0;i<RARITY_COLORS.length;i++){
+    const row = k.children[i];
+    // the whole row greys out at 0, dot included — a rarity you have not met yet is information
+    counter('kill'+i, row.querySelector('.kn'), v=>String(v), { zero: row });
+  }
+}
+counter('xp', document.getElementById('xplabel'), v=>`LEVEL ${game.level} — ${v} / ${xpNeed()} XP`);
+let hudLevel = -1, hudLowHp = false;
 function updateHUD(){
   const p = game.player; if(!p) return;
-  document.getElementById('hpfill').style.width = (p.hp/p.maxHp*100)+'%';
-  // xp bar + level badge
+  // item 48: the useful message at low HP is the counterplay, not the fact. Latched with
+  // hysteresis so it fires on the way down and re-arms only after you have actually recovered.
+  const hpFrac = p.hp/p.maxHp;
+  if(!hudLowHp && hpFrac < 0.28 && game.state === 'play'){
+    hudLowHp = true;
+    announce('Nearly out — F drinks Vitality, Shift dashes you clear', 'bad');
+  } else if(hudLowHp && hpFrac > 0.5) hudLowHp = false;
+  setWidth(document.getElementById('hpfill'), p.hp/p.maxHp*100);
+  // xp bar + level badge — the bar tracks the EASED xp so bar and label can't disagree
   const need = xpNeed();
-  document.getElementById('xpfill').style.width = Math.min(100, game.xp/need*100)+'%';
-  document.getElementById('xplabel').textContent = `LEVEL ${game.level} — ${game.xp} / ${need} XP`;
-  document.getElementById('lvlbadge').textContent = game.level;
+  if(game.level !== hudLevel){ hudLevel = game.level; repaintCounter('xp'); } // "/ need" changed
+  setCounter('xp', game.xp);
+  setWidth(document.getElementById('xpfill'), Math.min(100, counters.xp.shown/need*100));
+  setText(document.getElementById('lvlbadge'), String(game.level));
   // dash pips
   const pips = document.getElementById('pips');
   const nPips = 3;
@@ -536,21 +771,21 @@ function updateHUD(){
     pips.innerHTML=''; for(let i=0;i<nPips;i++){ const d=document.createElement('div'); d.className='pip'; pips.appendChild(d); }
   }
   const frac = 1 - p.dashCd/p.dashMaxCd;
-  for(let i=0;i<nPips;i++) pips.children[i].className = 'pip' + (frac*nPips > i ? ' full' : '');
-  // kills
-  const k = document.getElementById('kills');
-  k.innerHTML = game.kills.map((n,i)=>
-    `<div class="row">${n} <span class="dot" style="background:${RARITY_COLORS[i]}"></span></div>`).join('');
-  document.getElementById('coinhud').textContent = '🪙 ' + progress.coins;
-  document.getElementById('mycohud').textContent = '🌿 ' + progress.myco;
+  for(let i=0;i<nPips;i++){
+    const cls = 'pip' + (frac*nPips > i ? ' full' : '');
+    if(pips.children[i].className !== cls) pips.children[i].className = cls;
+  }
+  for(let i=0;i<game.kills.length;i++) setCounter('kill'+i, game.kills[i]);
+  setCounter('coins', progress.coins);
+  setCounter('myco', progress.myco);
   // zone
   const d = Math.hypot(p.group.position.x, p.group.position.z);
   const z = d<40?'MEADOW':d<90?'DEEPWOOD':d<140?'GLOAM':'HEART OF THE BLOOM';
-  document.getElementById('zone').textContent = '— '+z+(progress.depth>1?' · DEPTH '+progress.depth:'')+' —';
+  setText(document.getElementById('zone'), '— '+z+(progress.depth>1?' · DEPTH '+progress.depth:'')+' —');
   if(!game.bossSpawned)
-    document.getElementById('objective').textContent = `Slay rare+ mushrooms to lure the Bloom's ruler (${game.rareKills}/8)`;
+    setText(document.getElementById('objective'), `Slay ${8-game.rareKills} more rare+ mushroom${8-game.rareKills===1?'':'s'} to lure the Bloom's ruler out`);
   if(game.boss)
-    document.getElementById('bossfill').style.width = Math.max(0, game.boss.hp/game.boss.maxHp*100)+'%';
+    setWidth(document.getElementById('bossfill'), Math.max(0, game.boss.hp/game.boss.maxHp*100));
 }
 
 /* ---------- SPORE TOME (meta inventory) ---------- */
@@ -687,7 +922,7 @@ function renderGearCard(kind, id, def){
     btn.textContent = `+LEVEL 🪙${info.levelCost}`;
     if(progress.coins >= info.levelCost){
       btn.onclick = ()=>{
-        if(progress.levelUpGear(kind, id)){ audio.click(); renderTome(); updateHUD(); updateBackpack(); }
+        if(progress.levelUpGear(kind, id)){ audio.gearUp(info.stars); renderTome(); updateHUD(); updateBackpack(); }
       };
     } else btn.disabled = true;
   }
@@ -697,7 +932,7 @@ function renderGearCard(kind, id, def){
 function openTome(){
   if(game.state === 'tome') return;
   tomeReturn = game.state;
-  if(game.state === 'play'){ game.state = 'tome'; document.exitPointerLock?.(); }
+  if(game.state === 'play'){ game.state = 'tome'; document.exitPointerLock?.(); releaseHeld(); }
   else game.state = 'tome';
   renderTome();
   ['title','intro','pause','gameover','victory'].forEach(x=>$(x).classList.add('hidden'));
@@ -707,7 +942,7 @@ function openTome(){
 function closeTome(){
   $('tome').classList.add('hidden');
   game.state = tomeReturn;
-  if(tomeReturn === 'play' && !DEMO) renderer.domElement.requestPointerLock();
+  if(tomeReturn === 'play') grabPointer();
   const overlayFor = { title:'title', intro:'intro', pause:'pause', over:'gameover', win:'victory' };
   if(overlayFor[tomeReturn]) show(overlayFor[tomeReturn]);
 }
@@ -751,7 +986,7 @@ function renderInventory(){
       const lvlBtn = document.createElement('button');
       lvlBtn.className = 'invbtn'; lvlBtn.textContent = `+LVL 🪙${info.levelCost}`;
       lvlBtn.disabled = progress.coins < info.levelCost;
-      lvlBtn.onclick = ()=>{ if(progress.levelUpGear('weapon', id)){ audio.click(); updateBackpack(); renderInventory(); } };
+      lvlBtn.onclick = ()=>{ if(progress.levelUpGear('weapon', id)){ audio.gearUp(info.stars); updateBackpack(); renderInventory(); } };
       btnRow.appendChild(lvlBtn);
     }
     div.appendChild(btnRow);
@@ -818,7 +1053,7 @@ function renderInventory(){
         const lvlBtn = document.createElement('button');
         lvlBtn.className = 'invbtn'; lvlBtn.textContent = `+LVL 🪙${info.levelCost}`;
         lvlBtn.disabled = progress.coins < info.levelCost;
-        lvlBtn.onclick = ()=>{ if(progress.levelUpGear('armor', id)){ audio.click(); updateHUD(); updateGearHud(); renderInventory(); } };
+        lvlBtn.onclick = ()=>{ if(progress.levelUpGear('armor', id)){ audio.gearUp(info.stars); updateHUD(); updateGearHud(); renderInventory(); } };
         btnRow.appendChild(lvlBtn);
       }
       div.appendChild(btnRow);
@@ -832,7 +1067,7 @@ function renderInventory(){
 function openInventory(){
   if(game.state === 'inventory') return;
   invReturn = game.state;
-  if(game.state === 'play'){ game.state = 'inventory'; document.exitPointerLock?.(); }
+  if(game.state === 'play'){ game.state = 'inventory'; document.exitPointerLock?.(); releaseHeld(); }
   else game.state = 'inventory';
   renderInventory();
   ['title','intro','pause','gameover','victory'].forEach(x=>$(x).classList.add('hidden'));
@@ -842,12 +1077,31 @@ function openInventory(){
 function closeInventory(){
   $('inventory').classList.add('hidden');
   game.state = invReturn;
-  if(invReturn === 'play' && !DEMO) renderer.domElement.requestPointerLock();
+  if(invReturn === 'play') grabPointer();
 }
 game.openInventory = openInventory; game.closeInventory = closeInventory;
 
 /* ---------- input ---------- */
+/* item 58: held state is only ever as correct as its release paths. Anything held must be
+   released by keyup AND by every way focus can leave: window blur, tab hide, pointerup,
+   pointercancel and pointerleave. A channelled ability that only listens to keyup keeps
+   channelling after an alt-tab, because keyup is delivered to the window that has focus. */
 const keys = {};
+const holds = {};   // name -> release fn, for anything held longer than one frame
+function beginHold(name, onRelease){ if(holds[name]) return false; holds[name] = onRelease || null; return true; }
+function endHold(name){ const r = holds[name]; if(r === undefined) return false; delete holds[name]; if(r) r(); return true; }
+function releaseHeld(){
+  for(const k in keys) keys[k] = false;           // the whole map, not just movement keys
+  for(const n in holds) endHold(n);
+  if(game.player && game.player.moveInput) game.player.moveInput.set(0,0,0);
+}
+game.beginHold = beginHold; game.endHold = endHold; game.releaseHeld = releaseHeld;
+game.heldKeys = ()=> Object.keys(keys).filter(k=>keys[k]).concat(Object.keys(holds).map(h=>'hold:'+h)); // for verification
+addEventListener('blur', releaseHeld);
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) releaseHeld(); });
+// pointer releases are separate events on purpose: a drag that ends outside the canvas fires
+// pointercancel or pointerleave and never pointerup, which is exactly how a channel gets stuck.
+for(const ev of ['pointerup','pointercancel','pointerleave']) addEventListener(ev, ()=>{ for(const n in holds) endHold(n); });
 addEventListener('keydown', e=>{
   keys[e.code] = true;
   if(e.code === 'KeyM'){ audio.init(); const m = audio.toggleMute();
@@ -866,19 +1120,16 @@ addEventListener('keydown', e=>{
   }
   if(/^Digit[1-7]$/.test(e.code) && game.state === 'play'){
     const idx = parseInt(e.code.slice(5), 10) - 1;
-    const p = game.player;
-    if(p && p.weapons[idx] && p.weapons[idx] !== p.equipped){
-      p.equipWeapon(p.weapons[idx]); updateBackpack(); audio.click();
-    }
+    selectWeapon(game.player && game.player.weapons[idx]); // same path the HUD slot click takes
   }
   const potionKey = { KeyQ:'power', KeyE:'haste', KeyR:'swift', KeyF:'vitality', KeyG:'fortify' }[e.code];
-  if(potionKey && game.state === 'play'){
-    if(game.player.usePotion(potionKey, game)) updateBackpack();
-  }
-  if(e.code === 'Space'){ e.preventDefault(); tryJump(); }
+  if(potionKey) drinkPotion(potionKey);
+  // e.repeat guard: auto-repeat is not a second press. Without it, holding Space burns both
+  // jumps in one keystroke and holding Shift re-triggers the dash the instant it comes off cd.
+  if(e.code === 'Space'){ e.preventDefault(); if(!e.repeat) tryJump(); }
   if(e.code === 'KeyH' && game.state === 'play') tryHarvest();
 });
-addEventListener('keyup', e=> keys[e.code] = false);
+addEventListener('keyup', e=>{ keys[e.code] = false; endHold(e.code); });
 addEventListener('mousedown', e=>{
   if(game.state==='play' && e.button===0 && document.pointerLockElement) game.player.attack(game);
 });
@@ -891,12 +1142,18 @@ function tryJump(){
     particles.burst(p.group.position.clone(), 6, {r:1,g:1,b:1, spread:1.5, size:5, life:0.4});
   }
 }
-addEventListener('keydown', e=>{ if(e.code==='ShiftLeft' && game.state==='play') game.player.startDash(game); });
+addEventListener('keydown', e=>{ if(e.code==='ShiftLeft' && !e.repeat && game.state==='play') game.player.startDash(game); });
 
-/* pointer lock */
-renderer.domElement.addEventListener('click', ()=>{
-  if(game.state==='play' && !document.pointerLockElement) renderer.domElement.requestPointerLock();
-});
+/* pointer lock — a browser refusing it (headless, iframe, user gesture rules) is a refusal,
+   not an error, so every call site goes through here and swallows the rejection. */
+function grabPointer(){
+  if(DEMO || document.pointerLockElement) return;
+  try {
+    const r = renderer.domElement.requestPointerLock();
+    if(r && r.catch) r.catch(()=>{}); // newer Chrome returns a promise
+  } catch(e){}
+}
+renderer.domElement.addEventListener('click', ()=>{ if(game.state==='play') grabPointer(); });
 let camYaw = 0, camPitch = 0.20;
 addEventListener('mousemove', e=>{
   if(document.pointerLockElement && game.state==='play'){
@@ -904,6 +1161,18 @@ addEventListener('mousemove', e=>{
     camPitch = THREE.MathUtils.clamp(camPitch + e.movementY*0.0022, -0.2, 1.1);
   }
 });
+/* item 05: scroll-wheel boom length. CAM_DIST_MIN is a framing constraint, not taste — closer
+   than this and the player's own body hides the melee arc; further than CAM_DIST_MAX and a
+   mushroom's telegraph is too small to read before it lands. */
+const CAM_DIST_MIN = 4.2, CAM_DIST_MAX = 14, CAM_DIST_DEFAULT = 7.5;
+let camDist = CAM_DIST_DEFAULT;
+addEventListener('wheel', e=>{
+  if(game.state !== 'play') return;
+  e.preventDefault();
+  // deltaMode 1 is lines, 2 is pages — normalize so a trackpad and a wheel feel the same
+  const step = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1) * 0.0055;
+  camDist = THREE.MathUtils.clamp(camDist + step, CAM_DIST_MIN, CAM_DIST_MAX);
+}, { passive:false });
 
 /* ---------- menu wiring ---------- */
 const $ = id=>document.getElementById(id);
@@ -930,8 +1199,8 @@ function startRun(){
   game.startTime = performance.now();
   $('hud').classList.add('on');
   audio.startBGM();
-  announce('Hunt the Bloom!');
-  if(!DEMO) renderer.domElement.requestPointerLock();
+  announce('Hunt the Bloom — rare caps lure its ruler out', 'good');
+  grabPointer();
   spawnWave(7);
   updateHUD(); updateBuffs(); updateBackpack(); updateContracts();
 }
@@ -939,10 +1208,11 @@ function pauseGame(){
   game.state = 'pause'; show('pause');
   $('pauseseed').textContent = `World seed #${game.seed} · ${world.theme.name}`;
   document.exitPointerLock?.();
+  releaseHeld(); // a key held across the pause would still be held on resume
 }
 function resumeGame(){
   game.state = 'play'; show(null);
-  if(!DEMO) renderer.domElement.requestPointerLock();
+  grabPointer();
 }
 function resetRun(){
   for(const e of game.enemies) if(!e.dead) scene.remove(e.group);
@@ -973,6 +1243,7 @@ function resetRun(){
   if(game.player) scene.remove(game.player.group);
   game.player = new Player(scene);
   game.player.moveInput = new THREE.Vector3();
+  shadowize(game.player.group);
   applyMutations();
   $('bosswrap').style.display = 'none';
   document.getElementById('objective').textContent = 'Hunt the Bloom';
@@ -1070,19 +1341,44 @@ function demoInput(dt){
 /* ---------- camera ---------- */
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3(0, 6, -8);
+const camPivot = new THREE.Vector3();
+const camDesired = new THREE.Vector3();
+const CAM_CLEAR = 0.75; // how far the lens stays off any surface it would otherwise enter
+/* item 05: the old clamp only lifted the FINAL point above the terrain, which is wrong wherever
+   the ground between the player and the camera is higher than both ends — the ravine, a cave
+   mouth, the tower base. Those are exactly the places the game was built for drama. Marching the
+   boom and pulling in at the first blocked sample fixes the case the clamp cannot see, and
+   groundOnly() is the right query because it accounts for props, not just terrain height. */
+function boomDistance(pivot, dirX, dirY, dirZ, want){
+  const SAMPLES = 6;
+  for(let i=1;i<=SAMPLES;i++){
+    const t = want * (i/SAMPLES);
+    const x = pivot.x + dirX*t, y = pivot.y + dirY*t, z = pivot.z + dirZ*t;
+    if(y < groundOnly(x, z) + CAM_CLEAR){
+      // pull to just before the blocked sample. The floor is small on purpose: a boom blocked
+      // at its first sample must be allowed to sit on the player's head, because 0.8 was still
+      // far enough back to be inside the wall the march just found.
+      return Math.max(0.3, want*((i-1)/SAMPLES) - 0.15);
+    }
+  }
+  return want;
+}
 function updateCamera(dt){
   const p = game.player;
-  const pivot = p.group.position.clone().add(new THREE.Vector3(0, 2.0, 0));
-  const dist = 7.5;
-  const off = new THREE.Vector3(
-    -Math.sin(camYaw)*Math.cos(camPitch), Math.sin(camPitch), -Math.cos(camYaw)*Math.cos(camPitch)
-  ).multiplyScalar(dist);
-  const desired = pivot.clone().add(off);
-  // keep above terrain
-  const minY = groundHeight(desired.x, desired.z) + 0.7;
+  camPivot.copy(p.group.position); camPivot.y += 2.0;
+  const dirX = -Math.sin(camYaw)*Math.cos(camPitch), dirY = Math.sin(camPitch), dirZ = -Math.cos(camYaw)*Math.cos(camPitch);
+  const dist = boomDistance(camPivot, dirX, dirY, dirZ, camDist);
+  camDistNow = dist;
+  camDesired.set(camPivot.x + dirX*dist, camPivot.y + dirY*dist, camPivot.z + dirZ*dist);
+  const desired = camDesired;
+  // last-resort floor: the marched boom can still land the lens on a lip between two samples
+  const minY = groundOnly(desired.x, desired.z) + CAM_CLEAR;
   if(desired.y < minY) desired.y = minY;
-  camPos.lerp(desired, Math.min(1, dt*6));
-  camTarget.lerp(pivot, Math.min(1, dt*10));
+  // snap in, ease out: a blocked boom must be honoured THIS frame or the lens spends the lerp
+  // inside the rock, but returning to full length can take its time.
+  const pull = dist < camPos.distanceTo(camPivot) - 0.05 ? 1 : Math.min(1, dt*6);
+  camPos.lerp(desired, pull);
+  camTarget.lerp(camPivot, Math.min(1, dt*10));
   camera.position.copy(camPos);
   if(game.shakeT > 0){
     game.shakeT -= dt;
@@ -1095,6 +1391,28 @@ function updateCamera(dt){
   camera.lookAt(camTarget);
 }
 
+let camDistNow = CAM_DIST_DEFAULT; // exposed for verification: the boom length actually used
+game.camInfo = ()=>({ want: camDist, used: camDistNow, y: camera.position.y,
+  ground: groundOnly(camera.position.x, camera.position.z) });
+// for verification: the marched boom vs the old final-Y clamp, from an arbitrary stance.
+// buried = samples along the boom that sit below the surface, i.e. lens inside the world.
+game.camProbe = (x, y, z, yaw, pitch, want=camDist)=>{
+  const pivot = new THREE.Vector3(x, y+2.0, z);
+  const dx = -Math.sin(yaw)*Math.cos(pitch), dy = Math.sin(pitch), dz = -Math.cos(yaw)*Math.cos(pitch);
+  const used = boomDistance(pivot, dx, dy, dz, want);
+  const buried = (ex, ey, ez)=>{ let n = 0;
+    for(let i=1;i<=12;i++){ const t = i/12;
+      if(pivot.y+(ey-pivot.y)*t < groundOnly(pivot.x+(ex-pivot.x)*t, pivot.z+(ez-pivot.z)*t)) n++; }
+    return n; };
+  const ox = pivot.x+dx*want, oy = pivot.y+dy*want, oz = pivot.z+dz*want;
+  const oldY = Math.max(oy, groundOnly(ox, oz) + CAM_CLEAR); // exactly what the old code did
+  const nx = pivot.x+dx*used, nz = pivot.z+dz*used;
+  const ny = Math.max(pivot.y+dy*used, groundOnly(nx, nz) + CAM_CLEAR); // same final clamp as updateCamera
+  return { want, used, oldBuried: buried(ox, oldY, oz), newBuried: buried(nx, ny, nz),
+    oldY:+oldY.toFixed(2), newY:+ny.toFixed(2),
+    oldClearance:+(oldY - groundOnly(ox, oz)).toFixed(2), newClearance:+(ny - groundOnly(nx, nz)).toFixed(2) };
+};
+
 /* ---------- title-screen ambient camera ---------- */
 let titleAngle = 0;
 function titleCamera(dt){
@@ -1106,8 +1424,77 @@ function titleCamera(dt){
   camera.lookAt(mp.x*0.75, 30, mp.z*0.75); // over the grove, toward the mother-mushroom tower
 }
 
+/* ---------- sun shadows (item 06, main.js half) ---------- */
+/* The light rig lives in world.js. This half owns the renderer state, the quality tier and the
+   per-frame retarget; it degrades to a no-op if world.sun is not exposed and no directional
+   light can be found, so the two waves can land in either order. */
+let sun = null;
+const sunDir = new THREE.Vector3();
+const SUN_BOOM = 170; // how far up-sun the light sits from the player, inside near/far
+function initShadows(){
+  if(!SHADOW_SIZE) return;
+  sun = world.sun || scene.children.find(o=>o.isDirectionalLight) || null;
+  if(!sun) return;
+  sun.castShadow = true;
+  const sh = sun.shadow;
+  sh.mapSize.set(SHADOW_SIZE, SHADOW_SIZE);   // quality tier is this file's call
+  const c = sh.camera;
+  if(c.right <= 5){ // still at three.js defaults, i.e. world.js has not configured it yet
+    c.left = -120; c.right = 120; c.top = 120; c.bottom = -120;
+    c.near = 1; c.far = 520;
+    c.updateProjectionMatrix();
+    sh.bias = -0.0007; sh.normalBias = 0.4;
+  }
+  scene.add(sun.target); // in the graph AND manually updated — either alone is a silent trap
+  shadowize(scene);
+}
+game.shadowInfo = ()=>{ // for verification
+  let casters = 0, receivers = 0;
+  scene.traverse(o=>{ if(o.isMesh){ if(o.castShadow) casters++; if(o.receiveShadow) receivers++; } });
+  return { tier: SHADOW_TIER, size: SHADOW_SIZE, enabled: renderer.shadowMap.enabled,
+    type: renderer.shadowMap.type, fromWorld: !!(world && world.sun), sun: !!sun,
+    mapSize: sun ? sun.shadow.mapSize.width : 0,
+    box: sun ? [sun.shadow.camera.left, sun.shadow.camera.right] : null,
+    bias: sun ? sun.shadow.bias : null, normalBias: sun ? sun.shadow.normalBias : null,
+    casters, receivers, programs: renderer.info.programs.length };
+};
+/* Opt-in pass over an existing subtree. Idempotent, so world.js setting its own flags later
+   costs nothing, and it is called on spawn — never per frame. Exclusions matter more than the
+   inclusions: additive shells and BackSide ink would cast solid black, and a vertex-animated
+   ShaderMaterial casts from its un-animated pose because the depth pass is a different program. */
+function shadowize(root){
+  if(!SHADOW_SIZE || !sun) return;
+  root.traverse(o=>{
+    if(!o.isMesh || o.userData.noShadow) return;
+    const m = o.material;
+    if(!m || Array.isArray(m)) return;
+    if(m.transparent || m.blending !== THREE.NormalBlending || m.depthWrite === false) return;
+    if(m.isShaderMaterial || m.isRawShaderMaterial) return;
+    if(m.side === THREE.BackSide) return;
+    const geo = o.geometry;
+    if(geo && !geo.boundingSphere) geo.computeBoundingSphere();
+    const r = geo && geo.boundingSphere ? geo.boundingSphere.radius : 0;
+    if(r > 320) return; // sky dome and cloud shell: outside the rig entirely
+    o.receiveShadow = true;
+    o.castShadow = true;
+  });
+}
+// Retarget every frame so the ortho box stays tight around the action. world.js's day-cycle
+// updater rewrites sun.position from the ORIGIN each frame, so we read the direction it just set
+// and re-place the light relative to the player: retargeting alone would skew the light by
+// however far the player has walked from the origin.
+function updateSunShadow(){
+  if(!sun) return;
+  const pp = game.player ? game.player.group.position : camTarget;
+  sunDir.copy(sun.position);
+  if(sunDir.lengthSq() < 1e-6) return;
+  sunDir.normalize();
+  sun.position.set(pp.x + sunDir.x*SUN_BOOM, sunDir.y*SUN_BOOM, pp.z + sunDir.z*SUN_BOOM);
+  sun.target.position.set(pp.x, 0, pp.z);
+  sun.target.updateMatrixWorld();
+}
+
 /* ---------- main loop ---------- */
-resetRun();
 const clock = new THREE.Clock();
 let elapsed = 0, fpsAcc = 0, fpsN = 0;
 let spawnCd = 0;
@@ -1130,14 +1517,21 @@ function tick(){
 
   world.update(dt, elapsed);
   particles.update(dt);
+  rewardPops.update(dt);
+  // counters ease outside the state branches on purpose: a payout collected on the last frame
+  // before a pause should still finish counting up, not freeze mid-number.
+  tickCounters(dt);
 
   if(game.state === 'title' || game.state === 'intro'){
     titleCamera(dt);
-    renderer.render(scene, camera);
+    updateSunShadow();
+    hideHoverTag();
+    renderFrame();
     return;
   }
   if(game.state === 'pause' || game.state === 'tome' || game.state === 'inventory'){
-    renderer.render(scene, camera);
+    hideHoverTag(); // the chip must not survive into a menu that is drawn over the world
+    renderFrame();
     return;
   }
   const p = game.player;
@@ -1241,17 +1635,55 @@ function tick(){
     updateHUD(); updateBuffs();
   }
   updateCamera(dt);
-  if(!DEMO_NORENDER) renderer.render(scene, camera);
+  updateSunShadow();
+  updateHoverTag(dt);
+  renderFrame();
   if(DEMO && (elapsed|0) !== lastDbg){ lastDbg = elapsed|0;
     document.title = JSON.stringify({k:game.totalKills, hp:Math.round(p.hp), e:game.enemies.length, lv:game.level, xp:game.xp, ess:game.runEssences.join(','),
       px:p.group.position.x.toFixed(1), pz:p.group.position.z.toFixed(1), st:game.state,
       mi:p.moveInput.length().toFixed(2), vx:p.vel.x.toFixed(2), di:demoCalls, dt:dt.toFixed(4)}); }
 }
 let lastDbg = -1;
-tick();
+// item 50: #boot comes off after the FIRST frame is actually on screen, so the overlay covers
+// the generation stall AND the pop-in that follows it.
+function renderFrame(){
+  // ?norender never draws, so the overlay is dropped on the first loop pass instead — otherwise
+  // the headless sim path would sit behind a covered screen forever.
+  if(!DEMO_NORENDER) renderer.render(scene, camera);
+  if(bootShown){ bootShown = false; document.getElementById('boot').classList.remove('on'); }
+}
+let bootShown = false;
+/* Generation is one long blocking frame, so it cannot run during module eval — the overlay
+   would never paint. Two rAFs: the first commits the class, the second runs after the browser
+   has actually drawn it. */
+function boot(){
+  const bootEl = document.getElementById('boot');
+  const log = window.__bootLog = []; // for verification: proves the overlay paints first
+  const mark = (what)=> log.push({ what, t:+performance.now().toFixed(1), on: bootEl.classList.contains('on') });
+  bootEl.classList.add('on');
+  bootShown = true;
+  mark('overlay-on');
+  // ?bootdelay=MS holds the overlay up before generation starts, so the covered stall can be
+  // screenshotted; the honest path is the two-rAF handoff below.
+  const delay = parseFloat(PARAMS.get('bootdelay')) || 0;
+  const run = ()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    mark('painted');
+    world = buildWorld(scene, QUALITY, SEED);
+    window.__world = world; // for verification
+    game.theme = world.theme;
+    initShadows();
+    resetRun();
+    mark('world-built');
+    tick();
+    mark('first-frame');
+    if(DEMO) demoAutoStart();
+  }));
+  if(delay) setTimeout(run, delay); else run();
+}
+boot();
 
 /* demo auto-start for verification */
-if(DEMO){
+function demoAutoStart(){
   audio.init = ()=>{}; // no audio context in headless
   setTimeout(()=>{
     show(null); startRun();
@@ -1289,10 +1721,11 @@ if(DEMO){
         const BossCtor = archetype === 'glutton' ? GluttonBoss : Boss;
         game.boss = new BossCtor(scene, new THREE.Vector3(pp.x+8, 0, pp.z+8), trait, game.bossPlan.mult);
         game.enemies.push(game.boss);
+        tagEnemy(game.boss); shadowize(game.boss.group);
         const bossLabel = (game.boss.R.name + (trait ? ' · ' + trait.name : '')).toUpperCase();
         document.getElementById('bossname').textContent = bossLabel;
         document.getElementById('bosswrap').style.display = 'block';
-        announce('⚠ ' + bossLabel + ' AWAKENS ⚠');
+        announce('⚠ ' + bossLabel + ' — dash through its rings, hit it on the recovery', 'bad');
         if(PARAMS.has('win')) setTimeout(()=>{ if(game.boss && !game.boss.dead) game.boss.hit(99999, pp, game); }, 2500);
       }, 1500);
     }
