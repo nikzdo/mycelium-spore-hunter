@@ -166,3 +166,85 @@ draw calls.
 **Rules that must survive the pass** (CLAUDE.md): no `PointLight` on anything that spawns in
 bursts; no per-frame allocations in hot paths; diff-based DOM; `surfaceAt`'s shared return
 object stays read-immediately-never-store; seeded determinism unchanged.
+- **palette → world.js (item: generative palettes, new file `js/palette.js`).** `js/palette.js` has
+  **zero imports** on purpose: it emits sRGB hex ints, 0-1 sRGB triples and `{h,s,l}` triples only, so
+  the sRGB→working conversion stays at the one boundary item 41 established, and it runs under plain
+  `node` (that is how the contrast/variety numbers below were measured rather than asserted). Wiring,
+  in order:
+  1. `import { makePalette, jitterFor, rockSetFor } from './palette.js';`
+  2. Delete `export const THEMES = [...]` and replace the pick in `buildTerrain()` —
+     `const theme = THEME = THEMES[(rng()*THEMES.length)|0];` becomes
+     `const theme = THEME = makePalette(rng);`. **Keep the field named `world.theme`**: main.js reads
+     `world.theme.name` in four places (Tome row, pause, game-over, victory) and the palette carries a
+     generated `name`, so those keep working untouched. Nothing else about the call site changes —
+     `makePalette` is a pure function of the rng stream, consumes it in a fixed order, and every field
+     `world.js` reads today (`skyTop/skyMid/skyBot/fog/sun/hemiSky/hemiGround`, `grassBase`/`grassTip`
+     as the same 6-number sRGB triples, `terraHue/terraSat/canopyHue/canopySat/canopyBase`) is still
+     there with the same name and shape. **A one-line swap gets you the whole system.**
+  3. Optional, and this is where the actual variety lands. Each is independent:
+     - **terrain strata** — `theme.terra` = `{grass, emerald, dry, moss, rock, clear, path, corrupt}`
+       hexes, i.e. exactly the eight `tint(0x…)` constants at the top of the colour pass. Use them
+       directly (`const cGrass = new THREE.Color(theme.terra.grass)`) instead of `tint()`. The legacy
+       `terraHue/terraSat` offsets still work if you'd rather not touch that block; `terra` is the
+       enforced-contrast version and the one the readability floors were measured on.
+     - **tree variety** — replace the canopy `canColor.setHSL(((0.26+rng()*0.08+theme.canopyHue)…)` line
+       with `const j = jitterFor(theme,'tree',rng, J); canColor.setHSL(j.h, j.s, j.l, THREE.SRGBColorSpace);`
+       (hoist `const J = {h:0,s:0,l:0,hex:0}` out of the loop — `jitterFor` writes into `out`, so the
+       instance loop allocates nothing). Same call shape you already have, so item 41 is preserved.
+       That gives 3 weighted canopy variants × per-instance jitter = several related greens per forest
+       instead of one. `theme.canopyL` is a drop-in `[canLMin, canLVar]` if you keep the old path.
+     - **bushes / undergrowth** — `theme.bush`, `theme.bushDeep`, `theme.undergrowth`, `theme.moss`
+       replace the hardcoded `0x4a7a2e` / `#2f5a1c`; `jitterFor(theme,'bush',rng,out)` per instance.
+     - **trunks** — `theme.trunk` / `theme.trunkDark` replace `0x8a5a35`; `jitterFor(theme,'trunk',…)`.
+     - **rocks** — `theme.rock` is ROCK_PAL's exact shape (`{stone,basalt,chalk,crystal,rot}` each
+       `{base,side,tint}`) but as hex ints, so `const pal = paletteOf(theme.rock)` (fx.js, already
+       imported) gives you a per-world drop-in for `ROCK_PAL` at the `ROCK_PAL[palNames[…]]` site. For
+       per-formation variety use `rockSetFor(theme, stepRng)` → `{family, base, side, tint}` hexes,
+       which is `makeStack()`'s parameter shape unchanged.
+     - **crystals / emissive props** — `theme.accent` (diffuse), `theme.accentEmissive` and
+       `theme.accentIntensity` (**0.85, do not raise**: ACES at exposure 1.28 clips an additive term at
+       1.0 to flat white and the hue is gone), `theme.accentDark`, `theme.flowers[3]`.
+     - **distant mountains** — `theme.mountains[3]` replaces the hardcoded `0x6a5490/0x8d76b0/0xbaa9cf`
+       ring colours; they are derived from this world's horizon so the haze sits behind the fog.
+  4. **Do not break item 43.** `theme.fog` IS the horizon band and `theme.skyBot` is derived *from* it
+     (same hue, slightly darker/more saturated) as its neighbour, so the existing
+     `fogCol → scene.fog → background → uFog` chain stays correct with no change.
+  - **Measured, 200 seeded palettes (174 generated + 26 authored), `node` harness.** Zero failures and
+    zero constraint relaxations on every floor. min / median contrast ratio: grass-tip vs ground
+    **1.81 / 2.07** (floor 1.35) · grass-base vs ground **1.58 / 1.73** (1.15) · canopy vs sky-mid
+    **1.76 / 1.90** (1.50) · canopy vs ground **1.26 / 1.70** (1.15) · canopy vs fog **1.24 / 3.09**
+    (1.20) · accent vs ground **1.90 / 2.00** (1.90) · prop-cream `0xf2e4c8` vs ground **1.93 / 2.48**
+    (1.70) · dark-critter `0x8a6a42` vs ground **1.36 / 1.60** (1.35) · bush vs ground **1.18 / 1.92**
+    (1.18) · rock-side vs ground **1.81 / 1.85** (1.30). Accent hue separation from foliage and soil
+    min **0.114** (floor 0.11). |warm/cool split between sun and hemisphere fill| min **1.81** of a
+    possible 2.0 — the "never both warm" rule, measured, not claimed.
+  - **Why the ground is always a mid-tone:** the cream prop colour and the dark critter colour bracket
+    it from both sides, which pins ground luminance to **[0.232, 0.442]** in every world. That single
+    window is what the rest of the palette is solved against; if entities.js ever restyles the stem or
+    the Common cap, update `PROP_CREAM`/`CRITTER_BROWN` in palette.js and the floors re-derive.
+  - **Variety, same 200:** base hue spans 0.002–0.997 (sd 0.288, 12 hue buckets all populated, 9–20
+    each); foliage hue 0.042–0.454 (sd 0.108 — bounded on purpose, that is the "foliage reads as
+    foliage" band); soil hue 0.010–0.994; accent hue 0.000–0.997 (sd 0.286); saturation multiplier
+    0.62–1.38; ground luminance 0.236–0.382; sky-mid luminance 0.072–0.541. 169 distinct
+    (season, hour, ground, harmony, hue-octant) signatures out of 174 generated, and 160 distinct
+    generated names — not clustering into a few looks.
+  - **Per-instance jitter budgets** (±, sRGB HSL; `JITTER` is exported so the dev panel can read it):
+    tree 0.020/0.070/0.085 · bush 0.016/0.060/0.070 · grass 0.014/0.050/0.060 · rock 0.012/0.050/0.075
+    · trunk 0.014/0.060/0.065 · moss 0.020/0.070/0.080 · deco 0.022/0.080/0.090. Hue is deliberately
+    capped near 0.02 — about half the narrowest season band — so an individual instance can never
+    leave the band its world established. Measured realised spread over 400 instances of one palette:
+    trees 0.090 hue / 0.247 sat / 0.277 value (variant offsets + jitter), bushes 0.032/0.119/0.140,
+    rocks 0.024/0.100/0.150.
+  - **The 4 authored themes are preserved as authored entries the roll selects** (`AUTHORED`,
+    `AUTHORED_CHANCE = 0.18`, so ~1 world in 5.5), NOT as generator seeds — a generator that happened
+    to reproduce them today would stop the moment anyone re-tuned a table. Their sky/sun/grass/canopy
+    numbers are byte-identical to the old `THEMES`; only the NEW fields (terra strata, rock families,
+    canopy variants, accent, haze) are derived for them, through the same solver, so they meet the same
+    floors. One honest exemption: Teal Dusk and Blossom Spring violate the warm/cool split rule
+    (|split| 0.49 and 0.81) because their authored sun and hemisphere are both cool. That is the
+    authored art direction and it is left alone — it is also exactly the accident the generator now
+    makes structurally impossible.
+  - **Determinism:** `makePalette(rng)` is a pure function of the stream, no `Math.random()`. Verified
+    across two fresh `node` processes: seeds 1/42/1337/9999 →
+    sha256 `c05465127ee931556afe823639ac55acf685a20b58694ff181dde8d9fcd6152b`, identical both runs.
+  - Contact sheet for 18 generated + the 4 authored palettes: **`palette-sheet.png`** in the repo root.
