@@ -926,17 +926,37 @@ export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
   const sunDist = Math.hypot(60,90,30);
   const sunAxisZ = new THREE.Vector3(0,0,1), sunAxisY = new THREE.Vector3(0,1,0);
   const sunDir = new THREE.Vector3(); // reused every frame — no per-frame allocation
+  /* THE DAY CYCLE, and the two constants that keep it from turning the world brown.
+
+     WHY THIS MATTERED: cream is a load-bearing colour here. Mushroom stems, spore pods and the
+     hunter's own face band are all PROP_CREAM, and palette.js solves the ground's luminance
+     against it so those props stay readable. But readability was solved against the ALBEDO, and
+     what reaches the eye is albedo x light. Measured with the old numbers, this sweep took the sun
+     from elevation 0.824 down to 0.096 — five and a half degrees, effectively grazing the horizon.
+     At that angle an upward-facing surface gets almost nothing from the sun, so the dominant light
+     on it becomes the hemisphere's GROUND bounce, which is the soil colour by construction
+     (hemiGround, ~#663a25). Cream lit mostly by brown reads as brown. Nothing had changed about
+     the stems; they were simply being lit by dirt for part of every cycle.
+
+     ELEV_SWING is therefore the fix, and note what it does NOT touch. Rotation about Y sweeps the
+     light around the compass and never changes elevation, so it keeps every bit of the moving
+     shadows that make the world feel alive. Only the Z rotation raises and lowers the sun, and
+     that is the one narrowed: 0.5 -> 0.28 turns a 0.10..0.82 range into 0.30..0.73, which is a
+     day that still visibly changes but never becomes dusk. The intensity band is tightened for the
+     same reason — a 1.37x swing bottoming out at 2.32 was doing as much of the darkening as the
+     angle was. */
+  const ELEV_SWING = 0.28;      // radians of up/down sweep; see the note above before raising it
   world.updaters.push((dt,t)=>{
     const cycle = t*0.05; // ~126s per full sweep
-    sunDir.copy(sunBaseDir).applyAxisAngle(sunAxisZ, Math.sin(cycle)*0.5).applyAxisAngle(sunAxisY, cycle*0.6);
+    sunDir.copy(sunBaseDir).applyAxisAngle(sunAxisZ, Math.sin(cycle)*ELEV_SWING).applyAxisAngle(sunAxisY, cycle*0.6);
     skyMat.uniforms.uSunDir.value.copy(sunDir);
     // item 06: the light is placed RELATIVE to its target, not to the origin. main.js moves
     // sun.target onto the player, and a sun parked at the origin would drag the ortho shadow box
     // off the player the moment they walked away from spawn.
     sun.position.copy(sun.target.position).addScaledVector(sunDir, sunDist);
     const elevation = sunDir.y;
-    sun.intensity = 2.2 + Math.max(0, elevation)*1.2;
-    hemi.intensity = 0.7 + Math.max(0, elevation)*0.25;
+    sun.intensity = 2.62 + Math.max(0, elevation)*0.88;   // ~2.88 .. 3.26 across the sweep
+    hemi.intensity = 0.74 + Math.max(0, elevation)*0.16;
   });
 
   /* ----- terrain -----

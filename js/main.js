@@ -1544,9 +1544,14 @@ function renderTome(){
   const equipMode = tomeTab === 'equipment';
   $('tome').classList.toggle('equipmode', equipMode);
   $('equipscreen').classList.toggle('hidden', !equipMode);
+  /* The tab bar is outside both spreads now, so it is wired ONCE here and its `on` state is the
+     only thing that changes between tabs. Previously each spread wired its own pair, which is how
+     the two copies were able to drift apart in position in the first place. */
+  $('ttab-alch').onclick = ()=>{ tomeTab='alchemy'; closeEqPop(); renderTome(); };
+  $('ttab-equip').onclick = ()=>{ tomeTab='equipment'; renderTome(); };
+  $('ttab-alch').classList.toggle('on', !equipMode);
+  $('ttab-equip').classList.toggle('on', equipMode);
   if(equipMode){
-    $('eqtab-mut').onclick = ()=>{ tomeTab='alchemy'; closeEqPop(); renderTome(); };
-    $('eqtab-gear').onclick = ()=>{ tomeTab='equipment'; renderTome(); };
     $('eqpopclose').onclick = closeEqPop;
     // click-outside closes, but only on the backdrop itself — a click that started inside the card
     // and drifted out (selecting text, a fat-fingered button) must not dismiss it.
@@ -1590,14 +1595,10 @@ function renderTome(){
   const right = $('tomeright');
   const tabTitles = { alchemy:'Spore Alchemy', equipment:'Equipment Collection' };
   const tabSubs = { alchemy:'PERMANENT MUTATIONS', equipment:'STARS FROM DUPLICATES · LEVELS FROM COINS' };
+  // No tab buttons in here any more: they live in #tometabbar, above both spreads. Re-emitting
+  // them would silently steal the shared ids and reintroduce the jump.
   right.innerHTML = `<h2>${tabTitles[tomeTab]}</h2>
-    <div class="tometabs">
-      <button class="ttab${tomeTab==='alchemy'?' on':''}" id="ttab-alch">MUTATIONS</button>
-      <button class="ttab${tomeTab==='equipment'?' on':''}" id="ttab-equip">EQUIPMENT</button>
-    </div>
     <div class="subtitle">${tabSubs[tomeTab]}</div>`;
-  $('ttab-alch').onclick = ()=>{ tomeTab='alchemy'; renderTome(); };
-  $('ttab-equip').onclick = ()=>{ tomeTab='equipment'; renderTome(); };
 
   if(tomeTab==='alchemy'){
     for(const m of MUTATIONS){

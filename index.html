@@ -282,7 +282,19 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
   background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
 /* ---------- tome tabs (alchemy / forge) ---------- */
-.tometabs{display:flex;gap:8px;justify-content:center;margin-bottom:10px}
+/* The shared tab bar. Both spreads are width:min(1060px,94vw), so the wrapper takes that width
+   and the bar aligns with the top-left corner of whichever one is showing — the buttons then sit
+   in the same place in both, which is the whole point. flex-start, not centre: a centred bar over
+   two spreads of identical width would also be stable, but the request was top-left, and left is
+   also where the eye lands first. */
+#tomewrap{width:min(1060px,94vw);display:flex;flex-direction:column;align-items:stretch;gap:9px}
+#tometabbar{display:flex;gap:8px;justify-content:flex-start;padding-left:4px}
+/* Both spreads give up the bar's height rather than overflowing the viewport with it, and they
+   give up a little MORE than the bar costs. Measured at 1280x720 with 82vh: bar 33 + gap 9 +
+   spread 590 + CLOSE TOME 64 + hint 25 came to exactly 720 — nothing clipped, but zero slack, so
+   any shorter window would have started cutting the top off the tab bar. 78vh leaves ~28 px. */
+#tomewrap .tomebook,#tomewrap #equipscreen{width:100%;height:min(628px,78vh)}
+.tometabs{display:none}
 .ttab{font-family:'Fredoka';font-weight:700;font-size:12px;letter-spacing:.06em;padding:7px 14px;border-radius:999px;
   border:2px solid #6b4a2a;cursor:pointer;background:rgba(255,250,235,.4);color:#6b3a1a}
 .ttab.on{background:linear-gradient(180deg,#ffcf6b,#f59b3c);box-shadow:0 2px 0 #6b4a2a}
@@ -416,7 +428,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   padding:14px 16px 12px;gap:10px}
 #equipscreen.hidden{display:none}
 #tome.equipmode .tomebook{display:none}
-#eqhead{display:flex;align-items:center;gap:9px;flex:0 0 auto}
+#eqhead{display:flex;align-items:center;gap:9px;flex:0 0 auto;min-height:22px}
 #eqpurse{margin-left:auto;display:flex;gap:12px;font-weight:700;font-size:15px;color:#6b3a1a}
 #eqbody{flex:1;display:flex;gap:14px;min-height:0}
 
@@ -850,6 +862,16 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 </div>
 
 <div id="tome" class="overlay hidden">
+  <!-- ONE tab bar for both spreads, and it lives OUT here on purpose. It used to be duplicated
+       inside each spread — centred on the Mutations page, top-left of the Equipment screen — so
+       switching tabs moved the very buttons you had just clicked, which is the one thing a tab
+       control must never do. Hoisting it into a wrapper that both spreads share means its position
+       is decided by the wrapper and cannot depend on which spread is up. -->
+  <div id="tomewrap">
+    <div id="tometabbar">
+      <button class="ttab" id="ttab-alch">MUTATIONS</button>
+      <button class="ttab" id="ttab-equip">EQUIPMENT</button>
+    </div>
   <div class="tomebook">
     <div class="tomepage left" id="tomeleft"></div>
     <div class="tomepage right" id="tomeright"></div>
@@ -860,11 +882,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
        lets this take the space. Portrait reference is a phone (doll above, inventory below); the
        landscape adaptation is doll BESIDE inventory, which keeps both above the fold. -->
   <div id="equipscreen" class="hidden">
-    <div id="eqhead">
-      <button class="ttab" id="eqtab-mut">MUTATIONS</button>
-      <button class="ttab on" id="eqtab-gear">EQUIPMENT</button>
-      <div id="eqpurse"></div>
-    </div>
+    <div id="eqhead"><div id="eqpurse"></div></div>
     <div id="eqbody">
       <div id="eqdoll">
         <div id="dollring"></div>
@@ -902,6 +920,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
       </div>
     </div>
   </div>
+  </div><!-- /#tomewrap -->
   <button id="tomeclose">CLOSE TOME</button>
   <div class="tomehint">TAB / I / ESC to close &nbsp;•&nbsp; mutations and your gear collection are permanent across hunts</div>
 </div>

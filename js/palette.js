@@ -87,6 +87,38 @@ export function hexHsl(hex){
    float and missed by a hair after quantisation. */
 const toLin = (c)=> c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 export function relLum(r, g, b){ return 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b); }
+
+/* ---------------- the sun's tint budget ----------------
+   THE BUG THIS EXISTS TO PREVENT: cream props coming out brown.
+
+   PROP_CREAM (0xf2e4c8) is a fixed colour — mushroom stems, spore pods, the hunter's own face
+   band — and the ground is deliberately solved AGAINST it (see creamVsGround). But nothing was
+   solved against the SUN, and the sun multiplies albedo, so a heavily tinted sun re-colours every
+   neutral surface in the world no matter what the contrast floors did. Measured on seed 42: the
+   generated sun came out #ffca99, channels (255,202,153) — a 0.60 min/max ratio — and cream lit by
+   it renders around (242,180,120), which is tan, not cream. The four hand-authored themes were
+   never this tinted (0xffe0b0 is 0.69) which is exactly why this only appeared once palettes
+   became generative.
+
+   The fix is a ceiling on how far the sun may sit from neutral, expressed as the ratio of its
+   dimmest channel to its brightest, and applied by mixing toward WHITE rather than by clamping
+   saturation. Two reasons for that choice:
+     - it is hue-agnostic, so the warm/cool temperature split the rig depends on survives intact —
+       only the STRENGTH of the tint is bounded, never its direction;
+     - clamping HSL saturation does not do the job, because at S=1.0 the channel spread is set by
+       LIGHTNESS, and both the generated and the authored suns were already at S=1.0. The thing
+       that actually differed between them was the spread, so the spread is what this bounds. */
+const SUN_MIN_CHANNEL = 0.72;   // dimmest sun channel, as a fraction of the brightest
+function limitTint(hex, minRatio){
+  const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  if(mx <= 0 || mn >= mx * minRatio) return hex;
+  // smallest mix-toward-white t for which mn'/mx' == minRatio, solved directly rather than
+  // searched: c' = c + t*(255-c), so the ratio is linear in t and inverts in one step.
+  const t = clamp01((mn - minRatio * mx) / (minRatio * (255 - mx) - (255 - mn)));
+  const mix = (c)=> Math.round(clamp(c + t * (255 - c), 0, 255));
+  return (mix(r) << 16) | (mix(g) << 8) | mix(b);
+}
 export const lumHex = (hex)=> {
   return relLum(((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255);
 };
@@ -533,7 +565,9 @@ function derive(S){
      light, so it cannot come out wrong. --- */
   const sunH = S.warmLight ? wrap01(0.070 + S.h0 * 0.045) : wrap01(0.505 + S.h0 * 0.09);
   const hemiSkyH = S.warmLight ? wrap01(0.560 + S.h0 * 0.075) : wrap01(0.070 + S.h0 * 0.05);
-  const sun = hslHex(sunH, clamp01(satOf(T.sunS) * 1.05), T.sunL);
+  // the tint budget is applied LAST, so the hour and the scheme still choose the sun's hue and
+  // strength freely and only the extreme end gets pulled back toward neutral
+  const sun = limitTint(hslHex(sunH, clamp01(satOf(T.sunS) * 1.05), T.sunL), SUN_MIN_CHANNEL);
   const hemiSky = hslHex(hemiSkyH, clamp01(satOf(0.55)), T.hemiL);
 
   const core = solveWorld({
@@ -628,6 +662,10 @@ export const AUTHORED_CHANCE = 0.18;   // ~1 world in 5.5 is one of the four kno
    recomputed; the new fields are derived from them — canopy hue and soil hue are read back out
    of the authored hexes — and pushed through the same solveWorld(), so the additions cannot
    disagree with the art direction they extend, and they meet the same readability floors. */
+/* Authored themes take the same tint budget as generated ones. Not for consistency's sake — for
+   the same reason: whatever the theme wants the light to feel like, cream props still have to read
+   as cream, and a rule that only applies to three quarters of the palettes is a rule you will be
+   surprised by. In practice this touches only the warmest of the four. */
 function expandAuthored(entry, idx){
   const [canH, canS, canL] = hexHsl(entry.canopyBase);
   const [fogH] = hexHsl(entry.fog);
@@ -637,6 +675,7 @@ function expandAuthored(entry, idx){
                         relLum(entry.grassTip[3], entry.grassTip[4], entry.grassTip[5]));
   const baseY = Math.min(relLum(entry.grassBase[0], entry.grassBase[1], entry.grassBase[2]),
                          relLum(entry.grassBase[3], entry.grassBase[4], entry.grassBase[5]));
+  entry = Object.assign({}, entry, { sun: limitTint(entry.sun, SUN_MIN_CHANNEL) });
   const sunH = hexHsl(entry.sun)[0], hemiH = hexHsl(entry.hemiSky)[0];
   const core = solveWorld({
     folH: canH, folS: canS, soilH, soilS,

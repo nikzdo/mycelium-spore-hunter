@@ -44,6 +44,27 @@ what keep it fast:
 - **Diff-based DOM updates.** HUD widgets touch the DOM only when their displayed state actually
   changes, never once per frame.
 
+## Lighting: cream is load-bearing
+
+`PROP_CREAM` (0xf2e4c8) is not decoration. Mushroom stems, spore pods and the hunter's own face
+band are all that one colour, and `palette.js` solves the ground's luminance *against* it so those
+props stay readable (`creamVsGround`). But readability was solved against the **albedo**, and what
+reaches the eye is albedo × light — so two things in the light rig can undo it, and both are now
+bounded:
+
+- **The sun's tint.** A heavily tinted sun re-colours every neutral surface no matter what the
+  contrast floors did. `limitTint()` caps the sun's dimmest channel at `SUN_MIN_CHANNEL` of its
+  brightest by mixing toward white — hue-agnostic, so the warm/cool temperature split survives and
+  only the strength of the tint is bounded. Clamping HSL saturation does *not* work here: at S=1.0
+  the channel spread is set by lightness, and the suns that caused the problem were already at 1.0.
+- **The sun's elevation.** `ELEV_SWING` in the day cycle. At a grazing sun an upward-facing surface
+  gets almost nothing direct, so the dominant light on it becomes the hemisphere's **ground**
+  bounce — which is the soil colour by construction. Cream lit mostly by brown reads as brown.
+  Note what the swing does *not* touch: rotation about Y sweeps the light around the compass
+  without changing elevation, so narrowing the Z swing keeps every bit of the moving shadows.
+
+If props ever look brown again, check the light before you touch a material.
+
 ## Shadow policy
 
 Two rules, and they are why the ground reads as shadow rather than as dirt:
