@@ -2304,7 +2304,9 @@ function resumeGame(){
 }
 function resetRun(){
   for(const e of game.enemies) if(!e.dead) scene.remove(e.group);
-  for(const pw of game.powerups) if(!pw.dead) scene.remove(pw.group);
+  // retire(), not scene.remove(): the removal was already happening, but the per-drop materials
+  // were being orphaned on the GPU every hunt.
+  for(const pw of game.powerups) pw.retire();
   for(const r of rings) scene.remove(r.mesh);
   rings.length = 0;
   for(const pu of puddles) scene.remove(pu.mesh);

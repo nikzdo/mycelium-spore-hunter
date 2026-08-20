@@ -1159,31 +1159,57 @@ function _pruneDrops(){
     if(d.dead || !d.group.parent) _liveDrops.splice(i,1);
   }
 }
+/* SHARED DROP GEOMETRY. Every Powerup used to build five fresh geometries — orb, outline hull,
+   halo sphere, light pillar, ground ring — and four fresh materials, and nothing ever disposed
+   any of it. Two problems in one place:
+     - WASTE: the halo, pillar and ring are byte-identical for every drop in the game, and the orb
+       has only four variants. Measured mid-run with 90 uncollected drops on the ground,
+       renderer.info.memory.geometries stood at 1368.
+     - LEAK: three.js frees GPU buffers on dispose() and nowhere else. A collected drop was removed
+       from the scene and filtered out of the array, but its five geometries and four materials
+       stayed resident for the life of the page. ~10 drops a kill over a 40-kill run is hundreds of
+       orphaned buffers; it only escaped notice because a new hunt is a full page reload.
+   Geometry is pure shape here — nothing is ever mutated per drop, only the mesh transform — so it
+   shares safely. INVARIANT: because these are shared, a Powerup must NEVER dispose them; retire()
+   below disposes only the per-drop materials, which have to stay per-drop because they carry the
+   drop's colour. This is the same rule fauna.js's sharedGeo() carries, for the same reason. */
+let DROP_GEO = null;
+function dropGeo(){
+  if(DROP_GEO) return DROP_GEO;
+  DROP_GEO = {
+    // shape reads the drop's kind at a glance: coin = flat spinning disc, gem = faceted essence,
+    // ring = a torus, whose hole is identifiable from the silhouette alone at pickup distance,
+    // orb = the default boost
+    coin: new THREE.CylinderGeometry(0.38, 0.38, 0.09, 14),
+    gem:  new THREE.OctahedronGeometry(0.36, 0),
+    ring: new THREE.TorusGeometry(0.30, 0.11, 8, 16),
+    orb:  new THREE.IcosahedronGeometry(0.5, 1),
+    halo: new THREE.SphereGeometry(0.62, 10, 8),
+    pillar: new THREE.CylinderGeometry(0.18, 0.32, 9, 10, 1, true),
+    ground: new THREE.RingGeometry(0.7, 1.05, 24),
+  };
+  return DROP_GEO;
+}
+
 export class Powerup {
   constructor(scene, pos, def){
     this.def = def; this.scene = scene; this.dead = false; this.t = Math.random()*7;
     const g = this.group = new THREE.Group();
-    // shape reads the drop's kind at a glance: coin = flat spinning disc, gem = faceted essence, orb = default boost
-    let orbGeo;
-    if(def.shape === 'coin') orbGeo = new THREE.CylinderGeometry(0.38, 0.38, 0.09, 14);
-    else if(def.shape === 'gem') orbGeo = new THREE.OctahedronGeometry(0.36, 0);
-    // a ring drop is a RING: the hole is the entire read, and a torus is the only shape in this
-    // list you can identify from the silhouette alone at pickup distance
-    else if(def.shape === 'ring') orbGeo = new THREE.TorusGeometry(0.30, 0.11, 8, 16);
-    else orbGeo = new THREE.IcosahedronGeometry(0.5, 1);
+    const G = dropGeo();
+    const orbGeo = G[def.shape] || G.orb;
     const orb = new THREE.Mesh(orbGeo,
       toonMat({ color:def.color, emissive:def.color, emissiveIntensity:0.9, rim:0.9 }));
-    addOutline(orb, 0.08);
-    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.62, 10, 8),
+    addOutline(orb, 0.08);         // shares orb's geometry AND fx's module-level outline material
+    const halo = new THREE.Mesh(G.halo,
       new THREE.MeshBasicMaterial({ color:def.color, transparent:true, opacity:0.10,
         blending:THREE.AdditiveBlending, depthWrite:false }));
     // rarity-colored light pillar — visible across the map
-    const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.32, 9, 10, 1, true),
+    const pillar = new THREE.Mesh(G.pillar,
       new THREE.MeshBasicMaterial({ color:def.color, transparent:true, opacity:0.11,
         blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide }));
     pillar.position.y = 3.5;
     // spinning ground ring
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.7, 1.05, 24),
+    const ring = new THREE.Mesh(G.ground,
       new THREE.MeshBasicMaterial({ color:def.color, transparent:true, opacity:0.55,
         blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide }));
     ring.rotation.x = -Math.PI/2; ring.position.y = -0.85;
@@ -1216,6 +1242,19 @@ export class Powerup {
     g.position.copy(this.scatterFrom);
     this.baseY = this.scatterTo.y;
     scene.add(g);
+  }
+  /* THE one exit. Removes the group and disposes the four per-drop materials — and ONLY the
+     materials: the geometries are shared by every other drop in the world (see dropGeo), so
+     disposing one here would empty every drop built afterwards. Idempotent, because a drop can be
+     picked up and then swept again by resetRun. */
+  retire(){
+    if(this._retired) return;
+    this._retired = true;
+    this.dead = true;
+    if(this.group.parent) this.group.parent.remove(this.group);
+    for(const m of [this.orb, this.halo, this.pillar, this.ring]){
+      if(m && m.material && m.material.dispose) m.material.dispose();
+    }
   }
   update(dt, game){
     this.t += dt;
@@ -1254,6 +1293,8 @@ export class Powerup {
     } else {
       gp.y = this.baseY + Math.sin(this.t*2.5)*0.35;
     }
-    if(d < 1.6){ this.dead = true; game.applyPowerup(this.def); this.scene.remove(this.group); }
+    // applyPowerup FIRST, then retire: the payout reads this.def, and retire() is what frees the
+    // per-drop materials — doing it the other way round would hand the payout a torn-down drop.
+    if(d < 1.6){ game.applyPowerup(this.def); this.retire(); }
   }
 }
