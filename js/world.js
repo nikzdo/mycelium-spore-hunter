@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { makeNoise, fbmOf, srgbTriple, paintTexture, toonMat, addOutline } from './fx.js';
 import { mulberry32, deriveSeed } from './rng.js';
 import { MUSHROOM_SPECIES, SPECIES_BY_ID } from './mushrooms.js';
-import { makeStack, mergeStacks, jitterLattice, PRESETS, ROCK_PAL } from './rockgen.js';
+import { makeStack, mergeStacks, jitterLattice, PRESETS } from './rockgen.js';
+import { makePalette, jitterFor, rockSetFor } from './palette.js';
 
 export const WORLD_SIZE = 420;
 
@@ -62,9 +63,10 @@ export const PARAMS = {
   siteRMin: 17, siteRVar: 8, siteCoreR: 0.16,
   siteCoreMin: 1.8, siteCoreVar: 1.8, siteBowlMin: 2.2, siteBowlVar: 2.4,
   siteRimMin: 4, siteRimVar: 4,
-  // canopy lightness, authored in sRGB (item 41b). Raised from 0.42/0.12 because the old values
-  // were being read as linear and rendering ~0.68 — the same look now comes out of honest numbers.
-  canLMin: 0.56, canLVar: 0.16,
+  /* Canopy lightness is NOT a knob here any more: palette.js solves it per world, because the
+     legal window between "separates from the sky" and "separates from the ground" moves with the
+     hour — a noon world wants dark canopies and a gloaming world pale ones, and one authored
+     range cannot be both. `theme.canopyL` is the drop-in [min, var] pair if a panel ever needs it. */
   // atmosphere + light rig (items 06, 43)
   fogDensity: 0.0030, shadowMap: 2048, shadowBox: 120, shadowBias: -0.0007, shadowNormalBias: 0.4,
   // ravine: the bridge-crossing layout feature. not every world gets one.
@@ -183,7 +185,7 @@ function buildFields(seed){
    buildTerrain() owns all of this because the terrain mesh has to be able to see it: the ravine
    cuts the height, the authored sites carve it, and the pockets tint it. buildProps() then reads
    the same state, which is why props land in the places the terrain was shaped for. */
-let THEME = null;                   // set by buildTerrain (THEMES is declared further down)
+let THEME = null;                   // this world's palette, built by buildTerrain via makePalette()
 // seeded ravine (gully) for this world — null if this world doesn't have one.
 // a 2-segment bent path {ax,az -> bx,bz -> cx,cz} with a width/depth.
 let RAVINE = null;
@@ -224,6 +226,23 @@ function offsetHSLsRGB(c, dh, ds, dl){
     THREE.MathUtils.clamp(_hsl.l + dl, 0, 1), THREE.SRGBColorSpace);
 }
 
+/* THE WORLD COLOUR IS APPLIED EXACTLY ONCE PER SURFACE.
+   MeshToonMaterial multiplies material.color * map * instanceColor. A palette hex sitting in the
+   material AND in its paintTexture map AND in the per-instance colour therefore renders as that
+   hex CUBED — a near-black forest, which is the exact failure palette.js's "a canopy is never
+   effectively black" floor exists to prevent, and it would also throw away every contrast ratio
+   the palette was solved against. So: material.color is white, the MAP carries the base tone
+   (that is what makes it painterly), and the instance colour carries only the RATIO of this
+   instance's own colour to that base tone. The product is the colour the palette solved, with
+   the texture's own light/dark variation riding on top.
+   Mutates and returns `col`, so a build loop reuses one Color and allocates nothing. */
+const RATIO_FLOOR = 1/255;   // a base channel of exactly 0 would divide the ratio to Infinity
+function ratioTo(col, base){
+  return col.setRGB(col.r/Math.max(base.r, RATIO_FLOOR),
+                    col.g/Math.max(base.g, RATIO_FLOOR),
+                    col.b/Math.max(base.b, RATIO_FLOOR));
+}
+
 // cheap 2D point-to-segment distance — no allocations, called from groundHeight (runs every frame per entity)
 function distToSeg(px, pz, ax, az, bx, bz){
   const abx = bx-ax, abz = bz-az;
@@ -240,30 +259,6 @@ function ravineDepth(x, z){
   const t = 1 - THREE.MathUtils.smoothstep(d, RAVINE.width*0.35, RAVINE.width);
   return t*t*RAVINE.depth;
 }
-
-/* ---------------- curated palette themes ---------------- */
-export const THEMES = [
-  { name:'Golden Meadow',
-    skyTop:0x2a6bc7, skyMid:0x9e8cb8, skyBot:0xffb86b, fog:0xf2c08e,
-    sun:0xffe0b0, hemiSky:0xbcd8ff, hemiGround:0x6b4a2f,
-    grassBase:[0.30,0.55,0.20, 0.38,0.52,0.24], grassTip:[0.66,0.84,0.34, 0.85,0.80,0.40],
-    terraHue:0, terraSat:0, canopyHue:0, canopySat:0.55, canopyBase:0x69b043 },
-  { name:'Teal Dusk',
-    skyTop:0x1d5f8f, skyMid:0x6f8fae, skyBot:0x7fe0c8, fog:0xa8d8c8,
-    sun:0xd8f0e0, hemiSky:0x9fd8e8, hemiGround:0x3f5a4a,
-    grassBase:[0.16,0.46,0.34, 0.20,0.44,0.38], grassTip:[0.42,0.78,0.52, 0.62,0.82,0.58],
-    terraHue:0.32, terraSat:0.04, canopyHue:0.10, canopySat:0.5, canopyBase:0x3fae7a },
-  { name:'Blossom Spring',
-    skyTop:0x4a6fd0, skyMid:0xc89cc8, skyBot:0xffc8d8, fog:0xf0c8d0,
-    sun:0xffe8d8, hemiSky:0xd8c8ff, hemiGround:0x7a5a5f,
-    grassBase:[0.34,0.56,0.26, 0.42,0.54,0.30], grassTip:[0.72,0.86,0.44, 0.88,0.84,0.52],
-    terraHue:-0.03, terraSat:0.05, canopyHue:-0.16, canopySat:0.58, canopyBase:0x8fc85a },
-  { name:'Ember Autumn',
-    skyTop:0x35458f, skyMid:0xb07a8c, skyBot:0xff9a52, fog:0xe8a878,
-    sun:0xffc890, hemiSky:0xc8a8c8, hemiGround:0x7a4a2f,
-    grassBase:[0.44,0.44,0.16, 0.48,0.40,0.20], grassTip:[0.88,0.70,0.28, 0.92,0.62,0.30],
-    terraHue:-0.06, terraSat:0.06, canopyHue:-0.19, canopySat:0.62, canopyBase:0xc8882e },
-];
 
 /* ================= terrain shape (items 08, 22, 23, 24, 26, 27, 29) =================
 
@@ -663,7 +658,13 @@ export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
   SHAPE = rollShape(mulberry32(deriveSeed(seed, 0x54a9e)));
   bakeEdge();   // depends on both F.coast and SHAPE.rimScale, so it re-bakes after both are set
   const rng = mulberry32(deriveSeed(seed, 0x51ed));
-  const theme = THEME = THEMES[(rng()*THEMES.length)|0];
+  /* item: generative palettes. ONE roll, one level up: makePalette() picks a SCHEME (base hue,
+     harmony, season, hour, ground family) and derives every element colour from it, so a world
+     cannot come out muddy for a seed nobody tested. It is a pure function of this stream and
+     consumes it in a fixed order, so the seed still determines the world exactly.
+     The field stays named `theme`: main.js prints `world.theme.name` in the Tome, the pause
+     screen, game over and victory, and the generated palette carries its own `name`. */
+  const theme = THEME = makePalette(rng);
   const world = WORLD = { updaters: [], seed, theme, terrainRes: res };
   // seeded ravine: ~60% of worlds get one, giving a bridge-crossing layout feature; the rest don't
   RAVINE = null;
@@ -816,15 +817,16 @@ export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
   tg.rotateX(-Math.PI/2);
   const tp = tg.attributes.position;
   const colors = new Float32Array(tp.count*3);
-  // item 41(b): the HSL tint is applied in sRGB and only then handed to the (linear) Color.
-  // offsetHSL() works in the WORKING space on r160, where an authored lightness is ~1.6x too
-  // bright once it is displayed and a hue step is not perceptually even.
-  const tint = (hex)=> offsetHSLsRGB(new THREE.Color(hex), theme.terraHue, theme.terraSat, 0);
-  const cGrass = tint(0x5fa838), cEmerald = tint(0x2e7d33);
-  const cDry = tint(0xb99b41), cMoss = tint(0x27572a);
-  const cRock = tint(0x7d7488);
-  const cClear = tint(0xc9a35c), cPath = tint(0xc98f52);
-  const cCorruptGround = tint(0x3a2a48);
+  /* The eight strata are the PALETTE's, not eight authored constants nudged by a hue offset.
+     item 41 still holds: these are sRGB hex ints, so `new THREE.Color(hex)` is the single
+     sRGB->working conversion. They are also the version the readability floors were measured on
+     — theme.terra is solved so the cream-stemmed props and the dark critters both clear their
+     contrast floor against every band of ground they can stand on. */
+  const cGrass = new THREE.Color(theme.terra.grass), cEmerald = new THREE.Color(theme.terra.emerald);
+  const cDry = new THREE.Color(theme.terra.dry), cMoss = new THREE.Color(theme.terra.moss);
+  const cRock = new THREE.Color(theme.terra.rock);
+  const cClear = new THREE.Color(theme.terra.clear), cPath = new THREE.Color(theme.terra.path);
+  const cCorruptGround = new THREE.Color(theme.terra.corrupt);
   const tmpC = new THREE.Color();
   // worn dirt paths radiating from spawn (directions seeded)
   const pathRot = rng()*Math.PI*2;
@@ -900,10 +902,13 @@ export function buildProps(scene, seed, world = WORLD){
 
   /* ----- distant mountains (3 hazy purple-blue layers) ----- */
   const mGeo = new THREE.ConeGeometry(1,1,5);
+  // theme.mountains is aerial perspective derived from THIS world's horizon: each ring is the
+  // fog colour with a little more of the dome's hue left in it, so the haze sits BEHIND the fog
+  // instead of being a purple band pasted over whatever sky the palette rolled.
   const mRings = [
-    { col:0x6a5490, op:0.95, dist:430, h:170 },
-    { col:0x8d76b0, op:0.7,  dist:580, h:200 },
-    { col:0xbaa9cf, op:0.45, dist:740, h:240 },
+    { col:theme.mountains[0], op:0.95, dist:430, h:170 },
+    { col:theme.mountains[1], op:0.7,  dist:580, h:200 },
+    { col:theme.mountains[2], op:0.45, dist:740, h:240 },
   ];
   for(let ring=0; ring<3; ring++){
     const R = mRings[ring];
@@ -914,7 +919,9 @@ export function buildProps(scene, seed, world = WORLD){
       const a = (i/PARAMS.mtnPerRing)*Math.PI*2 + ring*0.35 + F.detail(i*0.37+3.1, ring*1.7+0.6)*0.9;
       const dist = R.dist + F.detail(i*0.51+9.4, 1.3)*90;
       const m = new THREE.Mesh(mGeo, new THREE.MeshBasicMaterial({ color:R.col, fog:false, transparent:true, opacity:R.op }));
-      offsetHSLsRGB(m.material.color, F.detail(i*0.63+7.2, 2.7)*0.04 + theme.terraHue*0.5, 0, F.detail(i*0.29+5.5, 4.1)*0.10);
+      // per-peak jitter only. The ring colour is already this world's, so the old terraHue term
+      // would now rotate the haze OFF the horizon it was derived from.
+      offsetHSLsRGB(m.material.color, F.detail(i*0.63+7.2, 2.7)*0.04, 0, F.detail(i*0.29+5.5, 4.1)*0.10);
       m.position.set(Math.cos(a)*dist, 8, Math.sin(a)*dist);
       m.scale.set(150+rng()*110, R.h*(0.7+rng()*0.6), 150);
       addTo(scene, m);
@@ -949,7 +956,18 @@ export function buildProps(scene, seed, world = WORLD){
   // bend the trunk
   { const p=trunkGeo.attributes.position;
     for(let i=0;i<p.count;i++){ const y=p.getY(i); p.setX(i, p.getX(i)+Math.sin(y*0.4)*0.8); } }
-  const trunkMat = toonMat({ color:0x8a5a35, map:paintTexture('#8a5a35', null, {dabs:200}), rim:0.25 });
+  /* Bark comes off the SOIL hue (theme.trunk / theme.trunkDark), folded into a wood-plausible
+     band — so an ochre world gets pale bark and a slate world gets grey bark, and the trunk still
+     reads as wood rather than as a recoloured prop. The material colour stays white: the map
+     carries the bark colour once, and the per-instance colour below carries only this trunk's
+     own deviation from it, so a jittered trunk is that colour plus texture, never that colour
+     squared. */
+  const cTrunk = new THREE.Color(theme.trunk), cTrunkDark = new THREE.Color(theme.trunkDark);
+  const trunkMat = toonMat({ color:0xffffff,
+    map:paintTexture('#'+cTrunk.getHexString(), [{c:'#'+cTrunkDark.getHexString(), n:26, r:6, a:0.35}], {dabs:200}), rim:0.25 });
+  // hoisted OUT of the instance loop: jitterFor() writes into the object it is handed, so the
+  // whole per-tree colour pass allocates nothing.
+  const J = { h:0, s:0, l:0, hex:0 };
   const canGeo = new THREE.IcosahedronGeometry(3.4, 1);
   { const p=canGeo.attributes.position;
     for(let i=0;i<p.count;i++){
@@ -958,7 +976,9 @@ export function buildProps(scene, seed, world = WORLD){
       p.setXYZ(i, v.x*n, v.y*n*0.8, v.z*n); } }
   const canBase = new THREE.Color(theme.canopyBase);
   const canDark = offsetHSLsRGB(canBase.clone(), 0, 0.05, -0.10);
-  const canMat = toonMat({ color:theme.canopyBase,
+  // `color` white + ratioTo() per instance — see the note above ratioTo(): the canopy hex used to
+  // sit in the material, the map AND the instance colour, i.e. cubed.
+  const canMat = toonMat({ color:0xffffff,
     map:paintTexture('#'+canBase.getHexString(),[{c:'#'+canDark.getHexString(),n:60,r:14,a:0.25}],{dabs:300}), rim:0.6, rimColor:0xe8ffb0 });
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treePos.length);
   const cans = new THREE.InstancedMesh(canGeo, canMat, treePos.length);
@@ -976,15 +996,21 @@ export function buildProps(scene, seed, world = WORLD){
     cans.setMatrixAt(i,M);
     // corruption gradient: healthy near spawn, twisted/dark deep in the Heart of the Bloom
     const corrupt = corruptionAt(x,z);
-    // item 41(b): the 4th argument is the fix — without it this authored 0.42 lightness was
-    // interpreted as LINEAR and displayed near 0.68, which is why canopies read washed out.
-    // canLMin/canLVar are re-tuned upward to compensate: same look on screen, correct maths.
-    canColor.setHSL(((0.26+rng()*0.08+theme.canopyHue)%1+1)%1, theme.canopySat,
-      PARAMS.canLMin+rng()*PARAMS.canLVar, THREE.SRGBColorSpace);
-    canColor.lerp(corruptCol, corrupt*0.85);
-    cans.setColorAt(i, canColor);
-    trunkColor.setRGB(1,1,1).lerp(trunkCorrupt, corrupt*0.7);
-    trunks.setColorAt(i, trunkColor);
+    /* THIS is what stops a forest being one flat green: jitterFor('tree') first picks one of the
+       palette's three weighted canopy VARIANTS — the world's species, at fixed hue/sat/value
+       offsets that pickL enforced the readability floors on all three of at once — and only then
+       jitters that individual tree inside a budget narrower than the variant spacing, so an
+       instance can never wander into another species' identity or out of its world's season band.
+       item 41 is preserved exactly: jitterFor hands back {h,s,l} in sRGB precisely so this stays
+       the setHSL(..., THREE.SRGBColorSpace) call it always was. */
+    jitterFor(theme, 'tree', rng, J);
+    canColor.setHSL(J.h, J.s, J.l, THREE.SRGBColorSpace);
+    canColor.lerp(corruptCol, corrupt*0.85);          // corruption first: it is an absolute colour
+    cans.setColorAt(i, ratioTo(canColor, canBase));   // ...then divide out what the map already paints
+    jitterFor(theme, 'trunk', rng, J);
+    trunkColor.setHSL(J.h, J.s, J.l, THREE.SRGBColorSpace);
+    trunkColor.lerp(trunkCorrupt, corrupt*0.7);
+    trunks.setColorAt(i, ratioTo(trunkColor, cTrunk));
     // collider straight out of the trunk's own matrix (item 01): r is the trunk's base radius,
     // top its visual height. Canopies stay walk-through — you duck under branches, not around.
     COLLIDERS.push({ x, z, r: 0.7*s, bot: y-0.3, top: y-0.3 + 6*s });
@@ -1019,7 +1045,11 @@ export function buildProps(scene, seed, world = WORLD){
   function makeStrataTexture(){
     const c=document.createElement('canvas'); c.width=64; c.height=64;
     const g=c.getContext('2d');
-    const bands = ['#9a8f96','#877c84','#726a78','#8a7460','#6d6068','#94897c'];
+    /* The bands are a VALUE texture — the strata pattern is geology, the colour is the world's
+       and arrives per instance below. Leaving the old authored purple-brown greys here would
+       tint every world's rock back toward the same stone, which is the thing the palette's
+       "rock is a desaturated relative of the soil" rule exists to avoid. */
+    const bands = ['#9a9a9a','#848484','#727272','#8a8a8a','#6d6d6d','#949494'];
     let y=0;
     while(y<64){
       const h = 5+Math.random()*8;
@@ -1082,7 +1112,11 @@ export function buildProps(scene, seed, world = WORLD){
   world.caveSpots = caveSpots;
   const rockCount = rockPlacements.length;
   const rocks = new THREE.InstancedMesh(rockGeo, rockMat, rockCount);
-  const rockDry = new THREE.Color(0xb0a8a0), rockMoss = new THREE.Color(0x6d8a52), rockCorrupt = new THREE.Color(0x241a30);
+  // theme.moss for the mossy variant, per-instance jitterFor('rock') for the dry one: rock is a
+  // desaturated relative of this world's soil, so the scatter reads as the same geology as the
+  // terrain's rock band and the formations, not as grey props dropped on a coloured field.
+  const rockMoss = new THREE.Color(theme.moss), rockCorrupt = new THREE.Color(0x241a30);
+  const rockColor = new THREE.Color();
   rockPlacements.forEach((rp,i)=>{
     const gy = groundHeight(rp.x,rp.z);
     Q.setFromEuler(new THREE.Euler(rp.rx, rp.ry, rp.rz));
@@ -1096,7 +1130,10 @@ export function buildProps(scene, seed, world = WORLD){
     if(rTop - gy > STEP) COLLIDERS.push({ x:rp.x, z:rp.z, r:rp.s*0.8, bot:gy, top:rTop });
     const mossAmt = rng() < 0.4 ? 0.35+rng()*0.5 : rng()*0.12;
     const corrupt = corruptionAt(rp.x,rp.z);
-    rocks.setColorAt(i, rockDry.clone().lerp(rockMoss, mossAmt).lerp(rockCorrupt, corrupt*0.75));
+    jitterFor(theme, 'rock', rng, J);
+    rockColor.setHSL(J.h, J.s, J.l, THREE.SRGBColorSpace);
+    // one reused Color, not a clone per rock: the strata map is neutral, so no ratio is needed
+    rocks.setColorAt(i, rockColor.lerp(rockMoss, mossAmt).lerp(rockCorrupt, corrupt*0.75));
   });
   rocks.castShadow = true; rocks.receiveShadow = true;
   addTo(scene, rocks);
@@ -1144,7 +1181,6 @@ export function buildProps(scene, seed, world = WORLD){
     const geos = [];
     const stats = { bias:+bias.toFixed(3), clusters:0, stacks:0, tiers:0, tall:0, at:[],
                     byClass:{ small:0, med:0, big:0 }, rises:[], heights:[], radii:[], tierN:[] };
-    const palNames = ['stone','basalt','chalk'];
     const sitesLeft = SITES.slice();
 
     for(const item of plan){
@@ -1193,7 +1229,15 @@ export function buildProps(scene, seed, world = WORLD){
         spot = p;
       }
 
-      const pal = ROCK_PAL[palNames[(stepRng()*palNames.length)|0]];
+      /* One {base, side, tint} per FORMATION, off one of this world's five rock families, with a
+         single hue/sat/value shift applied to all three together — which is why a jittered
+         formation still reads as one rock instead of three unrelated greys stacked up. A pocket
+         forces its own geology, so a crystal hollow is this world's rock that grew a seam rather
+         than a prop imported from another palette. */
+      const fam = POCKETS.crystalHollow && Math.hypot(spot.x-POCKETS.crystalHollow.x, spot.z-POCKETS.crystalHollow.z) < POCKETS.crystalHollow.r ? 'crystal'
+                : POCKETS.witheredHollow && Math.hypot(spot.x-POCKETS.witheredHollow.x, spot.z-POCKETS.witheredHollow.z) < POCKETS.witheredHollow.r ? 'rot'
+                : undefined;
+      const pal = rockSetFor(theme, stepRng, fam);
       // A formation's own tiers must not reject its own neighbours, so the cell clearance only
       // looks at what was already standing here when this formation started.
       const before = COLLIDERS.length;
@@ -1315,7 +1359,8 @@ export function buildProps(scene, seed, world = WORLD){
     const ba = Math.atan2(bSite.z, bSite.x);
     const bx = bSite.x, bz = bSite.z, by = groundHeight(bx, bz);
     const boulder = new THREE.Mesh(rockGeo, rockMat.clone());
-    boulder.material.color.set(rockMoss.clone().lerp(rockDry, 0.3));
+    // the rune boulder is a mossy specimen of this world's rock, not a second grey
+    boulder.material.color.set(rockMoss.clone().lerp(new THREE.Color(theme.rock.stone.side), 0.3));
     const bs = PARAMS.boulderSMin + rng()*PARAMS.boulderSVar;
     boulder.scale.set(bs, bs*0.8, bs);
     boulder.rotation.set(rng(), rng()*7, rng()*0.3);
@@ -1352,9 +1397,12 @@ export function buildProps(scene, seed, world = WORLD){
     const yA = baseTerrainHeight(bx - dirX*spanLen*0.5, bz - dirZ*spanLen*0.5);
     const yB = baseTerrainHeight(bx + dirX*spanLen*0.5, bz + dirZ*spanLen*0.5);
     const baseY = (yA + yB)*0.5, pitch = -Math.atan2(yB - yA, spanLen);
-    const deckMat = toonMat({ color:0x8a5a35,
-      map: paintTexture('#6a4525', [{c:'#4a3018', n:24, r:5, a:0.45}], {dabs:220}), rim:0.25 });
-    const railMat = toonMat({ color:0x5a3a1f, rim:0.3 });
+    // the bridge is cut from this world's trees, so its planks are this world's bark.
+    const deckC = new THREE.Color(theme.trunkDark);
+    const deckMat = toonMat({ color:0xffffff,
+      map: paintTexture('#'+deckC.getHexString(),
+        [{c:'#'+offsetHSLsRGB(deckC.clone(), 0, 0.02, -0.08).getHexString(), n:24, r:5, a:0.45}], {dabs:220}), rim:0.25 });
+    const railMat = toonMat({ color:theme.trunkDark, rim:0.3 });
     const group = new THREE.Group();
     const deck = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.22, spanLen), deckMat);
     deck.castShadow = true; deck.receiveShadow = true;
@@ -1402,12 +1450,17 @@ export function buildProps(scene, seed, world = WORLD){
       const n = 1 + F.detail(v.x*0.9+v.y, v.z*0.9)*0.22;
       p.setXYZ(i, v.x*n, v.y*n*0.72, v.z*n);
     } }
-  const bushBase = offsetHSLsRGB(new THREE.Color(0x4a7a2e), theme.canopyHue*0.6, 0, 0);
+  /* theme.bush / theme.bushDeep replace the authored 0x4a7a2e / #2f5a1c pair. bush is solved
+     against the ground's luminance (bushVsGround), bushDeep is its own shadow tone, so the
+     undergrowth layer separates from the terrain in every world instead of only in the four
+     worlds the authored greens were picked for. */
+  const bushBase = new THREE.Color(theme.bush), bushDeep = new THREE.Color(theme.bushDeep);
   const bushMat = toonMat({ color:0xffffff,
-    map: paintTexture('#'+bushBase.getHexString(), [{c:'#2f5a1c', n:40, r:12, a:0.3}], {dabs:220}),
+    map: paintTexture('#'+bushBase.getHexString(), [{c:'#'+bushDeep.getHexString(), n:40, r:12, a:0.3}], {dabs:220}),
     rim:0.45, rimColor:0xc8ffb0 });
   const bushCount = PARAMS.bushCount;
   const bushes = new THREE.InstancedMesh(bushGeo, bushMat, bushCount);
+  const bushColor = new THREE.Color();
   for(let i=0;i<bushCount;i++){
     const a=rng()*Math.PI*2, r=PARAMS.bushRMin+rng()*PARAMS.bushRVar;
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
@@ -1415,6 +1468,10 @@ export function buildProps(scene, seed, world = WORLD){
     Q.setFromEuler(new THREE.Euler(0, rng()*7, 0));
     M.compose(V.set(x, groundHeight(x,z)+0.3*s, z), Q, S.set(s, s*0.85, s));
     bushes.setMatrixAt(i, M);
+    // same trick as the canopy: one shared J, one shared Color, ratio against what the map paints
+    jitterFor(theme, 'bush', rng, J);
+    bushColor.setHSL(J.h, J.s, J.l, THREE.SRGBColorSpace);
+    bushes.setColorAt(i, ratioTo(bushColor, bushBase));
   }
   bushes.castShadow = true;
   addTo(scene, bushes);
@@ -1451,8 +1508,11 @@ export function buildProps(scene, seed, world = WORLD){
       p.setXYZ(i, x*bulge, y, z*bulge);
     }
     logGeo.computeVertexNormals(); }
-  const logMat = toonMat({ color:0x8a5a35,
-    map: paintTexture('#6a4525', [{c:'#4a3018', n:30, r:5, a:0.45}, {c:'#3a2818', n:14, r:3, a:0.5}], {dabs:260}), rim:0.25 });
+  // a fallen log is a tree that fell over, so it is the same bark the trunks are: theme.trunk
+  // over theme.trunkDark, not a second authored brown that drifts from it.
+  const logMat = toonMat({ color:0xffffff,
+    map: paintTexture('#'+cTrunkDark.getHexString(),
+      [{c:'#'+offsetHSLsRGB(cTrunkDark.clone(), 0, 0.02, -0.06).getHexString(), n:30, r:5, a:0.45}], {dabs:260}), rim:0.25 });
   const capMatLog = toonMat({ color:0xffffff, map: makeRingTexture(), rim:0.2 });
   const logCount = PARAMS.logCount;
   const logs = new THREE.InstancedMesh(logGeo, logMat, logCount);
@@ -1492,7 +1552,9 @@ export function buildProps(scene, seed, world = WORLD){
   const mossBlobGeo = new THREE.IcosahedronGeometry(0.22, 0);
   { const p = mossBlobGeo.attributes.position;
     for(let i=0;i<p.count;i++) p.setY(i, Math.max(-0.06, p.getY(i)*0.55)); }
-  const mossBlobMat = toonMat({ color:0x4a7a2e, rim:0.5, rimColor:0xc8ffb0 });
+  // theme.moss is the canopy hue pushed darker — moss on a log is the same vegetation family as
+  // the tree it fell off, so it has to track the world's foliage rather than a fixed green.
+  const mossBlobMat = toonMat({ color:theme.moss, rim:0.5, rimColor:0xc8ffb0 });
   const sproutStemMat = toonMat({ color:0xe8dcc0, rim:0.25 });
   const sproutCapMat = toonMat({ color:0xd97a4a, rim:0.4, rimColor:0xffcfa0 });
   const sproutStemGeo = new THREE.CylinderGeometry(0.03, 0.045, 0.16, 5);
@@ -1594,13 +1656,18 @@ export function buildProps(scene, seed, world = WORLD){
   const flowerGeo = new THREE.ConeGeometry(0.16, 0.22, 6);
   const flowerMat = new THREE.MeshBasicMaterial({ color:0xffffff });
   const flowers = new THREE.InstancedMesh(flowerGeo, flowerMat, PARAMS.flowerCount);
-  const fCols = [0xff7ab8, 0xffe066, 0xff9a5c, 0xc9a0ff, 0xffffff];
+  /* theme.flowers is three hues either side of the accent, so the flecks of colour in the field
+     belong to the same accent family as the crystals — a red-accent world gets warm flowers, not
+     the same five authored candy colours in every world. White stays in the list as the neutral
+     that reads against any ground. */
+  const fCols = [theme.flowers[0], theme.flowers[1], theme.flowers[2], theme.accent, 0xffffff];
+  const flowerColor = new THREE.Color();
   for(let i=0;i<PARAMS.flowerCount;i++){
     const a=rng()*Math.PI*2, r=PARAMS.flowerRMin+rng()*PARAMS.flowerRVar;
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
     M.compose(V.set(x, groundHeight(x,z)+0.22, z), Q.identity(), S.set(1,1,1));
     flowers.setMatrixAt(i,M);
-    flowers.setColorAt(i, new THREE.Color(fCols[(rng()*fCols.length)|0]));
+    flowers.setColorAt(i, flowerColor.set(fCols[(rng()*fCols.length)|0]));
   }
   addTo(scene, flowers);
 
@@ -1784,12 +1851,20 @@ export function buildProps(scene, seed, world = WORLD){
     geo.computeVertexNormals();
     return geo;
   }
+  /* Crystals are the world's ACCENT made solid: separateHue() guaranteed the accent stays at
+     least 0.11 of the hue circle from the foliage AND the soil, and pickL put it 1.9:1 above the
+     ground luminance, so a cluster is a landmark you can navigate by at 60 m in every world.
+     The two variants are the accent and its +0.17 hue sibling, so a hollow reads as one mineral.
+     accentIntensity is 0.85 and MUST NOT be raised: we render ACES filmic at exposure 1.28, and
+     an additive/emissive term reaching 1.0 clips to flat white — the crystal stops being a
+     colour and becomes a blob. That bug has been fixed here twice already. */
+  const accRGB = new THREE.Color(theme.accent), accRGB2 = new THREE.Color(theme.flowers[2]);
   const crystalPalette = [
-    { color:0x4dc8ff, emissive:0x1a5a8f, rgb:[0.3,0.78,1] },
-    { color:0xc77dff, emissive:0x5a1a8f, rgb:[0.78,0.49,1] },
+    { color:theme.accent,     emissive:theme.accentEmissive, rgb:[accRGB.r, accRGB.g, accRGB.b] },
+    { color:theme.flowers[2], emissive:theme.accentDark,     rgb:[accRGB2.r, accRGB2.g, accRGB2.b] },
   ];
   const crystalMats = crystalPalette.map(pal=>
-    toonMat({ color:pal.color, emissive:pal.emissive, emissiveIntensity:0.9, rim:0.65, rimColor:pal.color }));
+    toonMat({ color:pal.color, emissive:pal.emissive, emissiveIntensity:theme.accentIntensity, rim:0.65, rimColor:pal.color }));
   const shardGeoVariants = [makeCrystalShardGeo(1.3), makeCrystalShardGeo(9.7)];
   const clusterCount = PARAMS.crystalCount;
   const crystalClusters = []; // {cx,cy,cz,pal,ph} — drives the core sprites + mote system below
@@ -2159,9 +2234,11 @@ export function buildProps(scene, seed, world = WORLD){
     pond.rotation.x = -Math.PI/2; pond.position.set(wx, wy+0.1, wz);
     addTo(scene, pond);
     // lily pads + reeds around the rim
-    const padMat = toonMat({ color:0x3f8a3a, rim:0.4, rimColor:0xc8ffb0 });
+    // pads and reeds are this world's undergrowth standing in water, not a second green family:
+    // theme.undergrowth is the foliage hue pushed dark, theme.bush its lit relative.
+    const padMat = toonMat({ color:theme.undergrowth, rim:0.4, rimColor:0xc8ffb0 });
     const padGeo = new THREE.CircleGeometry(0.6, 10);
-    const reedMat = toonMat({ color:0x5fa848, rim:0.3 });
+    const reedMat = toonMat({ color:theme.bush, rim:0.3 });
     const reedGeo = new THREE.CylinderGeometry(0.05, 0.08, 1.4, 5);
     for(let i=0;i<PARAMS.pondPads;i++){
       const a = rng()*Math.PI*2, r = 3+rng()*5.5;

@@ -248,6 +248,29 @@ object stays read-immediately-never-store; seeded determinism unchanged.
     across two fresh `node` processes: seeds 1/42/1337/9999 →
     sha256 `c05465127ee931556afe823639ac55acf685a20b58694ff181dde8d9fcd6152b`, identical both runs.
   - Contact sheet for 18 generated + the 4 authored palettes: **`palette-sheet.png`** in the repo root.
+  - **WIRED (world.js only, this pass).** `makePalette(rng)` replaces the `THEMES` pick, `export const
+    THEMES` is deleted, and all of step 3 landed: `theme.terra` strata, `jitterFor('tree'/'trunk'/'bush'/'rock')`
+    with a single hoisted `{h,s,l,hex}` per build loop, `rockSetFor()` per formation (a crystal-hollow or
+    withered-hollow formation forces the `crystal` / `rot` family), `theme.accent*` +
+    `accentIntensity` (0.85) on the crystal clusters, `theme.flowers` + `accent` on the flower field,
+    `theme.mountains` on the haze rings, `theme.trunk/trunkDark` on trunks, fallen logs and the bridge deck,
+    `theme.moss` on log moss and mossy rock, `theme.bush/bushDeep/undergrowth` on bushes, reeds and lily pads.
+    `PARAMS.canLMin/canLVar` are gone — the palette solves canopy lightness per world.
+  - **One correction the wiring needed: `MeshToonMaterial` multiplies `color * map * instanceColor`.**
+    The old canopy put the world hex in all three, i.e. canopyBase CUBED, so a literal swap to the
+    palette's (darker, contrast-solved) canopy produced a near-black forest — the exact failure
+    `lMin: 0.20` in solveWorld() exists to prevent. world.js now applies the world colour ONCE:
+    `material.color` is white, the paintTexture map carries the base tone, and the instance colour
+    carries the RATIO of that instance's own colour to it (`ratioTo()`, world.js ~L229). Anything else
+    that wants per-instance palette colour on a mapped material must use the same rule.
+  - **`PORT_CONTRACT.md:74` is now stale** — it still lists `export const THEMES` as part of world.js's
+    public surface. Nothing imports it (checked repo-wide); the replacement surface is `world.theme`,
+    which carries `name` plus every field the old themes had.
+  - Two observations for palette.js's owner, neither a blocker and neither touched here: (a) `hueMid()`
+    takes the SHORT arc, so a cyan zenith over a warm horizon puts the mid band and therefore
+    `mountains[]` in the GREENS (seed 42 — green haze ridges under a green-tinted sky band); (b) the
+    expanded **Ember Autumn** sits at the canopy-vs-ground floor (1.15) and reads as orange-on-orange
+    in game — legal, but the least separated of the four authored looks (see `world-palette-2.png`).
 
 ## HUD text pass — the one item that needs JS (hud2, index.html only)
 
