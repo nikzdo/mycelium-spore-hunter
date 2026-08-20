@@ -1734,6 +1734,7 @@ export function buildProps(scene, seed, world = WORLD){
   }
   if(sproutBits.length){
     const sproutStems = new THREE.InstancedMesh(sproutStemGeo, sproutStemMat, sproutBits.length);
+    sproutStems.userData.noReceive = true;      // same rule, 16 cm tall — a shadow here is one dark pixel
     const sproutCaps = new THREE.InstancedMesh(sproutCapGeo, sproutCapMat, sproutBits.length);
     const upY = new THREE.Vector3(0,1,0);
     sproutBits.forEach((b,i)=>{
@@ -1840,6 +1841,11 @@ export function buildProps(scene, seed, world = WORLD){
   // a batch that spans the whole map is never off screen, so frustum culling would only pay
   // for a bounding-sphere rebuild every time a mushroom sways
   decoStems.frustumCulled = false;
+  /* The decorative/harvestable stems take no shadow either, for exactly the reason the enemy
+     stems don't (see entities.js): a cap sits directly on top of a 0.7 m cylinder, so the stem is
+     nearly always in shade from its own cap, and the one thing cream cannot survive is darkening.
+     This is an InstancedMesh, so it is ONE flag for every mushroom in the world. */
+  decoStems.userData.noReceive = true;
   addTo(scene, decoStems);
   for(const sp of MUSHROOM_SPECIES){
     const m = new THREE.InstancedMesh(capGeo, capMats[sp.id], PARAMS.decoCap);

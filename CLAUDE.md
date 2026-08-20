@@ -85,6 +85,31 @@ the sun at the player every frame, so shrinking the box sharpens every shadow yo
 Don't shrink it past the fog, though — a shadow outside the box stops existing, and the edge
 becomes visible popping.
 
+## Measuring performance here
+
+Two traps have each cost a full round of work, so measure with these in mind.
+
+**`renderer.info.render.calls` does not include shadow-map draws** in the vendored three.js.
+Verified by freezing the map entirely (`shadow.autoUpdate = false`, never flagged): the counter
+moved by exactly **0**. So the shadow pass — 100 casters into a 2048² depth target — is invisible
+to the number people reach for first. Never conclude shadow work is free because draw calls did not
+move; count casters instead.
+
+**Draw-call attribution needs a genuinely frozen scene.** Hiding a subtree and diffing
+`render.calls` produced *negative* attributions twice before the scene was still enough. Three
+things have to stop, and each was found the hard way:
+- the wave spawner, which is gated on `alive < 12` and calls the **module-local** `spawnEnemy`, so
+  overwriting `game.spawnEnemy` does nothing — park 12 live enemies far off-camera instead;
+- `world.updaters`, because the day cycle rotates the sun, which moves the shadow frustum and
+  changes which casters are inside it between samples;
+- critter motion.
+With all three stopped the baseline repeats exactly, and only then is a hide/diff meaningful.
+
+**This machine cannot measure most costs.** Frame time sits at the vsync 8.3 ms median under every
+load produced so far: 60 enemies, 779 draw calls, and a framebuffer swept up to 14.25 megapixels.
+That is worth knowing before optimising — a change here has to be justified by counters and
+reasoning, not by a frame-time delta that physically cannot appear.
+
 ## Habits
 
 Adopted from a code review of a sibling procedural-island prototype. They are why that file stays

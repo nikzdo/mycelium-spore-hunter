@@ -84,6 +84,8 @@ const _fwd = new THREE.Vector3(), _tip = new THREE.Vector3(), _to = new THREE.Ve
    coarse enough that a burn is a handful of hit() calls rather than one per frame, and fine enough
    that the ticks still read as a rhythm. */
 const ELEM_BURN_TICK = 0.4;
+// seconds between terrain-steepness rechecks per creature; see the note in Mushroom.update
+const SLOPE_RECHECK = 0.125;
 const BURN_FROM = new THREE.Vector3();   // reused: burn ticks must not allocate
 
 export class Mushroom {
@@ -112,7 +114,7 @@ export class Mushroom {
     this.detourT = 0; this.detourX = 0; this.detourZ = 0;
     this.moved = false;              // walk-bob is gated on this: no step, no bob
     this._mx = 0; this._mz = 0; this._mdx = 0; this._mdz = 0;
-    this._stuck = false; this._steep = false;
+    this._stuck = false; this._steep = false; this._slopeCd = 0;
 
     if(!stemTex) stemTex = paintTexture('#f2e4c8', [{c:'#d9c8a8',n:8,r:6,a:0.5}], {dabs:200});
     const g = this.group = new THREE.Group();
@@ -120,6 +122,13 @@ export class Mushroom {
     // stem
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.42*s, 0.55*s, 1.3*s, 8), toonMat({color:0xf2e4c8, map:stemTex, rim:0.35}));
     stem.position.y = 0.65*s; addOutline(stem, 0.07);
+    /* The stem takes no shadow. A cap is a wide disc directly above a narrow cylinder, so the stem
+       is in shade from SOMETHING nearly always — and this cream is the one albedo with nowhere to
+       go when it darkens, so what the player saw was a black-stemmed mushroom. The cap keeps its
+       receiveShadow, which is what still grounds the creature in the scene.
+       Set here rather than in shadowize() because the reason is about this mesh's ROLE, and only
+       the file that knows the mushroom is built from a cap-over-stem can say so. */
+    stem.userData.noReceive = true;
     // cap
     const cap = new THREE.Mesh(new THREE.SphereGeometry(1.0*s, 12, 9, 0, Math.PI*2, 0, Math.PI*0.55),
       toonMat({color:R.color, map:capTexture(R.color, rarityIdx), rim:0.55, rimColor:'#'+new THREE.Color(R.glow).getHexString()}));
@@ -323,7 +332,20 @@ export class Mushroom {
     // per-frame escape valves, one query each: a creature that spawned inside a rock or on a wall
     // face must be able to leave it, or every candidate below fails and it freezes there.
     this._stuck = surfaceAt(g.position.x, g.position.z, feetY).blocked;
-    this._steep = slopeAt(g.position.x, g.position.z) > (this.isBoss ? BOSS_SLOPE_MAX : MOB_SLOPE_MAX);
+    /* slopeAt is the most expensive per-entity query in the game — it is four groundHeight calls
+       for a central difference, measured at 1.02 us against groundHeight's 0.31 — and it was being
+       asked once per creature per frame. It does not need to be: it reads the TERRAIN, which never
+       changes, sampled under a creature that walks at 3-6 m/s. Re-asking at 8 Hz instead of the
+       frame rate moves the answer by at most a few centimetres of travel, and _steep is a boolean
+       that only gates the escape valve below.
+       Deliberately staggered by the creature's own wander phase rather than a shared counter, or
+       every enemy in the world would re-slope on the same frame and turn a smooth cost into a
+       120 Hz spike. `_slopeCd` starts at 0 so the first frame always measures. */
+    this._slopeCd -= dt;
+    if(this._slopeCd <= 0){
+      this._slopeCd = SLOPE_RECHECK * (0.75 + (this.wanderA % 1) * 0.5);
+      this._steep = slopeAt(g.position.x, g.position.z) > (this.isBoss ? BOSS_SLOPE_MAX : MOB_SLOPE_MAX);
+    }
     this.attackCd -= dt;
     if(this.state === 'lunge'){
       this.lungeT -= dt;

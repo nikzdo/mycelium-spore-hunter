@@ -298,3 +298,42 @@ parks the chip at y≈7px. Sampled over a full `?demo&seed=42` run, the chip's b
 of the viewport on **54%** of frames. That is why `#announce` is now anchored off the bottom stack
 rather than at a percentage of the height — the upper two thirds of the screen belong to the chip. If
 the chip ever grows a "don't cover the banner" rule, that clamp is the place to put it.
+
+## OPTIMIZATION PASS — RESULTS (re-measured, not inherited)
+
+Baseline, frozen scene, seed 42, main pass only: **204 draw calls**, repeatable exactly.
+Attribution by hide-and-diff: world 117, **fauna 35** (10 critters), **player 27**, props 23
+(pods 6, chests 13, vents 4, gems 0).
+Hot paths: groundHeight **0.31 us**, surfaceAt **0.65 us** @ 344 colliders, slopeAt **1.02 us**.
+
+### The headline finding
+Frame time is **8.3 ms median at every load tested** — 60 enemies, 779 draw calls, and a
+framebuffer swept 1.16 -> 14.25 megapixels. The machine never leaves vsync, so no change in this
+pass can be validated by frame time. Everything below is justified by counters and by what the
+work provably is, not by a speedup that cannot appear here.
+
+### Landed
+- **Shadow-map cadence.** three.js rebuilt the map every frame: 100 casters into a 2048^2 depth
+  target at the display refresh, for a sun that takes 126 s to come round and casters that are now
+  almost all static geometry. Capped to 1/60 s. Expressed in SECONDS, not frames, so a 60 Hz
+  display is unchanged and only high-refresh displays stop redrawing a depth buffer twice per
+  displayed change. Verified shadows still track the player 60 m from where the map was built.
+- **slopeAt throttle.** The priciest per-entity query (four groundHeight calls for a central
+  difference) ran once per creature per frame to set a boolean about TERRAIN, which never changes.
+  Now 8 Hz per creature, staggered by the creature's own wander phase so 60 enemies do not all
+  re-slope on the same frame.
+- (Earlier this session) caster cull **349 -> 100** and shadowBox 120 -> 95. Now known to be
+  invisible to `renderer.info` — see the CLAUDE.md note.
+
+### Deliberately NOT done, with reasons
+- **Fauna merge, the brief's #1 — the candidate does not exist.** The brief assumed static
+  sub-meshes to merge. All five visual meshes per critter take a per-frame transform: torso bob,
+  cap pulse, frond sway, hull breathe, limb stride. Merging any pair deletes an animation. The
+  alternative is InstancedMesh per (species, part) with ~50 matrix writes per frame, i.e. a rewrite
+  of fauna's animation path with real regression risk, to save ~20 draw calls this machine cannot
+  feel. Revisit only with a device that actually drops frames.
+- **Props -> InstancedMesh.** 23 calls measured, against index bookkeeping that the brief already
+  flagged as risky for the wear-stage texture swap, the hover material swap, HEAD_HITS registration
+  and the bob-tracked `bot`. Not worth 23 calls.
+- **Ink hull merging.** Blocked by the same per-part animation as the fauna merge.
+- **groundHeight caching.** 0.31 us, and the call sites that run hottest are now throttled.

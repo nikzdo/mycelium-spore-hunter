@@ -2604,11 +2604,21 @@ game.shadowInfo = ()=>{ // for verification
 
    `opts.noCast` = receive only (characters). `opts.minR` overrides the size floor for a subtree
    whose whole point is to be a small solid object — props.js's pods are 1 m flowers hanging in the
-   air, and a floating thing's shadow is how you know it is floating, so props opt down. */
+   air, and a floating thing's shadow is how you know it is floating, so props opt down.
+
+   RULE 3 — SOME SURFACES DO NOT TAKE SHADOW AT ALL. `userData.noReceive` (or `opts.noReceive`).
+   This is not a perf dial, it is art direction, and it exists for one shape in particular: a
+   mushroom stem. A cap is a wide disc sitting directly on top of a narrow cylinder, so the stem is
+   in shadow from something almost all the time — its own cap, the next mushroom's cap, a tree —
+   and a 0.7 m tall cylinder wearing a hard PCF shadow boundary reads as a dirty smear rather than
+   as shade. Cream is also the one albedo in the game with nowhere to go when it darkens (see the
+   lighting note in CLAUDE.md), so the stems lose their shadows and keep their colour. The caps
+   above them still receive, which is what keeps the creature grounded in the scene. */
 const SHADOW_MIN_R = 1.15;    // metres of bounding-sphere radius; see rule 1
 function shadowize(root, opts){
   if(!SHADOW_SIZE || !sun) return;
   const noCast = !!(opts && opts.noCast);
+  const noReceive = !!(opts && opts.noReceive);
   const minR = opts && opts.minR !== undefined ? opts.minR : SHADOW_MIN_R;
   root.traverse(o=>{
     if(!o.isMesh) return;
@@ -2622,7 +2632,9 @@ function shadowize(root, opts){
     if(r > 320) return; // sky dome and cloud shell: outside the rig entirely
     // BackSide ink must never cast, but it SHOULD still receive — an unlit outline hull reads as a
     // bright rim once the fill behind it goes into shadow.
-    if(m.side !== THREE.BackSide) o.receiveShadow = true;
+    // rule 3: an opted-out surface keeps its own colour. Idempotent like the rest of this pass,
+    // so a later shadowize(scene) sweep cannot quietly switch it back on.
+    if(m.side !== THREE.BackSide && !noReceive && !o.userData.noReceive) o.receiveShadow = true;
     if(o.userData.noShadow || noCast) return;
     if(m.side === THREE.BackSide) return;
     if(r < minR) return;                                   // rule 1
@@ -2633,7 +2645,27 @@ function shadowize(root, opts){
 // updater rewrites sun.position from the ORIGIN each frame, so we read the direction it just set
 // and re-place the light relative to the player: retargeting alone would skew the light by
 // however far the player has walked from the origin.
-function updateSunShadow(){
+/* SHADOW-MAP CADENCE. The map is re-rendered by three.js on every frame by default, which means
+   100 casters are drawn into a 2048x2048 depth target as often as the display refreshes. Nothing
+   in the scene justifies that rate: the sun takes 126 s to come round, and after the two shadow
+   rules landed almost every remaining caster is static geometry (trees, rocks, mesas). The only
+   moving casters left are the bobbing pods and a boss.
+
+   WHY THE CAP IS IN SECONDS AND NOT FRAMES. "every other frame" would halve the cost on a 120 Hz
+   display and also halve it on a 60 Hz one, where the map was already only just keeping up. A time
+   cap of 1/60 s means a 60 Hz display updates every frame exactly as before — no change for anyone
+   on ordinary hardware — while a 120 Hz display stops redrawing a depth buffer twice per displayed
+   change. It is the refresh rate that was outrunning the content, so the refresh rate is what this
+   is expressed against.
+
+   THIS COST IS INVISIBLE TO renderer.info. Measured: freezing the shadow map entirely
+   (autoUpdate = false, never flagged) moved render.calls by exactly 0, because in this three.js
+   build the shadow pass does not increment that counter. So neither this change nor the earlier
+   349 -> 100 caster cull can be validated by draw-call numbers; they are 100 real geometry draws
+   per update either way. Do not "verify" shadow work with renderer.info and conclude it is free. */
+const SHADOW_MIN_INTERVAL = 1/60;      // seconds between shadow-map rebuilds
+let shadowAcc = 0;
+function updateSunShadow(dt){
   if(!sun) return;
   const pp = game.player ? game.player.group.position : camTarget;
   sunDir.copy(sun.position);
@@ -2642,6 +2674,11 @@ function updateSunShadow(){
   sun.position.set(pp.x + sunDir.x*SUN_BOOM, sunDir.y*SUN_BOOM, pp.z + sunDir.z*SUN_BOOM);
   sun.target.position.set(pp.x, 0, pp.z);
   sun.target.updateMatrixWorld();
+  // autoUpdate stays off from here on; we own when the map is rebuilt. needsUpdate is a one-shot
+  // that three.js clears itself after the render, so this cannot latch on.
+  if(sun.shadow.autoUpdate) sun.shadow.autoUpdate = false;
+  shadowAcc += dt || 0;
+  if(shadowAcc >= SHADOW_MIN_INTERVAL){ shadowAcc = 0; sun.shadow.needsUpdate = true; }
 }
 
 /* ---------- main loop ---------- */
@@ -2674,7 +2711,7 @@ function tick(){
 
   if(game.state === 'title' || game.state === 'intro'){
     titleCamera(dt);
-    updateSunShadow();
+    updateSunShadow(dt);
     hideHoverTag();
     renderFrame();
     return;
@@ -2825,7 +2862,7 @@ function tick(){
     updateHUD(); updateBuffs();
   }
   updateCamera(dt);
-  updateSunShadow();
+  updateSunShadow(dt);
   updateHoverTag(dt);
   renderFrame();
   if(DEMO && (elapsed|0) !== lastDbg){ lastDbg = elapsed|0;
