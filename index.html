@@ -135,14 +135,24 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .cfill{height:100%;background:linear-gradient(180deg,#c8f088,#7ec850);border-radius:999px;transition:width .18s ease-out}
 .cprog{font-size:10px;color:#e8e0d0}
 /* The cyst line publishes its odds, so this pill carries a sentence too — capped and wrapping for
-   the same reason #announce is, or a 45%-per-spine prompt runs off the edge on a narrow window. */
-#harvestPrompt{position:absolute;top:56%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:17px;
+   the same reason #announce is, or a 45%-per-spine prompt runs off the edge on a narrow window.
+   56% -> 51% because both of these are sentences that wrap: a two-line cyst prompt reached within
+   8px of the two-line banner below it, and they are exactly the pair most likely to be up at once
+   (you pry a cyst, the payout announces). The clearance is now 45px at 1280 and 96px at 700. */
+#harvestPrompt{position:absolute;top:51%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:17px;
   color:#eaffd8;text-shadow:0 2px 0 var(--ink);background:rgba(40,70,20,.55);padding:6px 20px;border-radius:999px;
   border:2px solid rgba(180,255,140,.45);max-width:min(86vw,600px);text-align:center;line-height:1.3;text-wrap:balance}
-.dmg.harvest{font-size:11px;font-weight:700}
-#objective{position:absolute;bottom:98px;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:20px;
+.dmg.harvest{font-size:9px;font-weight:700;letter-spacing:.02em;-webkit-text-stroke-width:2px}
+/* The zone label and the objective were two absolutely-positioned boxes pinned 50px apart, which
+   is a stack that only holds while the objective is one line. "Slay 6 more rare+ mushrooms to lure
+   the Bloom's ruler out" wraps to two lines at 700px and grew straight up through the label. One
+   flex column anchored off the bottom instead: the gap is declared, so extra lines push the label
+   up rather than into it, and #announce has a known clearance above the whole stack to keep. */
+#bottomstack{position:absolute;bottom:98px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:11px;max-width:min(88vw,560px)}
+#objective{font-family:'Gochi Hand';font-size:20px;text-align:center;line-height:1.25;
   color:#ffe9b8;text-shadow:0 2px 0 var(--ink);background:rgba(28,20,16,.45);padding:6px 22px;border-radius:999px;border:2px solid rgba(255,246,227,.25)}
-#zone{position:absolute;bottom:148px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink)}
+#zone{font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink);text-align:center}
 /* ---------- backpack (weapon + potion quickbar, bottom-center) ---------- */
 #backpack{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;
   background:rgba(20,12,26,.4);border:2px solid rgba(255,246,227,.18);border-radius:20px;padding:10px 14px}
@@ -203,23 +213,41 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 /* damage numbers — several land in the same half-second during a fight, so the whole family is
    sized to be readable while overlapping rather than sized as if each one arrived alone. The
    relative hierarchy is what carries the meaning (crit reads bigger, harvest reads smaller), so
-   the family scales together: 22/30/16 -> 14/19/11. `nowrap` keeps a two-digit hit on one line
-   near a screen edge, where the -50% translate is what pushes it out, not the wrapping. */
+   the family scales together: 22/30/16 -> 14/19/11 -> 11/15/9. `nowrap` keeps a two-digit hit on
+   one line near a screen edge, where the -50% translate is what pushes it out, not the wrapping.
+   The ring is the other half of the fix: a drop shadow alone leaves white digits sitting on lit
+   grass with nothing between them, so every glyph carries a closed outline in the same ink the
+   HUD borders use. `paint-order:stroke fill` is what keeps the stroke BEHIND the fill — without
+   it a 2.5px stroke at 11px eats the counters and the digit reads as a blob. */
 .dmg{position:fixed;z-index:30;font-weight:700;pointer-events:none;white-space:nowrap;
-  text-shadow:0 2px 0 var(--ink),0 0 12px rgba(0,0,0,.4);
-  animation:dmgpop .8s ease-out forwards;font-size:14px;color:#fff}
-.dmg.crit{font-size:19px;color:var(--leg)}
+  -webkit-text-stroke:2.5px var(--ink);paint-order:stroke fill;
+  text-shadow:0 1px 0 var(--ink),0 2px 7px rgba(0,0,0,.6);
+  animation:dmgpop .8s ease-out forwards;font-size:11px;color:#fff}
+.dmg.crit{font-size:15px;color:var(--leg);-webkit-text-stroke-width:3px}
 .dmg.player{color:#ff6b6b}
 @keyframes dmgpop{0%{transform:translate(-50%,0) scale(.4);opacity:0}15%{opacity:1;transform:translate(-50%,-14px) scale(1.25)}
   100%{transform:translate(-50%,-70px) scale(.9);opacity:0}}
 /* The announce line stopped being two words ("LEVEL UP!") the moment it started naming the
    counterplay ("Nearly out — F drinks Vitality, Shift dashes you clear"). A sentence set at 58px
    with `nowrap` and no max-width can only run off both edges, so this is a sentence-sized banner
-   now: ~43% smaller, capped, centred, and allowed to take a second line. `balance` is what makes
-   that second line look chosen instead of leftover. */
-#announce{position:fixed;top:32%;left:50%;transform:translateX(-50%);z-index:40;
-  font-size:clamp(17px,2.7vw,32px);font-weight:700;max-width:min(84vw,640px);text-align:center;
-  line-height:1.18;text-wrap:balance;
+   now: 58 -> 32 -> 26px, capped, centred, and allowed to take a second line. `balance` is what
+   makes that second line look chosen instead of leftover.
+
+   The vertical position is not taste, it is measured. main.js clamps the hover chip's anchor into
+   [40px, height-40px] and draws the chip ABOVE it, so a prop whose origin is off the top of the
+   view parks a chip at the very top — sampling a full demo run, the chip's box sits in 0-10% of
+   the height on 54% of frames, 10-22% on 24%, 22-34% on 20%, 34-46% on 16%, and 58-88% on under
+   1%. A banner anywhere in the upper two thirds therefore WILL collide with it eventually, which
+   is what "Shield — take one hit for free" landing on "Epic · 349 HP" was. So the banner lives in
+   the one quiet band, anchored off the bottom stack (25px above #zone) rather than at a percent,
+   which keeps that clearance fixed as the window changes height. The plate is the backstop: at
+   z-index 40 over the chip's 31, an overlap that does happen costs the chip, never the sentence —
+   and it is what makes the line readable over lit grass at all. */
+#announce{position:fixed;bottom:190px;left:50%;transform:translateX(-50%);z-index:40;
+  font-size:clamp(15px,2.2vw,26px);font-weight:700;width:max-content;max-width:min(84vw,600px);
+  text-align:center;line-height:1.2;text-wrap:balance;
+  background:rgba(20,12,26,.58);backdrop-filter:blur(3px);
+  border:2px solid rgba(255,246,227,.22);border-radius:18px;padding:8px 22px;
   color:var(--cream);text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,180,80,.6);opacity:0;pointer-events:none;letter-spacing:.03em}
 #announce.show{animation:ann 2.6s ease-out forwards}
 @keyframes ann{0%{opacity:0;transform:translateX(-50%) scale(.6)}12%{opacity:1;transform:translateX(-50%) scale(1.08)}
@@ -237,7 +265,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #xpfill{background:linear-gradient(180deg,#fff3a0,#ffb52e)}
 #xplabel{font-size:11px;font-weight:700;letter-spacing:.1em;text-shadow:0 2px 0 var(--ink);margin-bottom:3px;color:#ffe9b8}
 /* ---------- level-up banner ---------- */
-/* Same fix as #announce, and it sits 10% higher, so the two can both be up without touching. */
+/* Same fix as #announce. That one moved to the bottom band, so these two can never meet. */
 #levelup{position:fixed;top:20%;left:50%;transform:translateX(-50%);z-index:41;pointer-events:none;opacity:0;
   font-family:'Gochi Hand',cursive;font-size:clamp(26px,3.6vw,44px);color:#ffe98a;letter-spacing:.06em;
   max-width:min(88vw,620px);text-align:center;line-height:1.12;text-wrap:balance;
@@ -326,6 +354,16 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #spinecell.zero #spineval{color:#a89880}
 .potslot.zero{opacity:.4;filter:grayscale(.7)}
 .potslot.zero .pcnt,.buff.zero .n,.gearslot.zero .gt{background:#8e86a0;color:#241c33}
+/* The kill tally is six counters that all start at zero, so at run start the plaque is a row of
+   noughts and saturated dots claiming the same contrast as the currencies above it. A rarity you
+   have not met yet reads as a hollow dot — the outline still says the slot exists — and while all
+   six are zero the plaque itself recedes, because a panel with nothing to report should not be
+   competing for the eye. `:has()` is what lets "all six are zero" be a CSS state at all; the rows
+   stop double-fading inside a receded plaque so the two dims don't multiply into invisible. */
+#kills .row.zero{opacity:.32;filter:grayscale(1)}
+#kills .row.zero .dot{background:transparent!important;border-color:rgba(255,246,227,.45)}
+#killwrap:not(:has(.row:not(.zero))){opacity:.42;background:rgba(20,12,26,.3);border-color:rgba(255,246,227,.09)}
+#killwrap:not(:has(.row:not(.zero))) #kills .row.zero{opacity:.8}
 /* The ammo counter is the loadout switch, so it has to LOOK pressable. #hud is pointer-events:none,
    so anything interactive inside it must re-arm pointer events for itself. */
 [data-weapon],[data-potion],[data-gear]{pointer-events:auto;cursor:pointer;
@@ -393,12 +431,12 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   /* Centred at this width, the boss bar's left edge lands on the HP bar. Dropping it below the
      HP/XP stack (which ends at 106px) is the only move that keeps both readable. */
   #bosswrap{width:min(400px,40vw);top:112px}
-  /* At this width the right column reaches ~60% of the height, so a banner at 32% would land on
-     the contracts card. Dropping it below the column is better than squeezing it to 300px: the
-     sentence stays readable, and it is still well clear of #zone/#objective at the bottom. */
-  #announce{max-width:min(72vw,420px);top:58%}
+  /* The banner is bottom-anchored now, which already clears the right column (it reaches ~60% of
+     the height here) and the bottom stack. All this width needs is a tighter cap and less plate,
+     so three lines of sentence still fit between #zone and the contracts card. */
+  #announce{max-width:min(80vw,400px);padding:7px 16px;border-radius:15px;bottom:215px}
   #levelup{max-width:min(74vw,420px)}
-  #harvestPrompt{max-width:78vw;font-size:15px}
+  #harvestPrompt{max-width:78vw;font-size:15px;top:46%}
 }
 /* ---------- item 51: visible focus + reduced motion ---------- */
 :where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus{outline:none}
@@ -468,8 +506,10 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
     <div id="contracts"></div>
   </div>
   <div id="harvestPrompt" class="hidden"></div>
-  <div id="zone"></div>
-  <div id="objective">Hunt the Bloom</div>
+  <div id="bottomstack">
+    <div id="zone"></div>
+    <div id="objective">Hunt the Bloom</div>
+  </div>
   <div id="backpack">
     <div id="bpWeapons"></div>
     <div class="bpdiv"></div>

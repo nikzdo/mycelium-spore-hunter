@@ -248,3 +248,30 @@ object stays read-immediately-never-store; seeded determinism unchanged.
     across two fresh `node` processes: seeds 1/42/1337/9999 →
     sha256 `c05465127ee931556afe823639ac55acf685a20b58694ff181dde8d9fcd6152b`, identical both runs.
   - Contact sheet for 18 generated + the 4 authored palettes: **`palette-sheet.png`** in the repo root.
+
+## HUD text pass — the one item that needs JS (hud2, index.html only)
+
+The brief on floating combat numbers was "too big, too many, and low contrast". Size and contrast
+are done in `index.html` (`.dmg` 14→11px, `.dmg.crit` 19→15px, `.dmg.harvest` 11→9px, plus a closed
+`-webkit-text-stroke` ring in `--ink` with `paint-order:stroke fill` so the outline paints behind the
+fill instead of eating the glyph). **"Too many" cannot be fixed from CSS** — it is a spawn-rate
+question and both call sites live in `js/main.js`:
+
+- `damageNumber(worldPos, dmg, crit, isPlayer)` (~L183) appends one `div.dmg` per hit with no cap and
+  no coalescing, and a `±20px` horizontal jitter that spreads a multi-hit swing into a cloud.
+- `pickupText(worldPos, text, color)` (~L198) appends one `div.dmg.harvest` per pickup, so a stomp
+  that pays essence + coins + Mycelium puts three lines in the same 40px.
+
+Whoever owns `main.js` next: the fix that keeps the information is **accumulate per target inside the
+0.85s window** — keep a `Map<target, {el, total, crit}>`, and on a second hit to the same target
+update `el.textContent` to the running total and restart the animation, instead of creating a second
+node. That turns a 5-hit flurry from five numbers into one number that climbs, which is also the
+clearer read. A hard cap (`if(liveDamageNumbers > 8) return;`) is the cheap version if the Map is too
+invasive. Neither can be done from `index.html`.
+
+Also noted while measuring: `js/main.js` clamps the hover chip's anchor to `[40, innerHeight-40]` and
+draws the chip above it (`translate(-50%,-100%)`), so a prop whose origin is off the top of the view
+parks the chip at y≈7px. Sampled over a full `?demo&seed=42` run, the chip's box lands in the top 10%
+of the viewport on **54%** of frames. That is why `#announce` is now anchored off the bottom stack
+rather than at a percentage of the height — the upper two thirds of the screen belong to the chip. If
+the chip ever grows a "don't cover the banner" rule, that clamp is the place to put it.
