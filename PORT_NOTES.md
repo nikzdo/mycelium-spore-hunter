@@ -61,3 +61,67 @@ Append-only. One bullet each: what you need, in which file you do NOT own, and w
 - **fauna → main.js (item 12, species → resource, so the HUD copy can match).** `sporebeetle` 🪲 Spore Beetle, amber (`0xffcf5a`), flat glade r 14-104 → **essence** 2 + chain, cap 6. `cragmite` 🐛 Crag Mite, violet (`0xb47aff`), broken shoulders r 58-150 slope 0.18-0.58 → **harvest-contract credit** for `violet`, 1 + chain, cap 3. `puffdrifter` 🎈 Puff Drifter, azure (`0x6ad0ff`), outer highlands r 110-172, hovers → **Mycelium** 1 + chain/2, cap 3. Every species also pays coins + the shared spine roll through `stompCritter`. Mycelium currently has one source and one sink, so the drifter is deliberately the farthest walk on the map.
 - **fauna → main.js (item 12, hover tags).** `hoverTargets()` returns the critter root groups and the array is STABLE for the whole run — a dead critter stays parented and turns invisible, and respawn revives it in place, so register once at build time and never again: `for(const root of game.fauna.hoverTargets()) game.hoverTags.register(root, o=>game.fauna.labelFor(o), { range:20, lift:1.4 })`. `labelFor()` walks up to the critter and returns null while it is dead or dying, which the tag registry already treats as "nothing to say".
 - **fauna → devpanel (item 12).** `FAUNA` (popVy, stompBand, stompCeil, chainWindow, respawnEvery, step, minGroundH, edgeR, alts) and `CRITTER_SPECIES` (counts, habitat bands, speeds, maxSlope) are both exported live objects, same convention as `world.PARAMS` — writing into them takes effect on the next frame, except `count`, which the respawn clock picks up on its next tick.
+- **props → main.js + world.js (items 11, 13, 14, 18 — new `js/props.js`, nothing else touched).**
+  API: `buildProps(scene, rng, world, opts) -> handle` (also exported as `buildInteractiveProps` —
+  world.js already has its own `buildProps`, so alias one of them at the import site). Plus
+  `PROP_PARAMS` (every knob, flat, for item 10's dev panel) and `HEAD_APEX` (4.567 m, derived from
+  the imported `PLAYER_H` — it is what clamps pod height to something a jump can actually reach).
+  `opts = { progress, pops, parent, onEvent, grantCoins, quality, podClusters, ventCount,
+  cystCrusted, cystIronbound, treasureCount, registerHeadHit }`. Only `progress` really matters;
+  everything else has a working default. Handle:
+  `{ root, pods[], cysts[], vents[], treasures[], colliders[], events[], treasureSource, anchors,
+  update(dt,t,camera,playerPos), nearestCyst(px,pz,py), promptFor(cyst), infoFor(cyst), pry(cyst),
+  ventUnderfoot(px,pz,py,grounded), travel(vent), collectTreasure(tr), payPod(pod,game),
+  hoverTargets(), labelFor(mesh), propOf(mesh), setHovered(prop|null), headEntries(), dispose() }`.
+  Call `update()` once per frame with the camera (it billboards the cyst progress bars) and the
+  player position (it does treasure pickup). Every payout/travel/pickup is *reported* through
+  `opts.onEvent(ev)` and mirrored into `handle.events` — props never touch the DOM or audio.
+  Event kinds: `pod` `{pod, coins, mult, hits, charges, chargesLeft, spent, spine, x,y,z, clampY, vy}`,
+  `cyst` `{cyst, tier, result, info, gear}`, `travel` `{from, to, x, y, z, aimAt}`,
+  `treasure` `{treasure, coins, left, x,y,z}`. **`ev.gear === true` on a cyst event is the request
+  to roll exactly one drop from main.js's powerup table** (progress.js's contract, unchanged).
+  `ev.aimAt` on a travel event is a world point to re-aim the camera at on arrival, so you land
+  facing something.
+- **props → main.js (item 11 wiring, head hits).** Pods register themselves with entities.js's
+  `registerHeadHit()` at build time, so the crossing test stays in `Player.headBonk()` and main.js
+  needs nothing. Two consequences: (a) call `clearHeadHits()` before any world rebuild, or a dead
+  world's pods keep paying; (b) pods bob, so `head.bot` and the pod's collider `bot`/`top` are
+  re-synced from the mesh in `update()` — that is deliberate, and it means `props.update()` must run
+  before or after movement consistently, not sometimes both.
+- **props → main.js (item 13 wiring, vents).** Interact key: `const v = props.ventUnderfoot(px,pz,py,player.grounded); if(v) props.travel(v)`. `travel()` returns
+  `{from, to, x, y, z, aimAt}` and does NOT move the player — main.js owns the fade-to-black, the
+  teleport and the camera re-aim (pair it with `audio.warp()`). Vents link in a ring, so travel
+  always terminates and an odd count still links.
+- **props → main.js (item 14 wiring, cysts).** Prompt: `props.promptFor(props.nearestCyst(px,pz,py))`
+  returns progress.js's published-odds string ready to render into `#harvestPrompt`. Interact:
+  `props.pry(cyst)` — it spends the spine through `progress.pryCyst()`, drives the lid swing and the
+  failure shake, and returns the event. Each cyst owns its own `state = {tries:0}`, per-run and never
+  persisted, exactly as econ specified.
+- **props → main.js (item 18 fallback, authored sites).** Item 18 reads `world.sites` (the field
+  world-core already exposes: `{x,z,r,base,coreH,...}`) and picks the HIGHEST one, since
+  "hardest to reach" is a real property. It probes `treasureSites` / `authoredSites` / `sites` /
+  `setPieces` / `landmarkSites` in that order, then falls back to `world.motherShroom` /
+  `world.pondPos` with an 11 m standoff, then to a 400-sample highest-clear-ground search. Whichever
+  path fired is on `handle.treasureSource` — on seed 42 it is `world.sites`. If a later wave adds a
+  better field, add its name to `siteFields` in props.js and nothing else changes.
+- **props → main.js (perf, measured).** 26 props on seed 42 = **79 draw calls, 16.6k triangles**,
+  8.3 ms to build, 2.8 µs per `update()` tick for the whole set. Geometry and materials are shared
+  per prop type (11 pods share ONE geometry and 12 materials; hover brightening and the
+  fresh/cracked/husk states are material *swaps*, not per-pod materials) — the exception is vents,
+  which own their geometry because the highlight band is baked in world space after the yaw. Roughly
+  a third of the calls are the `addOutline()` ink hulls. If that budget ever matters, the honest fix
+  is an `InstancedMesh` per (kind, wear-stage) with pods migrating between them on a state change;
+  it is a real bookkeeping change, not a tweak, so it was left out deliberately.
+- **props → whoever owns world.js/entities.js (a footgun worth knowing).**
+  `BufferGeometry.toNonIndexed()` returns **`this`**, not a copy, when the geometry has no index —
+  which is every `PolyhedronGeometry`/`Octahedron`. So `const g = src.toNonIndexed(); g.translate(...)`
+  writes straight into `src`, and if `src` is shared between instances every instance bakes its
+  transform into the source, compounding. Always `src.index ? src.toNonIndexed() : src.clone()`.
+  Same class of bug as disposing a shared geometry, in transform form.
+- **props → world.js (import direction, load-bearing).** `js/props.js` imports `world.js` (COLLIDERS,
+  groundHeight, groundOnly, slopeAt, inExclusion, scatter), `entities.js` (registerHeadHit, PLAYER_H),
+  `fx.js`, `rng.js` and `rockgen.js`. So it must be called **from main.js, after `buildWorld()`** —
+  importing it *into* world.js would close the loop world → props → entities → world and put
+  world.js's module-scope constants in TDZ during init, which is the same trap world-core already
+  documented for STEP/PLAYER_R. Its placement predicates read the FINISHED collider list, so calling
+  it after buildWorld is also the only order that makes them correct.
