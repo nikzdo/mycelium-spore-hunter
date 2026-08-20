@@ -583,7 +583,16 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     if(!v) return;
     if(Array.isArray(v)){ for(const e of v) pushAnchor(e); return; }
     const p = v.isObject3D ? v.position : v;
-    if(p && Number.isFinite(p.x) && Number.isFinite(p.z)) anchors.push({ x:p.x, z:p.z });
+    if(!p) return;
+    /* world.js does not use one coordinate name. Sites and positions are {x,z}, but geysers are
+       {gx,gy,gz} and cave mouths are {cx,cz,cy} — so the old `Number.isFinite(p.x)` test silently
+       dropped BOTH of those lists, and two of the most interesting landmarks in the world never
+       counted as interesting. Pods bias their clusters toward anchors (podBias), so the bias was
+       quietly running on a short list. Read defensively here rather than renaming fields in
+       world.js: this module's whole contract is to read that object defensively. */
+    const ax = Number.isFinite(p.x) ? p.x : Number.isFinite(p.gx) ? p.gx : p.cx;
+    const az = Number.isFinite(p.z) ? p.z : Number.isFinite(p.gz) ? p.gz : p.cz;
+    if(Number.isFinite(ax) && Number.isFinite(az)) anchors.push({ x:ax, z:az });
   }
   pushAnchor(world.sites); pushAnchor(world.motherShroom); pushAnchor(world.pondPos);
   pushAnchor(world.geysers); pushAnchor(world.caveSpots); pushAnchor(world.spawnPoint);
@@ -791,7 +800,12 @@ export function buildProps(scene, rng, world = {}, opts = {}){
       addOutline(mesh, 0.035);
       const throat = shared(new THREE.Mesh(throatGeo, throatMat));
       throat.position.y = P.ventH - P.ventThroatDepth*0.5 - 0.04;
-      const glow = shared(new THREE.Mesh(glowGeo, famGlow[famIdx[i]]));
+      /* Per-vent CLONE of the family glow material, not the shared one. applyHover() writes
+         .opacity on this material, and the family material is shared by every vent of that colour —
+         so hovering one violet vent brightened the other violet vent across the map. Same parameters
+         means the same compiled program, so four clones is four uniform sets, not four shaders; it
+         is exactly the trick the treasure halos already use for their distance ramp. */
+      const glow = shared(new THREE.Mesh(glowGeo, keepMat(famGlow[famIdx[i]].clone())));
       glow.rotation.x = -Math.PI/2;
       glow.position.y = P.ventH - 0.02;
       mesh.add(throat, glow);
@@ -853,6 +867,10 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     ];
     const kit = {};      // per-tier shared geometry + materials
     for(const spec of tierSpec){
+      // The elder tier is a 75% roll, so a quarter of worlds built its whole kit — geometry,
+      // merges, band shading, materials, textures — for zero chests. Same guard the placement loop
+      // below already uses, and safe because kit[spec.id] is only ever read after that guard.
+      if(spec.n <= 0) continue;
       const pal = PAL.chest[spec.id];
       // body = lower hemisphere; bands = thin boxes at the corners + a ring at the seam;
       // lock plate rides on the front of the body. All merged: one fill mesh per half.

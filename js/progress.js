@@ -133,13 +133,19 @@ const QUEST_BY_KIND = {};
 for(const q of QUEST_KINDS) QUEST_BY_KIND[q.kind] = q;
 export function questKind(kind){ return QUEST_BY_KIND[kind] || QUEST_BY_KIND.harvest; }
 
+let cSeq = 0;      // see the id note inside rollContract
 function rollContract(){
   let sum = 0; for(const q of QUEST_KINDS) sum += q.weight;
   let roll = Math.random()*sum, spec = QUEST_KINDS[0];
   for(const q of QUEST_KINDS){ roll -= q.weight; if(roll <= 0){ spec = q; break; } }
   const need = spec.min + ((Math.random()*spec.var)|0);
   const reward = Math.round(need * (spec.pay + Math.random()*spec.payVar));
-  const c = { id:'c'+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36),
+  /* MONOTONIC, not random. Completing a contract removes it by id
+     (`this.contracts.filter(x => x.id !== c.id)`), so two contracts sharing an id would delete each
+     other — and the old id was Date.now() plus a 1-in-10000 roll, which collides whenever the board
+     rolls two replacements inside the same millisecond. That is the normal case: finishing one
+     contract refills the board in a single synchronous loop. */
+  const c = { id:'c'+(cSeq++).toString(36)+Date.now().toString(36),
     kind: spec.kind, need, have:0, reward };
   if(spec.kind === 'harvest') c.species = MUSHROOM_SPECIES[(Math.random()*MUSHROOM_SPECIES.length)|0].id;
   return c;

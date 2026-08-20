@@ -655,6 +655,9 @@ function doTravel(ev){
       const dx = -Math.sin(camYaw)*Math.cos(camPitch), dy = Math.sin(camPitch), dz = -Math.cos(camYaw)*Math.cos(camPitch);
       camPos.set(camPivot.x + dx*camDist, camPivot.y + dy*camDist, camPivot.z + dz*camDist);
       camTarget.copy(camPivot);
+      // the boom too, not just the position: resetRun() snaps both, and leaving camBoom at its
+      // pre-warp value made the lens dive in on arrival and ease back out over the next second
+      camBoom = camDist;
       announce('🌀 Surfaced — new ground ahead', 'cool');
       // counted here rather than at the entrance: the quest says "ride a vent", and a ride that
       // never arrived is not one. Also the only place that knows the trip succeeded.
@@ -776,6 +779,11 @@ game.comboState = combo;
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let comboDrain = null;           // the live WAAPI drain animation, so a new hit can cancel it
 let comboShown = false, comboNumShown = '', comboLabelShown = '', comboTierShown = -1;
+// The length of the chain that just ENDED. `combo.best` is the whole session's high water mark, so
+// gating the flourish on it meant that once you had ever hit 5, every two-hit exchange for the rest
+// of the run got the drop-and-fade — which is exactly the "flourish means nothing" failure the
+// comment on `.done` warns about.
+let comboEnded = 0;
 
 /* THE chokepoint. `opts.crit` and `opts.killed` only change how hard it pops — the count is the
    count. Returns the new total so a caller can size its own feedback off the same number. */
@@ -800,10 +808,15 @@ game.comboHit = (opts)=>{
 game.comboKeepAlive = ()=>{
   if(combo.n <= 0) return;
   combo.t = COMBO_WINDOW;
-  if(comboDrain) comboDrain.cancel();
-  comboDrain = startComboDrain();
+  /* RESTART the existing animation rather than cancelling and building a new one. This is called
+     from the ring cone's update, i.e. every frame the beam is touching something — so the old
+     cancel-and-replace made one throwaway Animation object per frame for as long as the ring was
+     held. Rewinding gives the identical visual (the bar refills and drains again) for one object. */
+  if(comboDrain){ comboDrain.currentTime = 0; comboDrain.play(); }
+  else comboDrain = startComboDrain();
 };
 function comboReset(){
+  comboEnded = combo.n;          // captured BEFORE the reset; drawCombo reads it for the flourish
   combo.n = 0; combo.t = 0; combo.tier = 0;
   if(comboDrain){ comboDrain.cancel(); comboDrain = null; }
   drawCombo(false, false);
@@ -831,7 +844,7 @@ function drawCombo(tierUp, hard){
     el.classList.toggle('on', on);
     // `.done` plays the drop-and-fade. Only on a chain worth mourning: flashing it after every
     // two-hit exchange would make the flourish meaningless.
-    el.classList.toggle('done', !on && combo.best >= 5);
+    el.classList.toggle('done', !on && comboEnded >= 5);
   }
   if(!on) return;
   const t = COMBO_TIERS[combo.tier];
@@ -1063,7 +1076,8 @@ function tryHarvest(){
   audio.pickup();
   pickupText(pos, '+1 '+sp.name, hexCss(sp.color));
   const res = progress.harvestFor(entry.species);
-  updateContracts();
+  // no updateContracts() here: payQuests repaints whenever the board moved (see its note), so
+  // calling it first rebuilt the panel twice for every mushroom picked.
   updateHUD();
   payQuests(res, pos.x, pos.y, pos.z);
 }
@@ -2146,7 +2160,12 @@ function openInventory(){
 function closeInventory(){
   $('inventory').classList.add('hidden');
   game.state = invReturn;
+  // openInventory() HIDES the pause overlay on the way in, so closing back into 'pause' has to put
+  // it back. Without this, ESC-then-B-then-B left the sim frozen (tick returns early on 'pause')
+  // with no menu, no pointer lock and no visible way out. closeTome() already did this correctly;
+  // this is the same restore, kept deliberately narrow rather than copying its whole map.
   if(invReturn === 'play') grabPointer();
+  else if(invReturn === 'pause') show('pause');
 }
 game.openInventory = openInventory; game.closeInventory = closeInventory;
 
@@ -2256,9 +2275,6 @@ function show(id){ ['title','intro','pause','gameover','victory'].forEach(x=>$(x
 $('startbtn').onclick = ()=>{ audio.init(); audio.resume(); audio.click(); show('intro'); game.state='intro'; };
 $('gobtn').onclick = ()=>{ audio.click(); startRun(); };
 $('resumebtn').onclick = ()=>{ audio.click(); resumeGame(); };
-$('restartbtn').onclick = ()=>{ audio.click(); resetRun(); startRun(); };
-$('retrybtn').onclick = ()=>{ audio.click(); resetRun(); startRun(); };
-$('againbtn').onclick = ()=>{ audio.click(); resetRun(); startRun(); };
 $('mutebtn').onclick = ()=>{ audio.init(); const m = audio.toggleMute(); $('mutebtn').textContent='MUTE: '+(m?'ON':'OFF'); };
 $('tomebtn').onclick = ()=>{ audio.init(); openTome(); };
 $('tomebtn2').onclick = ()=>{ audio.click(); openTome(); };
@@ -2307,9 +2323,11 @@ function resetRun(){
   // retire(), not scene.remove(): the removal was already happening, but the per-drop materials
   // were being orphaned on the GPU every hunt.
   for(const pw of game.powerups) pw.retire();
-  for(const r of rings) scene.remove(r.mesh);
+  // same split as the per-frame teardown: ring geometry is shared and stays, everything a spawn
+  // allocated for itself goes
+  for(const r of rings){ scene.remove(r.mesh); r.mesh.material.dispose(); }
   rings.length = 0;
-  for(const pu of puddles) scene.remove(pu.mesh);
+  for(const pu of puddles){ scene.remove(pu.mesh); pu.mesh.geometry.dispose(); pu.mesh.material.dispose(); }
   puddles.length = 0;
   for(const pr of projPool){ pr.active = false; pr.mesh.visible = false; } // no stale projectiles after restart
   game.enemies = []; game.powerups = []; game.boss = null;
@@ -2735,7 +2753,15 @@ let shadowAcc = 0;
 function updateSunShadow(dt){
   if(!sun) return;
   const pp = game.player ? game.player.group.position : camTarget;
-  sunDir.copy(sun.position);
+  /* TARGET-RELATIVE, not origin-relative. world.js writes
+       sun.position = sun.target.position + sunDir*sunDist
+     so the light's DIRECTION is (position - target), and reading position alone as a direction
+     mixes in however far the player has walked from spawn. The two files then fought each other
+     every frame: world.js set a direction, this re-normalised a skewed vector, and world.js read
+     that back next frame. It is why a direct measurement of the sun's elevation came out
+     0.134..0.37 when the day-cycle maths says 0.096..0.824 — most of the sweep was being eaten by
+     the player's own offset. In place, no allocation: sunDir is the module-level Vector3. */
+  sunDir.copy(sun.position).sub(sun.target.position);
   if(sunDir.lengthSq() < 1e-6) return;
   sunDir.normalize();
   sun.position.set(pp.x + sunDir.x*SUN_BOOM, sunDir.y*SUN_BOOM, pp.z + sunDir.z*SUN_BOOM);
@@ -2745,7 +2771,11 @@ function updateSunShadow(dt){
   // that three.js clears itself after the render, so this cannot latch on.
   if(sun.shadow.autoUpdate) sun.shadow.autoUpdate = false;
   shadowAcc += dt || 0;
-  if(shadowAcc >= SHADOW_MIN_INTERVAL){ shadowAcc = 0; sun.shadow.needsUpdate = true; }
+  // `%=`, not `= 0`. Zeroing it threw away the remainder, so on a 60 Hz display (dt 16.67 ms vs a
+  // 16.67 ms interval) float jitter made every other frame fall just short and the map updated at
+  // ~30 Hz — the opposite of what the comment above promises. Carrying the remainder keeps 60 Hz
+  // at every frame, and the modulo also stops a long stall from banking a burst of updates.
+  if(shadowAcc >= SHADOW_MIN_INTERVAL){ shadowAcc %= SHADOW_MIN_INTERVAL; sun.shadow.needsUpdate = true; }
 }
 
 /* ---------- main loop ---------- */
@@ -2942,7 +2972,9 @@ function tick(){
           r.hitDone = true; p.hurt(r.dmg, r.mesh.position, game);
         }
       }
-      if(r.r > 14){ scene.remove(r.mesh); rings.splice(i,1); }
+      // the ring GEOMETRY is shared (ringGeo, one for the whole game) so it must never be
+      // disposed here; the material is per-ring because it carries the ring's colour and opacity.
+      if(r.r > 14){ scene.remove(r.mesh); r.mesh.material.dispose(); rings.splice(i,1); }
     }
     // toxic puddles (Rotmaw) — tick damage while the player stands inside
     for(let i=puddles.length-1;i>=0;i--){
@@ -2951,7 +2983,10 @@ function tick(){
       pu.mesh.material.opacity = 0.4 * Math.min(1, pu.life/1.2);
       const pd = Math.hypot(p.group.position.x-pu.mesh.position.x, p.group.position.z-pu.mesh.position.z);
       if(pd < pu.radius && pu.tickCd <= 0 && p.grounded){ pu.tickCd = 0.6; p.hurt(pu.dmg, pu.mesh.position, game); }
-      if(pu.life <= 0){ scene.remove(pu.mesh); puddles.splice(i,1); }
+      // dispose, not just remove: spawnPuddle() builds a fresh CircleGeometry and material for
+      // every puddle, and three.js frees GPU buffers on dispose() and nowhere else. A Rotmaw fight
+      // is dozens of these.
+      if(pu.life <= 0){ scene.remove(pu.mesh); pu.mesh.geometry.dispose(); pu.mesh.material.dispose(); puddles.splice(i,1); }
     }
 
     // ambient sparkle near legendary/boss

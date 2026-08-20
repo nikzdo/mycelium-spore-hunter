@@ -1134,13 +1134,16 @@ export function buildProps(scene, seed, world = WORLD){
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treePos.length);
   const cans = new THREE.InstancedMesh(canGeo, canMat, treePos.length);
   const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3(), S = new THREE.Vector3();
+  // one Euler beside the other build scratch. The grass loop alone runs 22,000 times on the boot
+  // frame, and it was building a throwaway Euler on every one of them.
+  const EU = new THREE.Euler();
   const canColor = new THREE.Color();
   const corruptCol = new THREE.Color(0x2a1a3a);
   const trunkColor = new THREE.Color();
   const trunkCorrupt = new THREE.Color(0x241826);
   treePos.forEach(([x,y,z],i)=>{
     const s = PARAMS.treeSMin+rng()*PARAMS.treeSVar;
-    Q.setFromEuler(new THREE.Euler(0, rng()*7, (rng()-0.5)*0.12));
+    Q.setFromEuler(EU.set(0, rng()*7, (rng()-0.5)*0.12));
     M.compose(V.set(x,y-0.3,z), Q, S.set(s,s,s));
     trunks.setMatrixAt(i,M);
     M.compose(V.set(x+Math.sin(2.4)*0.8*s, y+6.1*s, z), Q, S.set(s*(0.9+rng()*0.5), s, s*(0.9+rng()*0.5)));
@@ -1270,7 +1273,7 @@ export function buildProps(scene, seed, world = WORLD){
   const rockColor = new THREE.Color();
   rockPlacements.forEach((rp,i)=>{
     const gy = groundHeight(rp.x,rp.z);
-    Q.setFromEuler(new THREE.Euler(rp.rx, rp.ry, rp.rz));
+    Q.setFromEuler(EU.set(rp.rx, rp.ry, rp.rz));
     M.compose(V.set(rp.x, gy+rp.s*0.2, rp.z), Q, S.set(rp.s, rp.sy, rp.s));
     rocks.setMatrixAt(i, M);
     // same loop as the matrix, so a rock's collision can't drift from the rock you can see.
@@ -1616,7 +1619,7 @@ export function buildProps(scene, seed, world = WORLD){
     const a=rng()*Math.PI*2, r=PARAMS.bushRMin+rng()*PARAMS.bushRVar;
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
     const s = PARAMS.bushSMin+rng()*PARAMS.bushSVar;
-    Q.setFromEuler(new THREE.Euler(0, rng()*7, 0));
+    Q.setFromEuler(EU.set(0, rng()*7, 0));
     M.compose(V.set(x, groundHeight(x,z)+0.3*s, z), Q, S.set(s, s*0.85, s));
     bushes.setMatrixAt(i, M);
     // same trick as the canopy: one shared J, one shared Color, ratio against what the map paints
@@ -1642,7 +1645,11 @@ export function buildProps(scene, seed, world = WORLD){
     g.fillStyle='#e8d4a8'; g.fillRect(0,0,128,128);
     const rings=['#c9a86c','#a8824a','#8a6234','#c9a86c','#b08a52'];
     for(let r=58;r>4;r-=6+Math.random()*3){
-      g.strokeStyle=rings[(r/6)|0 % rings.length]; g.lineWidth=1.6+Math.random();
+      // PARENTHESES ARE LOAD-BEARING: `%` binds tighter than `|`, so `rings[(r/6)|0 % rings.length]`
+      // parsed as `rings[(r/6) | (0 % 5)]` = `rings[(r/6)|0]`, an index running 9..0 into a 5-entry
+      // array. Every ring at r > 29 read `undefined`, canvas fell back to black, and the outer half
+      // of every log's end cap was drawn in ink instead of wood.
+      g.strokeStyle=rings[((r/6)|0) % rings.length]; g.lineWidth=1.6+Math.random();
       g.beginPath(); g.ellipse(64,64,r,r*(0.94+Math.random()*0.1),Math.random()*0.3,0,7); g.stroke();
     }
     // a couple of hairline cracks
@@ -1674,7 +1681,13 @@ export function buildProps(scene, seed, world = WORLD){
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
     const s = PARAMS.logSMin+rng()*PARAMS.logSVar;
     const yaw = rng()*7, roll = (rng()-0.5)*0.2;
-    Q.setFromEuler(new THREE.Euler(Math.PI/2, yaw, roll));
+    /* 'YXZ', and the order is the whole fix. The default 'XYZ' applies the X quarter-turn FIRST,
+       which lays the cylinder down — and then `yaw` rotates about what is now the log's own length
+       axis, so it only spins the log in place instead of turning it on the ground. Every log came
+       out pointing the same compass direction, and the end caps/moss offset along a local axis that
+       was no longer where the code assumed. Yawing first, then tipping, is what the bridge group
+       already does for the same reason. */
+    Q.setFromEuler(EU.set(Math.PI/2, yaw, roll, 'YXZ'));
     const y = groundHeight(x,z)+0.42*s;
     M.compose(V.set(x, y, z), Q, S.set(s, s, s));
     logs.setMatrixAt(i, M);
@@ -1726,7 +1739,7 @@ export function buildProps(scene, seed, world = WORLD){
   if(blobBits.length){
     const mossBlobs = new THREE.InstancedMesh(mossBlobGeo, mossBlobMat, blobBits.length);
     blobBits.forEach((b,i)=>{
-      Q.setFromEuler(new THREE.Euler(0,b.ry,0));
+      Q.setFromEuler(EU.set(0,b.ry,0));
       M.compose(b.pos, Q, S.set(b.scale,b.scale,b.scale));
       mossBlobs.setMatrixAt(i, M);
     });
@@ -1738,7 +1751,7 @@ export function buildProps(scene, seed, world = WORLD){
     const sproutCaps = new THREE.InstancedMesh(sproutCapGeo, sproutCapMat, sproutBits.length);
     const upY = new THREE.Vector3(0,1,0);
     sproutBits.forEach((b,i)=>{
-      Q.setFromEuler(new THREE.Euler(0,b.ry,0));
+      Q.setFromEuler(EU.set(0,b.ry,0));
       M.compose(V.copy(b.pos).addScaledVector(upY, 0.08*b.scale), Q, S.set(b.scale,b.scale,b.scale));
       sproutStems.setMatrixAt(i, M);
       M.compose(V.copy(b.pos).addScaledVector(upY, 0.16*b.scale), Q, S.set(b.scale,b.scale,b.scale));
@@ -1796,7 +1809,7 @@ export function buildProps(scene, seed, world = WORLD){
   for(let i=0;i<grassCount;i++){
     const a=rng()*Math.PI*2, r=PARAMS.grassRMin+Math.pow(rng(),0.8)*PARAMS.grassRVar;
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
-    Q.setFromEuler(new THREE.Euler(0, rng()*7, (rng()-0.5)*0.3));
+    Q.setFromEuler(EU.set(0, rng()*7, (rng()-0.5)*0.3));
     const s=0.6+rng()*0.9;
     M.compose(V.set(x, groundHeight(x,z), z), Q, S.set(s,s,s));
     grass.setMatrixAt(i,M);
@@ -2081,7 +2094,7 @@ export function buildProps(scene, seed, world = WORLD){
       const mesh = new THREE.InstancedMesh(shardGeoVariants[variant], crystalMats[colorIdx], placements.length);
       mesh.castShadow = true;
       placements.forEach((p,i)=>{
-        Q.setFromEuler(new THREE.Euler(p.rx,p.ry,p.rz));
+        Q.setFromEuler(EU.set(p.rx,p.ry,p.rz));
         M.compose(V.set(p.x,p.y,p.z), Q, S.set(p.sx,p.sy,p.sz));
         mesh.setMatrixAt(i, M);
       });

@@ -77,6 +77,10 @@ function capTexture(color, rarityIdx=0){
 let stemTex = null;
 // shared temps (no per-frame allocations in hot paths)
 const _fwd = new THREE.Vector3(), _tip = new THREE.Vector3(), _to = new THREE.Vector3();
+// Mushroom.update's player-delta. Its OWN scratch, deliberately not _to: _to belongs to
+// Player.attack's target loop, and one creature's update must never be able to stomp on a
+// vector the attack resolve is mid-way through reading.
+const _toP = new THREE.Vector3();
 
 /* =============== MUSHROOM ENEMY =============== */
 /* Elemental scratch + tuning shared by every creature. ELEM_BURN_TICK is here rather than in
@@ -320,7 +324,9 @@ export class Mushroom {
     }
     const g = this.group;
     const player = game.player;
-    const toP = player.group.position.clone().sub(g.position); toP.y = 0;
+    // reused scratch, not clone(): this ran once per enemy per frame, so a 60-enemy fight was
+    // making 60 throwaway Vector3s every frame for no reason. Hot-path rule, CLAUDE.md.
+    const toP = _toP.copy(player.group.position).sub(g.position); toP.y = 0;
     const dist = toP.length();
     const R = this.R;
 
@@ -1075,7 +1081,11 @@ export class Player {
                   const dmg2 = Math.round(dmgBase*fin.mult);
                   e.hit(dmg2, g.position, game, 1);
                   _tip.copy(e.group.position); _tip.y += 2*e.R.scale;
-                  game.damageNumber(_tip, dmg2, false, e);
+                  // FIVE args. Passing `e` into the `isPlayer` slot (the bug this replaces) made the
+                  // collateral number key on PLAYER_KEY and take the .player class, so a burst that
+                  // caught a second enemy printed its damage in the player-damage red AND added it
+                  // into the same floating node as the player's own HP loss.
+                  game.damageNumber(_tip, dmg2, false, false, e);
                   if(game.comboHit) game.comboHit({ killed: e.dead });
                 }
               }
