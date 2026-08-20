@@ -432,13 +432,20 @@ export class Progress {
      Returns { completed, added }: contracts just finished (already paid and removed) and their
      freshly-rolled replacements, so the caller can announce both. */
   advanceQuests(kind, n = 1, species = null){
-    if(n <= 0) return { completed: [], added: [] };
+    if(n <= 0) return { completed: [], added: [], advanced: 0 };
     const completed = [];
+    // `advanced` counts contracts whose `have` actually moved. The caller needs it to know whether
+    // to repaint the board: without it, PARTIAL progress was invisible — the panel only refreshed
+    // when something COMPLETED, so bursting a pod against a "burst 5 pods" contract left 0/5 on
+    // screen and the whole quest kind read as broken.
+    let advanced = 0;
     for(const c of this.contracts){
       if((c.kind || 'harvest') !== kind) continue;
       if(kind === 'harvest' && c.species !== species) continue;
       if(c.have >= c.need) continue;
+      const was = c.have;
       c.have = Math.min(c.need, c.have + n);
+      if(c.have !== was) advanced++;
       if(c.have >= c.need) completed.push(c);
     }
     const added = [];
@@ -451,7 +458,7 @@ export class Progress {
       this.saveMyco();
     }
     this.saveContracts();
-    return { completed, added };
+    return { completed, added, advanced };
   }
   // harvesting a mushroom of `speciesId`. Kept as its own name because a dozen call sites and the
   // critter payout path already speak it, and because "harvest" is the only kind that needs a

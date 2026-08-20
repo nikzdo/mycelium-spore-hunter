@@ -450,8 +450,13 @@ function updateContracts(){
    finished harvest contract — which is the point of having one board. Callers pass the result of
    any progress.advanceQuests()/harvestFor() call plus where on screen it happened. */
 function payQuests(res, x, y, z){
-  if(!res || !res.completed.length) return 0;
-  updateContracts();
+  if(!res) return 0;
+  // Repaint on ANY movement, not just completion. This used to early-out before updateContracts()
+  // unless something finished, so partial progress on the five non-harvest kinds never reached the
+  // screen — you burst a pod and the "burst 5 pods" row stayed at 0/5. Guarded on `advanced` so a
+  // payout with no matching contract on the board still costs nothing.
+  if(res.advanced) updateContracts();
+  if(!res.completed.length) return 0;
   const paid = res.completed.reduce((a,c)=>a+c.reward, 0);
   audio.contract();          // its own cue — a contract payout is not an alchemy purchase
   if(x !== undefined) rewardPops.pop(x, y, z, 6);
@@ -1556,6 +1561,7 @@ function updateHUD(){
    worth the walk. Diff-based like every other HUD write — the string only reaches the DOM when one
    of the counts actually changes. */
 let healUrgent = false;   // latch for the urgent heal slot; see updateHUD
+let wlPods = -1, wlChests = -1, wlGems = -1, wlCrit = -1;
 function updateWorldLine(){
   const el = document.getElementById('worldline');
   if(!el) return;
@@ -1565,6 +1571,13 @@ function updateWorldLine(){
   for(const c of props.chests) if(!c.open) chests++;
   for(const t of props.treasures) if(!t.collected) gems++;
   if(fauna) for(const c of fauna.critters) if(!c.dead && !c.dying) crit++;
+  /* The COUNTS are four ints and cost nothing; the STRING is an array plus four concats plus a
+     join, and this runs from updateHUD() every frame. setText() diffed the result so the DOM was
+     safe, but the garbage was made either way — which is exactly what the no-per-frame-allocation
+     rule forbids. Diff the four numbers instead and only build the string when one of them moves,
+     which in practice is a handful of times per hunt. */
+  if(pods === wlPods && chests === wlChests && gems === wlGems && crit === wlCrit) return;
+  wlPods = pods; wlChests = chests; wlGems = gems; wlCrit = crit;
   const parts = [];
   // 🌸, not 🫧: item 03 grew the pods a corolla, and the tracker glyph has to match the thing the
   // player is looking for or the count names something they cannot find.
@@ -2304,6 +2317,7 @@ function resetRun(){
   // spent within the hunt it was found in, so carrying its drop history across runs would make
   // the first stomp of a fresh world feel arbitrary.
   game.stompCount = 0; game.ringsFound = 0;
+  wlPods = wlChests = wlGems = wlCrit = -1;   // force one rebuild for the new world's counts
   combo.n = 0; combo.t = 0; combo.best = 0; combo.tier = 0;
   comboShown = false; comboNumShown = ''; comboLabelShown = ''; comboTierShown = -1;
   { const el = document.getElementById('combo'); if(el) el.classList.remove('on','done'); }
