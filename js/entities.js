@@ -1,11 +1,57 @@
 // entities.js — player, mushrooms, boss, powerups, projectiles
 import * as THREE from 'three';
 import { toonMat, addOutline, paintTexture, makeBlobShadow } from './fx.js';
-import { groundHeight } from './world.js';
+import { groundHeight, surfaceAt, slopeAt, inExclusion } from './world.js';
 import { WEAPONS_BY_ID } from './weapons.js';
 import { POTIONS_BY_ID } from './potions.js';
 import { buildSwordVariant } from './swordVisuals.js';
 import { ARMOR_BY_ID, ARMOR_SLOTS } from './armor.js';
+
+/* ---------------- movement constants (items 02, 03, 04) ----------------
+   A movement constant is a level-design constraint, so each says which design it holds up.
+   world.js declares its OWN copies of STEP/PLAYER_R/PLAYER_H at module scope (it cannot import
+   them back without a TDZ cycle) and STEP does double duty there: it is both surfaceAt()'s climb
+   threshold and the collider *registration* threshold — a prop whose top clears STEP above the
+   ground gets a collider, anything shorter deliberately gets none. Change STEP in one file only
+   and short props become invisible walls, or tall ones become unclimbable. Keep them identical. */
+export const STEP = 1.5;        // tallest ledge you walk onto without jumping. Bridge kerbs, log
+                                // piles and rock skirts are all authored under it on purpose.
+export const PLAYER_R = 0.85;   // body radius — also the forward-probe distance, so the shoulders
+                                // stop at a rock face instead of sinking into it
+export const PLAYER_H = 2.55;   // body column: what a wall must overlap to block you, and what a
+                                // spore pod's underside gets struck by
+export const COYOTE = 0.13;     // grace after walking off a ledge. The ravine lip is meant to be a
+                                // running jump; frame-perfect timing is not the skill being tested.
+export const JUMP_BUF = 0.16;   // a jump pressed just before touchdown still fires on the landing
+                                // frame, so chained hops over the rocks don't eat inputs
+export const SNAP_DOWN = 0.55;  // downslope stick. Our hills roll over faster than gravity catches
+                                // up, and skipping off every crest reads as a bug, not as air.
+const JUMP_VY = 11;             // same impulse main.js's tryJump() has always applied
+const LAND_HARD = -14;          // vy below this thumps (squash + sound). Walking downhill peaks
+                                // around -8, so a stroll never squashes.
+const SQUASH_EASE = 9;          // rate the squash scalar eases back to 1
+
+/* ---------------- creature terrain rules (item 57) ----------------
+   Slope is |grad h| from world.js. The ravine banks run ~1.0-1.6 and the valley rim ~0.45, so a
+   ceiling just under 1 stops mushrooms scaling the mother-mushroom stem and ravine walls without
+   shrinking the field they can actually use. */
+const MOB_SLOPE_MAX = 0.85;
+const BOSS_SLOPE_MAX = 4;   // bosses are effectively exempt: a boss that cannot reach the player is
+                            // a soft-lock, which is strictly worse than a boss on a hillside
+const MOB_DROP_MAX = 4;     // a creature won't step off a drop taller than itself — this is what
+                            // keeps them out of the ravine without them knowing it exists
+const MOB_RING = 195;       // same playable ring the player is clamped to
+const MOB_DETOUR = 0.7;     // how long an alternative heading that cleared is kept. Re-rolling one
+                            // every frame is exactly what makes a blocked animal look broken.
+
+/* item 11 — spore pods (and anything else burst by jumping into it from below) register here.
+   The Player only ever READS this array, so world.js/main.js own creation and lifetime; entries
+   are `{x, z, bot, r, off?, onHead(player, game)}` where `bot` is the underside plane the head
+   crosses. Empty registry = one length check per frame, so this is a no-op until someone places
+   pods. `off = true` retires an entry; nothing splices, matching the COLLIDERS convention. */
+export const HEAD_HITS = [];
+export function registerHeadHit(entry){ HEAD_HITS.push(entry); return entry; }
+export function clearHeadHits(){ HEAD_HITS.length = 0; }
 
 // gradation: brown -> green -> red -> blue -> purple -> rainbow (lowest to highest)
 export const RARITIES = [
@@ -45,6 +91,14 @@ export class Mushroom {
     this.attackCd = 2 + Math.random()*2; this.lungeT = 0;
     this.vel = new THREE.Vector3(); this.kb = new THREE.Vector3();
     this.flash = 0; this.auraT = 0;
+    // item 57 wander/detour state. A heading is kept until it fails, and an alternative that
+    // cleared is held for MOB_DETOUR seconds — the naive "add a fixed turn every blocked frame"
+    // thrashes the same failing angle and reads as a broken animal.
+    this.wanderA = Math.random()*Math.PI*2; this.wanderT = 1 + Math.random()*2;
+    this.detourT = 0; this.detourX = 0; this.detourZ = 0;
+    this.moved = false;              // walk-bob is gated on this: no step, no bob
+    this._mx = 0; this._mz = 0; this._mdx = 0; this._mdz = 0;
+    this._stuck = false; this._steep = false;
 
     if(!stemTex) stemTex = paintTexture('#f2e4c8', [{c:'#d9c8a8',n:8,r:6,a:0.5}], {dabs:200});
     const g = this.group = new THREE.Group();
@@ -120,6 +174,62 @@ export class Mushroom {
     game.onKill(this);
     this.scene.remove(this.group);
   }
+  /* item 57 — ONE gate every enemy step passes through: chase, lunge, wander and knockback all
+     call it, so a creature can never end up somewhere its own wander would have refused.
+     (ddx, ddz) is the world-space delta attempted from where it stands; feetY is its CURRENT
+     stand height, which is what decides climbable-vs-wall inside surfaceAt. */
+  tryDir(ddx, ddz, feetY, zones){
+    const p = this.group.position;
+    const nx = p.x + ddx, nz = p.z + ddz;
+    if(nx*nx + nz*nz > MOB_RING*MOB_RING) return false;            // playable ring
+    // authored keep-outs are a WANDER rule only: a hunting creature follows you anywhere it can
+    // physically stand, and a boss ignores them outright so its approach can't be fenced off.
+    if(zones && !this.isBoss && inExclusion(nx, nz, 0)) return false;
+    // _steep is the escape valve: something that spawned on a wall must be allowed to walk OFF
+    // it, otherwise every candidate fails and it stands there forever.
+    if(!this._steep && slopeAt(nx, nz) > (this.isBoss ? BOSS_SLOPE_MAX : MOB_SLOPE_MAX)) return false;
+    const s = surfaceAt(nx, nz, feetY);
+    const h = s.h, blocked = s.blocked;   // shared object: consume both fields immediately
+    if(blocked && !this._stuck) return false;                      // wall (unless already inside one)
+    if(h - feetY > STEP) return false;                             // too tall to walk onto
+    if(feetY - h > MOB_DROP_MAX) return false;                     // won't step off a cliff
+    this._mx = nx; this._mz = nz; this._mdx = ddx; this._mdz = ddz;
+    return true;
+  }
+  commitStep(){
+    const p = this.group.position;
+    p.x = this._mx; p.z = this._mz;
+    this.moved = true;
+    return true;
+  }
+  // a refused diagonal is retried one axis at a time, so a creature grazes along a trunk
+  // instead of stalling flat against it
+  slideStep(ddx, ddz, feetY, zones){
+    if(this.tryDir(ddx, ddz, feetY, zones)) return this.commitStep();
+    if(ddx !== 0 && this.tryDir(ddx, 0, feetY, zones)) return this.commitStep();
+    if(ddz !== 0 && this.tryDir(0, ddz, feetY, zones)) return this.commitStep();
+    return false;
+  }
+  // the island's wander resolve: keep a detour that worked, else the intended heading, else
+  // sample ~8 alternatives and take the first that clears. Nothing clears -> stand still.
+  moveAlong(dt, ddx, ddz, feetY, zones){
+    if(this.detourT > 0){
+      this.detourT -= dt;
+      const d = Math.hypot(ddx, ddz);
+      if(this.slideStep(this.detourX*d, this.detourZ*d, feetY, zones)) return true;
+      this.detourT = 0;
+    }
+    if(this.slideStep(ddx, ddz, feetY, zones)) return true;
+    const d = Math.hypot(ddx, ddz);
+    for(let i=0;i<8;i++){
+      const a = Math.random()*Math.PI*2, cx = Math.sin(a), cz = Math.cos(a);
+      if(this.tryDir(cx*d, cz*d, feetY, zones)){
+        this.detourX = cx; this.detourZ = cz; this.detourT = MOB_DETOUR;
+        return this.commitStep();
+      }
+    }
+    return false;
+  }
   update(dt, game){
     if(this.dead) return;
     this.t += dt;
@@ -130,10 +240,20 @@ export class Mushroom {
     const R = this.R;
 
     // --- AI ---
+    // feet reference is baseY, not position.y: mid-hop the transform floats above the ground and
+    // a creature would then "step onto" ledges STEP above its hop apex.
+    const feetY = this.baseY;
+    this.moved = false;
+    // per-frame escape valves, one query each: a creature that spawned inside a rock or on a wall
+    // face must be able to leave it, or every candidate below fails and it freezes there.
+    this._stuck = surfaceAt(g.position.x, g.position.z, feetY).blocked;
+    this._steep = slopeAt(g.position.x, g.position.z) > (this.isBoss ? BOSS_SLOPE_MAX : MOB_SLOPE_MAX);
     this.attackCd -= dt;
     if(this.state === 'lunge'){
       this.lungeT -= dt;
-      g.position.addScaledVector(this.lungeDir, dt * this.speed * 3.2);
+      // a lunge is committed, so it slides along walls but never re-aims: honouring the collider
+      // set here is what stops a charge ending up inside a tree
+      this.slideStep(this.lungeDir.x * dt * this.speed * 3.2, this.lungeDir.z * dt * this.speed * 3.2, feetY, false);
       if(this.lungeT <= 0) this.state = 'chase';
       if(dist < 1.6*R.scale && this.lungeT > 0){
         player.hurt(this.dmg, g.position, game); this.lungeT = 0; this.state='chase';
@@ -144,9 +264,10 @@ export class Mushroom {
       const targetYaw = Math.atan2(toP.x, toP.z);
       g.rotation.y += (((targetYaw - g.rotation.y + Math.PI*3) % (Math.PI*2)) - Math.PI) * Math.min(1, dt*8);
       if(dist > 3.2*R.scale){
-        // hop toward player
+        // hop toward player — resolved, so the chase walks round a rock instead of into it
         const hop = Math.max(0, Math.sin(this.t*6));
-        g.position.addScaledVector(toP, dt * this.speed * hop);
+        const step = dt * this.speed * hop;
+        if(step > 1e-5) this.moveAlong(dt, toP.x*step, toP.z*step, feetY, false);
       } else if(this.attackCd <= 0){
         // attack: lunge or shoot
         if(this.rarity >= 1 && Math.random() < 0.45){
@@ -164,15 +285,29 @@ export class Mushroom {
           game.spawnRing(g.position.clone(), this.dmg*0.8, R.glow);
         }
       }
-    } else { this.state = 'idle'; }
+    } else {
+      this.state = 'idle';
+      // idle wander (item 57): a heading is held for seconds at a time and only re-rolled when it
+      // expires or gets refused, so a creature blocked by a rock walks somewhere else instead of
+      // pivoting on the spot. Wander is the one mover that respects exclusion zones.
+      this.wanderT -= dt;
+      if(this.wanderT <= 0){ this.wanderT = 2 + Math.random()*3; this.wanderA = Math.random()*Math.PI*2; }
+      const step = dt * this.speed * 0.28;
+      if(this.moveAlong(dt, Math.sin(this.wanderA)*step, Math.cos(this.wanderA)*step, feetY, true)){
+        const targetYaw = Math.atan2(this._mdx, this._mdz);
+        g.rotation.y += (((targetYaw - g.rotation.y + Math.PI*3) % (Math.PI*2)) - Math.PI) * Math.min(1, dt*3);
+      } else {
+        this.wanderT = 0;   // nothing cleared: pick a fresh heading next frame, don't spin
+      }
+    }
 
-    // knockback
-    g.position.addScaledVector(this.kb, dt);
+    // knockback — through the same gate, so a shove can't push a creature inside a prop
+    this.slideStep(this.kb.x*dt, this.kb.z*dt, feetY, false);
     this.kb.multiplyScalar(Math.pow(0.0001, dt));
 
-    // stay on ground + bounds
-    const gy = groundHeight(g.position.x, g.position.z);
-    const hopY = (this.state==='chase') ? Math.abs(Math.sin(this.t*6))*0.5*R.scale : 0;
+    // stay on ground + bounds. surfaceAt, so a prop top (the bridge deck) is standable ground.
+    const gy = surfaceAt(g.position.x, g.position.z, feetY).h;   // shared object: read immediately
+    const hopY = (this.state==='chase' && this.moved) ? Math.abs(Math.sin(this.t*6))*0.5*R.scale : 0;
     this.baseY += (gy - this.baseY) * Math.min(1, dt*10);
     g.position.y = this.baseY + hopY + (this.state==='lunge' ? Math.sin((0.55-this.lungeT)/0.55*Math.PI)*0.8 : 0);
 
@@ -423,6 +558,13 @@ export class Player {
     this.speed = 8; this.speedMult = 1;
     this.vel = new THREE.Vector3(); this.vy = 0; this.grounded = true;
     this.jumps = 0; this.maxJumps = 1;
+    this.moveInput = new THREE.Vector3();
+    // item 03 — a jump press is a REQUEST, not an event: coyoteT keeps the ground you just left
+    // valid, jumpBuf remembers a press made just before you land. onJump is the caller's cue hook,
+    // fired whenever a jump actually leaves the ground (which may be a later frame than the press).
+    this.coyoteT = 0; this.jumpBuf = 0; this.onJump = null;
+    // item 04 — one squash scalar, eased back to 1 and applied volume-preserving
+    this.squash = 1;
     this.dashCd = 0; this.dashMaxCd = 2.2; this.dashT = 0; this.dashDir = new THREE.Vector3();
     this.attackT = 0; this.attackDur = 0.3; this.combo = 0; this.comboWindow = 0;
     this.impactT = 0; this.atkDip = 0;
@@ -496,6 +638,105 @@ export class Player {
     return true;
   }
   getMaxJumps(){ return this.maxJumps + (this.boostTimers.jump > 0 ? 1 : 0); }
+  /* item 03 — THE jump entry point. main.js's tryJump() should call this and nothing else: it
+     remembers the press for JUMP_BUF seconds, so a jump pressed a frame before touchdown fires on
+     the landing frame instead of being dropped. Returns true if it left the ground right now; a
+     false return is not a rejection, it may still fire within the buffer window — which is why
+     the audio/particle cue belongs on onJump, not on the return value. */
+  bufferJump(){
+    this.jumpBuf = JUMP_BUF;
+    return this._consumeJump();
+  }
+  _consumeJump(){
+    if(this.jumpBuf <= 0) return false;
+    // the ground you left less than COYOTE ago still counts, and costs no air jump
+    const fromGround = this.grounded || this.coyoteT > 0;
+    if(!fromGround && this.jumps >= this.getMaxJumps()) return false;
+    this.jumps = fromGround ? 1 : this.jumps + 1;
+    this.vy = JUMP_VY;
+    this.grounded = false; this.coyoteT = 0; this.jumpBuf = 0;
+    this.squash = 1.22;                       // stretch on launch
+    if(this.onJump) this.onJump(this);
+    return true;
+  }
+  /* item 04 — one chokepoint for every touchdown, so a landing reads the same however you got
+     there. Gated on vy so walking downhill (which peaks around -8) never squashes. */
+  land(vy, game){
+    if(vy > LAND_HARD) return;
+    this.squash = 0.72;
+    const p = this.group.position;
+    for(let i=0;i<5;i++)
+      game.particles.spawn(p.x+(Math.random()-0.5)*1.1, p.y+0.15, p.z+(Math.random()-0.5)*1.1,
+        {r:0.85,g:0.8,b:0.7, spread:1.6, size:7, life:0.4, vy:1.1, drag:0.94});
+    if(game.audio.land) game.audio.land();
+    else { game.audio.beep(96, 0.13, 'sine', 0.17, 52); game.audio.hiss(0.09, 0.1, 180, 900); }
+    game.shake(0.16);
+  }
+  /* item 02 — horizontal movement goes through here instead of straight into the transform, which
+     is what makes a prop solid at all. Long frames and dashes (3.4x walk speed) are split into
+     sub-PLAYER_R steps: a single 1.4-unit hop can straddle a whole trunk, and tunnelling through a
+     tree is the one bug that makes collision look absent. */
+  moveHoriz(mx, mz){
+    const g = this.group;
+    const d = Math.hypot(mx, mz);
+    if(d < 1e-6) return;
+    // escape valve: if we are ALREADY inside a column (spawned in it, knocked into it) every
+    // candidate reads blocked and the player would be frozen. Only ever refuse a step that leaves
+    // clear ground for a wall.
+    if(surfaceAt(g.position.x, g.position.z, g.position.y).blocked){ g.position.x += mx; g.position.z += mz; return; }
+    const n = d > PLAYER_R ? Math.ceil(d/PLAYER_R) : 1;
+    const sx = mx/n, sz = mz/n;
+    for(let i=0;i<n;i++){
+      const feetY = g.position.y;
+      if(this.tryStep(g.position.x+sx, g.position.z+sz, feetY, sx, sz)){
+        g.position.x += sx; g.position.z += sz;
+        continue;
+      }
+      // blocked diagonal: retry each axis alone, so we slide along the wall instead of stopping
+      // dead against it. Order matters — the z test uses the x result, so a corner resolves once.
+      let slid = false;
+      if(sx !== 0 && this.tryStep(g.position.x+sx, g.position.z, feetY, sx, 0)){ g.position.x += sx; slid = true; }
+      else this.vel.x = 0;
+      if(sz !== 0 && this.tryStep(g.position.x, g.position.z+sz, feetY, 0, sz)){ g.position.z += sz; slid = true; }
+      else this.vel.z = 0;
+      if(!slid) break;                        // flat into a corner: stop, don't grind
+    }
+  }
+  /* Resolve one candidate foot position. The forward probe is what stops the shoulders sinking
+     into a rock face: the centre sample alone lets a body radius of geometry overlap first.
+     NOTE: terrain height is never a wall for the player, only colliders are — a bowl you can walk
+     down into has to stay walkable out of, and the ravine keeps its climbable banks. Prop tops
+     under STEP are climbed by surfaceAt itself, and the vertical resolve lifts the feet onto them. */
+  tryStep(nx, nz, feetY, dx, dz){
+    const dl = Math.hypot(dx, dz);
+    if(dl > 1e-6){
+      const k = PLAYER_R/dl;
+      if(surfaceAt(nx + dx*k, nz + dz*k, feetY).blocked) return false;
+    }
+    return !surfaceAt(nx, nz, feetY).blocked;
+  }
+  /* item 11 — head collision against spore pods. A crossing test, not a distance test: the crown
+     has to pass through the pod's underside plane during THIS frame, travelling upward. A
+     proximity check would also burst a pod you merely walked past. */
+  headBonk(prevY, game){
+    const g = this.group;
+    const prevHead = prevY + PLAYER_H, headY = g.position.y + PLAYER_H;
+    for(let i=0;i<HEAD_HITS.length;i++){
+      const o = HEAD_HITS[i];
+      if(o.off) continue;
+      if(prevHead > o.bot || headY < o.bot) continue;
+      const dx = g.position.x - o.x, dz = g.position.z - o.z, rr = (o.r || 1) + PLAYER_R*0.55;
+      if(dx*dx + dz*dz > rr*rr) continue;
+      // clamp just under it and bonk back down, so the impact reads instead of the head sliding
+      // up through the pod on the next frame
+      g.position.y = o.bot - PLAYER_H - 0.01;
+      this.vy = -2;
+      this.squash = 1.28;
+      if(o.onHead) o.onHead(this, game);
+      return o;                               // one pod per frame — the bonk kills our rise anyway
+    }
+    return null;
+  }
   getMagnet(game){ return (this.boostTimers.magnet > 0 ? 2.2 : 0) + (game ? this.getArmorBonus('magnet', game) : 0); }
   hurt(dmg, from, game){
     if(this.iframe > 0 || this.dashT > 0 || game.state !== 'play') return;
@@ -544,6 +785,7 @@ export class Player {
     this.comboWindow = Math.max(0, this.comboWindow - dt);
     for(const k in this.potionTimers) if(this.potionTimers[k] > 0) this.potionTimers[k] = Math.max(0, this.potionTimers[k] - dt);
     for(const k in this.boostTimers) if(this.boostTimers[k] > 0) this.boostTimers[k] = Math.max(0, this.boostTimers[k] - dt);
+    this.squash += (1 - this.squash) * Math.min(1, dt*SQUASH_EASE);
 
     // movement
     const input = this.moveInput;
@@ -560,16 +802,38 @@ export class Player {
       this.vel.z += (input.z*spd - this.vel.z) * Math.min(1, accel*dt/spd*8);
       if(this.grounded && input.lengthSq()<0.01){ this.vel.x *= Math.pow(0.0001,dt); this.vel.z *= Math.pow(0.0001,dt); }
     }
-    g.position.x += this.vel.x*dt; g.position.z += this.vel.z*dt;
+    this.moveHoriz(this.vel.x*dt, this.vel.z*dt);
+    // playable ring: clamp x/z only. multiplyScalar() here scaled y too, which quietly sank the
+    // player into the terrain whenever they touched the map edge.
     const bd = Math.hypot(g.position.x, g.position.z);
-    if(bd > 195){ g.position.multiplyScalar(195/bd); }
+    if(bd > 195){ const k = 195/bd; g.position.x *= k; g.position.z *= k; }
 
-    // gravity / jump
-    const gy = groundHeight(g.position.x, g.position.z);
+    // gravity / jump / ground (items 02, 03, 11)
+    const wasGrounded = this.grounded;
+    const gy = surfaceAt(g.position.x, g.position.z, g.position.y).h;  // shared obj: read at once
+    this.coyoteT = Math.max(0, this.coyoteT - dt);
+    this.jumpBuf = Math.max(0, this.jumpBuf - dt);
     this.vy -= 30*dt;
+    const prevY = g.position.y;
     g.position.y += this.vy*dt;
-    if(g.position.y <= gy){ g.position.y = gy; this.vy = 0; this.grounded = true; this.jumps = 0; }
-    else this.grounded = false;
+    if(this.vy > 0 && HEAD_HITS.length) this.headBonk(prevY, game);
+    if(g.position.y <= gy){
+      const impact = this.vy;
+      g.position.y = gy; this.vy = 0;
+      if(!wasGrounded) this.land(impact, game);
+      this.grounded = true; this.jumps = 0; this.coyoteT = 0;
+    } else if(this.vy < 0 && wasGrounded && g.position.y - gy <= SNAP_DOWN){
+      // downslope stick: a hill crest must not fling you. Only reachable from a grounded frame,
+      // so it can never swallow a real jump or shorten a fall.
+      g.position.y = gy; this.vy = 0; this.grounded = true; this.jumps = 0;
+    } else {
+      if(wasGrounded) this.coyoteT = COYOTE;         // just walked off something
+      this.grounded = false;
+      // once the coyote window lapses unused, the ground jump is SPENT — otherwise stepping off a
+      // ledge silently hands out a free extra jump for the rest of the fall.
+      if(this.coyoteT <= 0 && this.jumps === 0) this.jumps = 1;
+    }
+    if(this.jumpBuf > 0) this._consumeJump();        // buffered press fires on the landing frame
 
     // face movement dir
     if(input.lengthSq() > 0.01){
@@ -712,9 +976,12 @@ export class Player {
       this.armR.rotation.x *= 0.8; this.armR.rotation.z *= 0.8;
       this.body.rotation.y *= 0.8;
     }
-    // impact squash (and stretch back out)
-    { const k = (this.impactT/0.16); const s = k*k;
-      this.body.scale.set(1+0.26*s, 1-0.3*s, 1+0.26*s); }
+    // item 04 — vertical squash & stretch composed with the attack-impact squash, not fighting it.
+    // `squash` is one scalar (1.22 jump / 0.72 hard landing / 1.28 head bonk) eased back to 1 and
+    // applied as (1/sqrt(s), s, 1/sqrt(s)) so the silhouette keeps its mass instead of ballooning;
+    // the attack impact keeps its own bolder hand-tuned numbers multiplied on top.
+    { const k = this.impactT/0.16, im = k*k, s = this.squash, lat = (1/Math.sqrt(s))*(1+0.26*im);
+      this.body.scale.set(lat, s*(1-0.3*im), lat); }
 
     // run animation
     const runAmt = Math.min(1, Math.hypot(this.vel.x, this.vel.z)/spd);
@@ -729,7 +996,8 @@ export class Player {
 
     // iframe blink
     this.body.visible = this.iframe <= 0 || Math.sin(this.animT*40) > 0;
-    this.blob.position.y = 0.04 - (g.position.y - groundHeight(g.position.x, g.position.z));
+    // shadow tracks the surface we are standing over, prop tops included
+    this.blob.position.y = 0.04 - (g.position.y - surfaceAt(g.position.x, g.position.z, g.position.y).h);
   }
 }
 
