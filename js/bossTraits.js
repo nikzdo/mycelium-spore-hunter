@@ -11,6 +11,10 @@ export const BOSS_TRAITS = {
       desc:'Calls its brood more often, and more of them at once.' },
     { id:'wrathful', name:'Wrathful Bloom', tint:0xdb3a3a, glow:0xff8a6b,
       desc:'Grows sharply more aggressive as its health drops.' },
+    { id:'pyroclast', name:'Cinderbloom', tint:0xdb5a1a, glow:0xff8a3a,
+      desc:'Periodically hurls a slow, telegraphed fireball that scorches the ground where it lands.' },
+    { id:'fusion', name:'Mycelial Fusion', tint:0x5adf7a, glow:0xaaffb0,
+      desc:'Its summoned brood drift together and permanently fuse into stronger threats.' },
   ],
   glutton: [
     { id:'toxic', name:'Putrid Bloat', tint:0x6a8f2a, glow:0xb8e05a,
@@ -21,6 +25,10 @@ export const BOSS_TRAITS = {
       desc:'Its vomited bile leaves lingering toxic puddles where it lands.' },
     { id:'thickhide', name:'Blubbery Hide', tint:0x6a5a3a, glow:0xd8b878,
       desc:'A thick hide blunts a noticeable share of incoming damage.' },
+    { id:'pyroclast', name:'Magma Gorge', tint:0xc0421a, glow:0xff8a3a,
+      desc:'Occasionally spits a heavy glob of molten bile that explodes into scorched ground.' },
+    { id:'fusion', name:'Gluttonous Swarm', tint:0x8adf3a, glow:0xd8ffa0,
+      desc:'Its brood drift together and permanently fuse into stronger threats.' },
   ],
 };
 export function rollBossTrait(archetype, rng){

@@ -75,11 +75,12 @@ function spawnRing(pos, dmg, color, delay=0){
   scene.add(mesh);
   rings.push({ mesh, r:1, dmg, delay, hitDone:false, speed:9 });
 }
-// lingering ground hazard (Rotmaw's toxic puddles) — ticks damage while the player stands in it
+// lingering ground hazard (Rotmaw's toxic puddles, boss fireball scorch marks) — ticks
+// damage while the player stands in it
 const puddles = [];
-function spawnPuddle(pos, dmg, radius, duration){
+function spawnPuddle(pos, dmg, radius, duration, color=0x8acc2a){
   const mesh = new THREE.Mesh(new THREE.CircleGeometry(radius, 20),
-    new THREE.MeshBasicMaterial({ color:0x8acc2a, transparent:true, opacity:0.4,
+    new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.4,
       blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide }));
   mesh.rotation.x = -Math.PI/2;
   mesh.position.copy(pos); mesh.position.y = groundHeight(pos.x,pos.z)+0.12;
@@ -87,11 +88,38 @@ function spawnPuddle(pos, dmg, radius, duration){
   puddles.push({ mesh, dmg, radius, life:duration, maxLife:duration, tickCd:0 });
 }
 
+// slow, telegraphed lobbed fireball (boss 'pyroclast' trait) — travels in a straight line
+// to its target point (not homing, so it's dodgeable) and explodes into a damage radius
+// plus a lingering burn patch on arrival or expiry
+const fireballs = [];
+function spawnFireball(pos, targetPos, dmg, color=0xff6a2e){
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.55, 10, 8),
+    new THREE.MeshBasicMaterial({ color }));
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(1.0, 10, 8),
+    new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.4,
+      blending:THREE.AdditiveBlending, depthWrite:false }));
+  mesh.add(halo); mesh.position.copy(pos); scene.add(mesh);
+  const dir = targetPos.clone().sub(pos); dir.y = 0;
+  const dist = dir.length(); dir.normalize();
+  const speed = 6.5;
+  fireballs.push({ mesh, dir, speed, dmg, color, life: Math.min(6, dist/speed + 0.3), arriveDist: dist });
+}
+function explodeFireball(fb){
+  const p = fb.mesh.position;
+  particles.burst(p.clone(), 30, { r:1, g:0.5, b:0.15, spread:6, size:11, life:0.8, grav:3 });
+  particles.burst(p.clone(), 14, { r:1, g:1, b:0.7, spread:3, size:6, life:0.5 });
+  const pd = Math.hypot(game.player.group.position.x-p.x, game.player.group.position.z-p.z);
+  if(pd < 3.2) game.player.hurt(fb.dmg, p, game);
+  spawnPuddle(p.clone(), fb.dmg*0.3, 2.6, 3.5, 0xff5a1e);
+  audio.hit(); game.shake(0.35);
+  scene.remove(fb.mesh);
+}
+
 /* ================= game state ================= */
 const game = {
   state:'title', // title | intro | play | pause | tome | over | win
   player:null, enemies:[], powerups:[], boss:null,
-  particles, audio, spawnProjectile, spawnRing, spawnPuddle,
+  particles, audio, spawnProjectile, spawnRing, spawnPuddle, spawnFireball,
   kills:[0,0,0,0,0,0], totalKills:0, rareKills:0,
   startTime:0, hitStopT:0, shakeT:0, shakeAmp:0,
   bossSpawned:false, zone:0,
@@ -170,6 +198,43 @@ function damageNumber(worldPos, dmg, crit, isPlayer=false){
   setTimeout(()=>el.remove(), 850);
 }
 game.damageNumber = damageNumber;
+
+/* ---------- floating enemy health bars (mushrooms + boss) ---------- */
+// only shown once an enemy has taken damage — keeps a screen full of full-health
+// mushrooms from being cluttered with bars nobody needs yet
+function updateEnemyHealthBars(){
+  for(const e of game.enemies){
+    if(e.dead){
+      if(e.__hpBarEl){ e.__hpBarEl.remove(); e.__hpBarEl = null; e.__hpFillEl = null; }
+      continue;
+    }
+    if(e.hp >= e.maxHp){
+      if(e.__hpBarEl) e.__hpBarEl.style.display = 'none';
+      continue;
+    }
+    if(!e.__hpBarEl){
+      const wrap = document.createElement('div');
+      wrap.className = 'enemyhp' + (e.isBoss ? ' boss' : '');
+      const fill = document.createElement('div');
+      fill.className = 'fill';
+      wrap.appendChild(fill);
+      document.body.appendChild(wrap);
+      e.__hpBarEl = wrap; e.__hpFillEl = fill;
+    }
+    const pos = e.group.position.clone();
+    pos.y += (e.isBoss ? 2.6 : 2.3) * e.R.scale;
+    const v = pos.project(camera);
+    if(v.z > 1 || v.z < -1){ e.__hpBarEl.style.display = 'none'; continue; }
+    e.__hpBarEl.style.display = 'block';
+    e.__hpBarEl.style.left = ((v.x*0.5+0.5)*innerWidth)+'px';
+    e.__hpBarEl.style.top = ((-v.y*0.5+0.5)*innerHeight)+'px';
+    e.__hpFillEl.style.width = Math.max(0, e.hp/e.maxHp*100)+'%';
+  }
+}
+function clearEnemyHealthBars(){
+  document.querySelectorAll('.enemyhp').forEach(el=>el.remove());
+  for(const e of game.enemies){ e.__hpBarEl = null; e.__hpFillEl = null; }
+}
 
 /* ---------- harvestable mushrooms + contracts ---------- */
 function pickupText(worldPos, text, color){
@@ -252,6 +317,40 @@ function spawnEnemy(rarityIdx, pos, forcedMult=null){
   return m;
 }
 game.spawnEnemy = spawnEnemy;
+
+// boss 'fusion' trait: minions it summons are tagged isMinion, and two that drift close
+// together permanently fuse into one stronger mushroom instead of just crowding each other.
+// mergeReady is a short post-spawn/post-merge grace window so a fresh batch doesn't insta-fuse
+// on top of itself, and so it isn't a completely un-reactable instant threat spike.
+const MERGE_RARITY_CAP = 3; // fused minions can climb up to Epic, never higher
+function mergeAway(m){ m.dead = true; scene.remove(m.group); } // quiet removal: no kill credit/loot/XP
+function mergeMinions(a, b){
+  const mid = a.group.position.clone().lerp(b.group.position, 0.5);
+  const newRarity = Math.min(MERGE_RARITY_CAP, Math.max(a.rarity, b.rarity) + 1);
+  mergeAway(a); mergeAway(b);
+  const merged = spawnEnemy(newRarity, mid);
+  merged.isMinion = true; merged.mergeReady = 1.5;
+  const c = new THREE.Color(merged.R.glow);
+  particles.burst(mid.clone().setY(mid.y+1), 26, {r:c.r, g:c.g, b:c.b, spread:5, size:10, life:0.8, grav:2});
+  audio.roar(0.4); game.shake(0.25);
+}
+function updateMinionMerges(dt){
+  const es = game.enemies;
+  for(const e of es) if(e.isMinion && e.mergeReady > 0) e.mergeReady -= dt;
+  for(let i=0;i<es.length;i++){
+    const a = es[i];
+    if(a.dead || !a.isMinion || a.mergeReady > 0) continue;
+    for(let j=i+1;j<es.length;j++){
+      const b = es[j];
+      if(b.dead || !b.isMinion || b.mergeReady > 0) continue;
+      const min = (a.R.scale + b.R.scale) * 0.9;
+      if(a.group.position.distanceToSquared(b.group.position) < min*min){
+        mergeMinions(a, b);
+        return; // enemy list changed underneath this loop — resume next frame
+      }
+    }
+  }
+}
 function weightedRarity(dist){
   // deeper zones = better rarity; per-seed jitter shuffles the table slightly.
   // world depth also nudges tougher rarities in sooner, on top of raw distance
@@ -945,12 +1044,15 @@ function resumeGame(){
   if(!DEMO) renderer.domElement.requestPointerLock();
 }
 function resetRun(){
+  clearEnemyHealthBars();
   for(const e of game.enemies) if(!e.dead) scene.remove(e.group);
   for(const pw of game.powerups) if(!pw.dead) scene.remove(pw.group);
   for(const r of rings) scene.remove(r.mesh);
   rings.length = 0;
   for(const pu of puddles) scene.remove(pu.mesh);
   puddles.length = 0;
+  for(const fb of fireballs) scene.remove(fb.mesh);
+  fireballs.length = 0;
   for(const pr of projPool){ pr.active = false; pr.mesh.visible = false; } // no stale projectiles after restart
   game.enemies = []; game.powerups = []; game.boss = null;
   game.kills = [0,0,0,0,0,0]; game.totalKills = 0; game.rareKills = 0; game.bossSpawned = false;
@@ -1164,6 +1266,7 @@ function tick(){
 
     p.update(sdt, game);
     for(const e of game.enemies) e.update(sdt, game);
+    updateEnemyHealthBars(); // must run before the dead-filter below so it can clean up dead ones' bars
     game.enemies = game.enemies.filter(e=>!e.dead);
     // enemy separation — stops mushrooms stacking inside each other (jitter)
     const es = game.enemies;
@@ -1188,6 +1291,7 @@ function tick(){
         ap.x += pdx*push; ap.z += pdz*push;
       }
     }
+    updateMinionMerges(sdt);
     for(const pw of game.powerups) pw.update(sdt, game);
     game.powerups = game.powerups.filter(pw=>!pw.dead);
 
@@ -1218,6 +1322,18 @@ function tick(){
         r.hitDone = true; p.hurt(r.dmg, r.mesh.position, game);
       }
       if(r.r > 14){ scene.remove(r.mesh); rings.splice(i,1); }
+    }
+    // boss fireballs (pyroclast trait) — straight-line lob that explodes on arrival/expiry
+    for(let i=fireballs.length-1;i>=0;i--){
+      const fb = fireballs[i];
+      fb.mesh.position.addScaledVector(fb.dir, fb.speed*sdt);
+      fb.mesh.position.y = groundHeight(fb.mesh.position.x, fb.mesh.position.z) + 1.2;
+      fb.arriveDist -= fb.speed*sdt;
+      fb.life -= sdt;
+      if(fb.arriveDist <= 0 || fb.life <= 0){
+        explodeFireball(fb);
+        fireballs.splice(i,1);
+      }
     }
     // toxic puddles (Rotmaw) — tick damage while the player stands inside
     for(let i=puddles.length-1;i>=0;i--){
