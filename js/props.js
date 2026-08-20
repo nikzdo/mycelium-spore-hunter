@@ -108,7 +108,9 @@ const PAL = {
   // into one black mass and the whole vent reads as a hole in the world rather than a prop with
   // a hole in it. Only the throat is allowed to be near-black — that IS the hole.
   vent:     { body:0x9ac0d4, lip:0xd8f2ff, throat:0x0d1620 },
-  treasure: { core:0x5cc8e6, deep:0x1c5f80, glow:0x8fe8ff },
+  // core is deliberately SATURATED, not icy: it is the only prop whose whole job is "this is
+  // worth the climb", and a pale cyan reads as ice, which is scenery. Ice is free; gems are not.
+  treasure: { core:0x2fb0e0, deep:0x1c5f80, glow:0x8fe8ff },
 };
 
 /* ================================================================================
@@ -181,22 +183,37 @@ function podGeo(r, h){
   return anchorToBase(g).geo;
 }
 
-// a faceted crystal cluster: one tall spike plus two shards, merged so the whole cluster is
+// a faceted crystal cluster: one tall point plus two shards, merged so the whole cluster is
 // ONE mesh. Emissive only — item 18's crystals spawn and despawn, and the README rule is that
 // nothing which does that gets a real PointLight.
+//
+// INVARIANT: each shard is a SIX-sided tapered prism capped with a six-sided point, and the cap
+// shares the body's segment count so their facets stay in phase. The facet count is the whole
+// read: an octahedron only ever shows two plates to the camera, so the rim highlight covers the
+// entire silhouette at once and a "gem" flattens into cut paper. Six vertical facets means the
+// band shading and the rim land on different plates, which is what makes it look cut.
+function crystalShard(r, bodyH, tipH){
+  // caps stay closed: the crystal floats at treasureLift, so its underside is on camera
+  const body = new THREE.CylinderGeometry(r*0.80, r*0.94, bodyH, 6, 1);
+  body.translate(0, bodyH*0.5, 0);
+  const tip = new THREE.ConeGeometry(r*0.80, tipH, 6, 1);
+  tip.translate(0, bodyH + tipH*0.5, 0);
+  return [nonIndexed(body), nonIndexed(tip)];
+}
 function crystalGeo(rng){
-  const parts = [];
-  const spike = new THREE.OctahedronGeometry(0.62, 0);
-  spike.scale(0.72, 1.85, 0.72);
-  spike.translate(0, 0.95, 0);
-  parts.push(nonIndexed(spike));
+  const parts = crystalShard(0.44, 1.22, 0.98);          // the point: ~2.2 m, the silhouette
   for(let i=0;i<2;i++){
-    const s = new THREE.OctahedronGeometry(0.34 + rng()*0.14, 0);
-    s.scale(0.8, 1.5, 0.8);
-    const a = rng()*TAU, d = 0.42 + rng()*0.2;
-    s.rotateZ((rng()-0.5)*0.7); s.rotateX((rng()-0.5)*0.5);
-    s.translate(Math.cos(a)*d, 0.34 + rng()*0.3, Math.sin(a)*d);
-    parts.push(nonIndexed(s));
+    // one transform per SHARD, applied to both of its halves — roll the numbers before the loop
+    // or the body and the tip lean and land differently and the shard comes apart.
+    // stubby on purpose: a satellite as slender as the point reads as a flap of paper stuck to
+    // the side, not as a second crystal. Fat and short is what makes it a cluster.
+    const sub = crystalShard(0.19 + rng()*0.09, 0.26 + rng()*0.18, 0.30 + rng()*0.14);
+    const a = rng()*TAU, d = 0.34 + rng()*0.16, lean = 0.18 + rng()*0.22, lift = 0.05 + rng()*0.10;
+    for(const s of sub){
+      s.rotateZ(Math.cos(a)*lean); s.rotateX(-Math.sin(a)*lean);   // lean AWAY from the point
+      s.translate(Math.cos(a)*d, lift, Math.sin(a)*d);
+      parts.push(s);
+    }
   }
   const geo = mergeGeos(parts);
   geo.computeVertexNormals();
@@ -703,17 +720,32 @@ export function buildProps(scene, rng, world = {}, opts = {}){
   let treasureSource = 'none';
   {
     const geo = keepGeo(crystalGeo(look));
-    // emissiveIntensity is deliberately under 1: ACES + exposure 1.28 clips anything brighter to
-    // flat white, which turns a faceted crystal into a paper cutout. The facets are the read.
+    geo.computeBoundingBox();
+    const crystalH = geo.boundingBox.max.y;   // base-anchored, so max.y IS the height
+    const INK = 0.045;                        // ink weight; see the re-centring note at the hull
+    /* emissiveIntensity is the whole difference between a gem and a paper cutout, in both
+       directions. ACES + exposure 1.28 clips anything at or over 1.0 to flat white — that is why
+       BOTH states stay under it. But emissive is added FLAT, so it also erases the difference
+       between facets: at 0.72 every plate landed within a few percent of every other one and the
+       crystal read as a pale blob even though it never clipped. 0.30 leaves the toon bands and the
+       rim doing the shape-reading, and hover more than doubles it to 0.68 — obviously hotter, still
+       well short of the clip. The rim came down with it for the same reason: a six-facet point
+       presents most of its surface at a grazing angle, so a rim tuned for a two-plate octahedron
+       whites out the entire silhouette. The cool/warm tints are pinned near the treasure palette
+       so the shadow side stays a saturated blue instead of drifting grey; a jewel is its shadows. */
     const mat = keepMat(toonMat({ color: PAL.treasure.core, emissive: PAL.treasure.glow,
-      emissiveIntensity: 0.72, rim: 0.95, rimColor: 0xdffbff }));
+      emissiveIntensity: 0.30, rim: 0.42, rimColor: 0xdffbff,
+      coolTint: 0x3d7fb2, warmTint: 0xcdeeff }));
     const hot = keepMat(toonMat({ color: PAL.treasure.core, emissive: PAL.treasure.glow,
-      emissiveIntensity: 1.15, rim: 1.3, rimColor: 0xffffff }));
+      emissiveIntensity: 0.68, rim: 0.72, rimColor: 0xffffff,
+      coolTint: 0x5a9bc8, warmTint: 0xeafaff }));
     // emissive + an additive shell, NEVER a PointLight: these despawn on pickup, and adding or
     // removing a real light forces a shader recompile on every other material in the scene.
-    const haloGeo = keepGeo(new THREE.SphereGeometry(1.15, 10, 8));
+    // The shell hugs the crystal (1.0, not 1.15): any wider and it stops reading as the crystal's
+    // own glow and starts reading as a pale disc laid over the ground behind it.
+    const haloGeo = keepGeo(new THREE.SphereGeometry(1.0, 10, 8));
     const haloMat = keepMat(new THREE.MeshBasicMaterial({ color: PAL.treasure.glow,
-      transparent:true, opacity:0.12, blending:THREE.AdditiveBlending, depthWrite:false,
+      transparent:true, opacity:0.10, blending:THREE.AdditiveBlending, depthWrite:false,
       side: THREE.BackSide }));
 
     // Fall back gracefully. The terrain wave is adding authored sites this wave and exposing them
@@ -769,9 +801,16 @@ export function buildProps(scene, rng, world = {}, opts = {}){
         const mesh = shared(new THREE.Mesh(geo, mat));
         mesh.position.set(x, gy + P.treasureLift, z);
         mesh.rotation.y = rng()*TAU;
-        addOutline(mesh, 0.04);
+        // addOutline inflates the hull by SCALING it about the mesh origin, and anchorToBase() put
+        // that origin at the crystal's FOOT. On a 2.2 m point that sends the whole hull upward —
+        // 0.10 m past the tip — so the ink stops being a line round the silhouette and becomes a
+        // second, offset copy of it painted over the facets. Dropping the hull by half its own
+        // growth re-centres the inflation on the crystal's middle, which is what the uniform-scale
+        // trick assumes in the first place. Any tall, base-anchored prop needs this.
+        const ink = addOutline(mesh, INK);
+        ink.position.y = -crystalH*INK*0.5;
         const halo = shared(new THREE.Mesh(haloGeo, haloMat));
-        halo.position.y = 0.75;
+        halo.position.y = 0.78;
         halo.raycast = ()=>{};
         mesh.add(halo);
         root.add(mesh);

@@ -170,14 +170,30 @@ export const SPINE_MYCO_COST = 12;
 // 2.2 / 4.0 / 10.0 — and maxTries is ~2x that, so the tail is bounded rather than open-ended.
 // The ceiling only ever helps: with it, measured spines-per-open is 2.1 / 3.7 / 8.8, so the
 // published number is the worst case for the player, never the best.
+//
+// ONE SYMBOL FOR "SEALED CYST", TIER READ OFF IT — never three unrelated pictures. 🥚/🪨/👁 taught
+// nothing: an egg, a rock and an eye share no shape, and the eye read as something to look at
+// rather than a container to open. Same rule the gear collection already follows: one silhouette,
+// rarity carried by a pip count and a colour, so a player learns the glyph once and reads the tier
+// off it. `icon` stays the composed glyph+pips string because every existing caller (the hover
+// chip, cystPrompt(), the payout announce lines) prints it as plain text and cannot take colour.
+export const CYST_GLYPH = '🥚';
+const CYST_PIP = '◆';
 export const CYST_TIERS = [
-  { id:'crusted',   name:'Crusted Cyst',   icon:'🥚', chance:0.45, maxTries:5,
-    coins:[18,34],   myco:[0,0],   gearChance:0 },
-  { id:'ironbound', name:'Ironbound Cyst', icon:'🪨', chance:0.25, maxTries:9,
-    coins:[45,80],   myco:[0,0],   gearChance:0.5 },
-  { id:'elder',     name:'Elder Cyst',     icon:'👁', chance:0.10, maxTries:20,
-    coins:[110,190], myco:[6,12],  gearChance:1 },
+  { id:'crusted',   name:'Crusted Cyst',   tier:1, chance:0.45, maxTries:5,
+    coins:[18,34],   myco:[0,0],   gearChance:0,   color:'#d8b483' },
+  { id:'ironbound', name:'Ironbound Cyst', tier:2, chance:0.25, maxTries:9,
+    coins:[45,80],   myco:[0,0],   gearChance:0.5, color:'#8fc3ff' },
+  { id:'elder',     name:'Elder Cyst',     tier:3, chance:0.10, maxTries:20,
+    coins:[110,190], myco:[6,12],  gearChance:1,   color:'#c79bff' },
 ];
+// glyph, pips and icon are DERIVED from tier in one loop, so a fourth tier can never be added with
+// a mismatched picture — the thing that produced the eye in the first place.
+for(const c of CYST_TIERS){
+  c.glyph = CYST_GLYPH;
+  c.pips = CYST_PIP.repeat(c.tier);
+  c.icon = c.glyph + c.pips;
+}
 export const CYST_BY_ID = {};
 for(const c of CYST_TIERS) CYST_BY_ID[c.id] = c;
 // unknown ids fall back to the cheapest tier rather than throwing — a mis-tagged prop in the
@@ -297,19 +313,25 @@ export class Progress {
     const t = cystOf(tierId);
     const tries = state && Number.isFinite(state.tries) ? state.tries : 0;
     return { id:t.id, name:t.name, icon:t.icon,
+      // glyph/pips/tier/color are the same iconography split apart, for any caller that CAN
+      // colour it (the HUD legend) instead of printing one plain-text string
+      glyph:t.glyph, pips:t.pips, tier:t.tier, color:t.color,
       chance:t.chance, pct:Math.round(t.chance*100),
       expectedSpines:+(1/t.chance).toFixed(1),
       maxTries:t.maxTries, tries, triesLeft:Math.max(0, t.maxTries - tries),
       coins:t.coins, myco:t.myco, gearChance:t.gearChance,
       spines:this.spines, canPry:this.spines >= 1 };
   }
-  // the prompt line, ready to render: "Pry the crusted cyst — 45% per spine (3 spines)".
+  // the prompt line, ready to render: "🥚◆ Pry the crusted cyst — 45% per spine (🦴 3 held)".
   // Publishing the number is the whole point of item 14; the caller only has to draw it.
+  // The 🦴 matches the pry-spine plaque in the HUD so the prompt and the wallet name the same
+  // resource, and the locked line publishes the odds too — being unable to afford the gamble is
+  // no reason to hide what the gamble pays.
   cystPrompt(tierId, state){
     const i = this.cystInfo(tierId, state);
-    if(!i.canPry) return `${i.icon} ${i.name} — locked, no pry-spine`;
+    if(!i.canPry) return `${i.icon} ${i.name} — sealed · ${i.pct}% per spine, you hold no 🦴 pry-spine`;
     const pity = i.triesLeft === 1 ? ' · next one opens it' : '';
-    return `${i.icon} Pry the ${i.name.toLowerCase()} — ${i.pct}% per spine (${i.spines} held)${pity}`;
+    return `${i.icon} Pry the ${i.name.toLowerCase()} — ${i.pct}% per spine (🦴 ${i.spines} held)${pity}`;
   }
   // One spine, one attempt, at exactly the advertised odds. A cyst that has swallowed
   // `maxTries` spines opens on the next attempt regardless of the roll: a gamble that
@@ -397,6 +419,9 @@ export class Progress {
     return true;
   }
   totalLifetime(){ return this.lifetime.reduce((a,b)=>a+b, 0); }
+  // one number for "essence you can spend", for the HUD wallet. The per-rarity breakdown is a
+  // Tome-sized fact; what the HUD has to answer is only "do I hold any at all".
+  totalBank(){ return this.bank.reduce((a,b)=>a+b, 0); }
 
   // ---------------- gear collection: weapons + armor share this exact API ----------------
   // ('weapon' | 'armor', item id — id spaces never collide since they come from separate catalogs)

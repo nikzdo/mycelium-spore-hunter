@@ -11,6 +11,8 @@
 :root{
   --ink:#1c1410; --cream:#fff6e3; --amber:#ffb347; --leaf:#7ec850;
   --hp:#ff5a5a; --stam:#ffd94a; --rare:#4da6ff; --epic:#b46bff; --leg:#ffc23d;
+  /* one hue per currency, reused everywhere that currency appears, so the colour IS the label */
+  --coin:#ffe98a; --myco:#a8f0a0; --spine:#f2ddb0; --ess:#dcc6ff; --dry:#ffc4b4;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
 html,body{width:100%;height:100%;overflow:hidden;background:#0d0a14;font-family:'Fredoka',sans-serif;color:var(--cream)}
@@ -62,26 +64,67 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #hpfill{background:linear-gradient(180deg,#ff8a7a,#e33e3e)}
 #bosswrap{position:absolute;top:20px;left:50%;transform:translateX(-50%);width:min(560px,60vw);display:none}
 #bossfill{background:linear-gradient(180deg,#d9a6ff,#8b3fe0)}
-#pips{position:absolute;top:112px;left:24px;display:flex;gap:7px}
+#pips{position:absolute;top:120px;left:24px;display:flex;gap:7px}
 .pip{width:20px;height:20px;border:3px solid var(--ink);border-radius:50%;background:#3a2f4d;box-shadow:0 2px 0 var(--ink)}
 .pip.full{background:linear-gradient(180deg,#ffe98a,#ffb52e)}
-#gearhud{position:absolute;top:142px;left:24px;display:flex;gap:6px}
+#gearhud{position:absolute;top:148px;left:24px;display:flex;gap:6px}
 .gearslot{width:26px;height:26px;border:2px solid var(--ink);border-radius:8px;background:#241c33;
   display:flex;align-items:center;justify-content:center;font-size:14px;opacity:.35;box-shadow:0 2px 0 var(--ink);position:relative}
 .gearslot.on{opacity:1;box-shadow:0 0 0 2px var(--rc,#ffb347),0 2px 0 var(--ink)}
 .gearslot .gt{position:absolute;bottom:-6px;right:-6px;background:#ffe98a;color:var(--ink);font-size:8px;font-weight:700;
   border:1px solid var(--ink);border-radius:999px;padding:0 3px}
-#buffs{position:absolute;top:174px;left:24px;display:flex;gap:8px;flex-wrap:wrap;max-width:300px}
+#buffs{position:absolute;top:182px;left:24px;display:flex;gap:8px;flex-wrap:wrap;max-width:300px}
 .buff{width:38px;height:38px;border:3px solid var(--ink);border-radius:12px;background:linear-gradient(180deg,#3d3152,#241c33);
   display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 3px 0 var(--ink);position:relative}
 .buff .n{position:absolute;bottom:-7px;right:-7px;background:var(--amber);color:var(--ink);font-size:11px;font-weight:700;
   border:2px solid var(--ink);border-radius:999px;padding:0 5px}
-#kills{position:absolute;top:22px;right:24px;text-align:right;font-size:14px;font-weight:600;text-shadow:0 2px 0 var(--ink)}
-#kills .row{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-bottom:3px}
-.dot{width:12px;height:12px;border-radius:50%;border:2px solid var(--ink)}
-#coinhud{position:absolute;top:168px;right:24px;font-size:15px;font-weight:700;color:#ffe98a;text-shadow:0 2px 0 var(--ink)}
-#mycohud{position:absolute;top:192px;right:24px;font-size:15px;font-weight:700;color:#a8f0a0;text-shadow:0 2px 0 var(--ink)}
-#contracts{position:absolute;top:220px;right:24px;width:216px;display:flex;flex-direction:column;gap:6px}
+/* ---------- top-right column: wallet, then culled tally, then contracts ----------
+   ONE absolutely-positioned column owns the whole right side, and everything inside it is in
+   normal flow. Before this, #kills/#coinhud/#mycohud/#contracts each carried their own hardcoded
+   `top:`, and #contracts (220px) already sat on top of the injected spine wallet (216px) — four
+   independent magic numbers cannot stay non-overlapping through a font change or a new row, so
+   the stacking is a flex column instead. */
+#rightcol{position:absolute;top:18px;right:20px;width:250px;display:flex;flex-direction:column;gap:9px;align-items:stretch}
+/* COINS ARE THE SCORE, WHICH IS WHY THEY GET THE ONLY LARGE NUMBER ON SCREEN. Every source pays
+   them — mushroom kills, spore pods, sealed cysts, critter stomps — so coins are the one figure
+   that always moves. Mycelium (contracts only) and essence (kills only) each see one slice of a
+   hunt, so neither can carry a headline; they read as the secondary row they are. */
+#currency{background:linear-gradient(180deg,rgba(50,38,66,.74),rgba(24,17,34,.8));
+  border:3px solid var(--ink);border-radius:18px;padding:9px 12px 10px;
+  box-shadow:0 4px 0 var(--ink),0 14px 30px rgba(0,0,0,.45);backdrop-filter:blur(3px)}
+#coinhud{font-size:38px;line-height:1.04;font-weight:700;color:var(--coin);text-align:right;
+  white-space:nowrap;text-shadow:0 3px 0 var(--ink),0 0 22px rgba(255,190,70,.35)}
+.curcap{text-align:right;font-size:10px;font-weight:700;letter-spacing:.2em;color:#f0dfbe;opacity:.92;
+  text-shadow:0 2px 0 var(--ink);margin:0 1px 8px 0}
+/* Pry-spines gate EVERY sealed cyst, so running dry is the one wallet fact that changes what you
+   should do next. It gets a full-width plaque above the other two rather than a third small pill. */
+#spinecell{display:flex;align-items:center;gap:8px;border:3px solid var(--ink);border-radius:12px;
+  padding:4px 9px;background:linear-gradient(180deg,#5a452e,#312418);box-shadow:0 3px 0 var(--ink)}
+#spinecell .cname2{font-size:10px;font-weight:700;letter-spacing:.13em;color:#f0e0c0;text-shadow:0 2px 0 var(--ink)}
+#spineval{margin-left:auto;font-size:22px;font-weight:700;color:var(--spine);text-shadow:0 2px 0 var(--ink)}
+#curow{display:flex;gap:7px;margin-top:7px}
+#curow .cur{flex:1;display:flex;align-items:center;justify-content:flex-end;
+  border:2px solid rgba(255,246,227,.22);border-radius:10px;padding:3px 8px;background:rgba(20,12,26,.5);
+  font-size:15px;font-weight:700;text-shadow:0 2px 0 var(--ink)}
+#mycohud{color:var(--myco)}
+#esshud{color:var(--ess)}
+/* The cheapest possible "what now": how much of this world is still worth walking to. */
+#worldline{margin-top:9px;padding-top:7px;border-top:2px dashed rgba(255,246,227,.2);
+  font-size:11px;font-weight:600;line-height:1.45;color:#ece0c8;text-align:right;text-wrap:balance;
+  text-shadow:0 2px 0 var(--ink)}
+#killwrap{background:rgba(20,12,26,.5);border:2px solid rgba(255,246,227,.18);border-radius:12px;padding:6px 9px 7px}
+.collabel{font-size:9.5px;font-weight:700;letter-spacing:.22em;color:#e4d3b0;opacity:.75;text-align:right;
+  margin-bottom:5px;text-shadow:0 2px 0 var(--ink)}
+/* six rarities on one wrapped line, not six stacked lines — this is a tally, not a leaderboard */
+#kills{display:flex;flex-wrap:wrap;gap:5px 10px;justify-content:flex-end;font-size:13px;font-weight:600;
+  text-shadow:0 2px 0 var(--ink)}
+#kills .row{display:flex;gap:5px;align-items:center}
+.dot{width:11px;height:11px;border-radius:50%;border:2px solid var(--ink)}
+#contracts{display:flex;flex-direction:column;gap:6px}
+/* The pry-spine wallet lives in #currency now (see #spinecell). main.js injects its own
+   absolutely-positioned #spinehud at top:216px — retire any such duplicate rather than let two
+   spine counters sit on top of the panel. Safe to delete once main.js stops creating it. */
+#hud > #spinehud{display:none!important}
 .contract{display:flex;gap:8px;align-items:center;background:rgba(20,12,26,.55);border:2px solid rgba(255,246,227,.2);
   border-radius:12px;padding:6px 8px}
 .cicon{width:26px;height:26px;border-radius:50% 50% 50% 4px;border:2px solid var(--ink);flex:0 0 auto;
@@ -91,13 +134,15 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .cbar{height:7px;border:1px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.4);overflow:hidden;margin:3px 0 2px}
 .cfill{height:100%;background:linear-gradient(180deg,#c8f088,#7ec850);border-radius:999px;transition:width .18s ease-out}
 .cprog{font-size:10px;color:#e8e0d0}
-#harvestPrompt{position:absolute;top:56%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:19px;
+/* The cyst line publishes its odds, so this pill carries a sentence too — capped and wrapping for
+   the same reason #announce is, or a 45%-per-spine prompt runs off the edge on a narrow window. */
+#harvestPrompt{position:absolute;top:56%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:17px;
   color:#eaffd8;text-shadow:0 2px 0 var(--ink);background:rgba(40,70,20,.55);padding:6px 20px;border-radius:999px;
-  border:2px solid rgba(180,255,140,.45);white-space:nowrap}
-.dmg.harvest{font-size:16px;font-weight:700}
+  border:2px solid rgba(180,255,140,.45);max-width:min(86vw,600px);text-align:center;line-height:1.3;text-wrap:balance}
+.dmg.harvest{font-size:11px;font-weight:700}
 #objective{position:absolute;bottom:98px;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:20px;
   color:#ffe9b8;text-shadow:0 2px 0 var(--ink);background:rgba(28,20,16,.45);padding:6px 22px;border-radius:999px;border:2px solid rgba(255,246,227,.25)}
-#zone{position:absolute;bottom:136px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink)}
+#zone{position:absolute;bottom:148px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink)}
 /* ---------- backpack (weapon + potion quickbar, bottom-center) ---------- */
 #backpack{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;
   background:rgba(20,12,26,.4);border:2px solid rgba(255,246,227,.18);border-radius:20px;padding:10px 14px}
@@ -155,21 +200,35 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .ttab{font-family:'Fredoka';font-weight:700;font-size:12px;letter-spacing:.06em;padding:7px 14px;border-radius:999px;
   border:2px solid #6b4a2a;cursor:pointer;background:rgba(255,250,235,.4);color:#6b3a1a}
 .ttab.on{background:linear-gradient(180deg,#ffcf6b,#f59b3c);box-shadow:0 2px 0 #6b4a2a}
-/* damage numbers */
-.dmg{position:fixed;z-index:30;font-weight:700;pointer-events:none;text-shadow:0 2px 0 var(--ink),0 0 12px rgba(0,0,0,.4);
-  animation:dmgpop .8s ease-out forwards;font-size:22px;color:#fff}
-.dmg.crit{font-size:30px;color:var(--leg)}
+/* damage numbers — several land in the same half-second during a fight, so the whole family is
+   sized to be readable while overlapping rather than sized as if each one arrived alone. The
+   relative hierarchy is what carries the meaning (crit reads bigger, harvest reads smaller), so
+   the family scales together: 22/30/16 -> 14/19/11. `nowrap` keeps a two-digit hit on one line
+   near a screen edge, where the -50% translate is what pushes it out, not the wrapping. */
+.dmg{position:fixed;z-index:30;font-weight:700;pointer-events:none;white-space:nowrap;
+  text-shadow:0 2px 0 var(--ink),0 0 12px rgba(0,0,0,.4);
+  animation:dmgpop .8s ease-out forwards;font-size:14px;color:#fff}
+.dmg.crit{font-size:19px;color:var(--leg)}
 .dmg.player{color:#ff6b6b}
 @keyframes dmgpop{0%{transform:translate(-50%,0) scale(.4);opacity:0}15%{opacity:1;transform:translate(-50%,-14px) scale(1.25)}
   100%{transform:translate(-50%,-70px) scale(.9);opacity:0}}
-#announce{position:fixed;top:32%;left:50%;transform:translateX(-50%);z-index:40;font-size:clamp(30px,5vw,58px);font-weight:700;
-  color:var(--cream);text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,180,80,.6);opacity:0;pointer-events:none;letter-spacing:.04em;white-space:nowrap}
+/* The announce line stopped being two words ("LEVEL UP!") the moment it started naming the
+   counterplay ("Nearly out — F drinks Vitality, Shift dashes you clear"). A sentence set at 58px
+   with `nowrap` and no max-width can only run off both edges, so this is a sentence-sized banner
+   now: ~43% smaller, capped, centred, and allowed to take a second line. `balance` is what makes
+   that second line look chosen instead of leftover. */
+#announce{position:fixed;top:32%;left:50%;transform:translateX(-50%);z-index:40;
+  font-size:clamp(17px,2.7vw,32px);font-weight:700;max-width:min(84vw,640px);text-align:center;
+  line-height:1.18;text-wrap:balance;
+  color:var(--cream);text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,180,80,.6);opacity:0;pointer-events:none;letter-spacing:.03em}
 #announce.show{animation:ann 2.6s ease-out forwards}
 @keyframes ann{0%{opacity:0;transform:translateX(-50%) scale(.6)}12%{opacity:1;transform:translateX(-50%) scale(1.08)}
   20%{transform:translateX(-50%) scale(1)}80%{opacity:1}100%{opacity:0}}
 #fps{position:fixed;bottom:8px;right:10px;z-index:60;font-size:11px;opacity:.6}
 /* ---------- XP bar + level badge ---------- */
-#xpwrap{position:absolute;top:52px;left:24px;width:min(320px,34vw);display:flex;align-items:center;gap:10px}
+/* The left column is a hardcoded stack too, and the HP bar's bottom edge (22 + 40) was landing
+   3px inside the XP label. Every top below is spaced off the box above it, measured, not guessed. */
+#xpwrap{position:absolute;top:68px;left:24px;width:min(320px,34vw);display:flex;align-items:center;gap:10px}
 #lvlbadge{flex:0 0 auto;width:44px;height:44px;border:3px solid var(--ink);border-radius:50%;
   background:radial-gradient(circle at 35% 30%,#ffe98a,#e8962e);color:var(--ink);font-weight:700;font-size:19px;
   display:flex;align-items:center;justify-content:center;box-shadow:0 3px 0 var(--ink),0 0 18px rgba(255,200,80,.5)}
@@ -178,8 +237,10 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #xpfill{background:linear-gradient(180deg,#fff3a0,#ffb52e)}
 #xplabel{font-size:11px;font-weight:700;letter-spacing:.1em;text-shadow:0 2px 0 var(--ink);margin-bottom:3px;color:#ffe9b8}
 /* ---------- level-up banner ---------- */
-#levelup{position:fixed;top:22%;left:50%;transform:translateX(-50%);z-index:41;pointer-events:none;opacity:0;
-  font-family:'Gochi Hand',cursive;font-size:clamp(40px,6vw,74px);color:#ffe98a;letter-spacing:.08em;white-space:nowrap;
+/* Same fix as #announce, and it sits 10% higher, so the two can both be up without touching. */
+#levelup{position:fixed;top:20%;left:50%;transform:translateX(-50%);z-index:41;pointer-events:none;opacity:0;
+  font-family:'Gochi Hand',cursive;font-size:clamp(26px,3.6vw,44px);color:#ffe98a;letter-spacing:.06em;
+  max-width:min(88vw,620px);text-align:center;line-height:1.12;text-wrap:balance;
   text-shadow:0 0 24px rgba(255,200,60,.9),0 4px 0 var(--ink),0 8px 30px rgba(0,0,0,.5)}
 #levelup.show{animation:lvl 2.2s ease-out forwards}
 @keyframes lvl{0%{opacity:0;transform:translateX(-50%) translateY(30px) scale(.5)}
@@ -246,13 +307,23 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 /* ---------- item 44: tabular numerals ---------- */
 /* Every readout whose digits CHANGE while you read it. Proportional digits reflow the whole
    line as a count ticks, which reads as jitter and hides the change itself. */
-#kills,#coinhud,#mycohud,#lvlbadge,#xplabel,#fps,#bossname,.cprog,.tstat,.glvl,
+#kills,#coinhud,#mycohud,#spineval,#esshud,#worldline,#lvlbadge,#xplabel,#fps,#bossname,.cprog,.tstat,.glvl,
 .buff .n,.gearslot .gt,.hotslot .htier,.potslot .pcnt,.potslot .ptimer,
 .essrow .cnt,.istats,.mut .cost,.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
 /* ---------- item 45: zero-state, and HUD stats that ARE the control ---------- */
 /* A count of 0 is information. Greyed out, absence is legible at a glance instead of read. */
 .zero{opacity:.42;filter:saturate(.22)}
-#coinhud.zero,#mycohud.zero{color:#cfc6b4}
+#coinhud.zero,#mycohud.zero,#esshud.zero{color:#cfc6b4}
+/* Pry-spines are the exception to "fade the zero". Fading is right for a count you merely have
+   none of; it is wrong for the one resource whose absence BLOCKS an interaction, because the
+   player has to notice it without looking for it. So an empty spine plaque doesn't recede — it
+   goes hollow and dashed and swaps its own label for what to do about it, which is legible as
+   "empty" before the digit is read at all. */
+#spinecell .cname2.none,#spinecell.zero .cname2.has{display:none}
+#spinecell.zero .cname2.none{display:block;color:var(--dry)}
+#spinecell.zero{opacity:1;filter:none;background:rgba(20,12,26,.45);
+  border-style:dashed;border-color:#7a5f4a;box-shadow:none}
+#spinecell.zero #spineval{color:#a89880}
 .potslot.zero{opacity:.4;filter:grayscale(.7)}
 .potslot.zero .pcnt,.buff.zero .n,.gearslot.zero .gt{background:#8e86a0;color:#241c33}
 /* The ammo counter is the loadout switch, so it has to LOOK pressable. #hud is pointer-events:none,
@@ -293,6 +364,42 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   animation:bootsweep 1.5s ease-in-out infinite}
 @keyframes bootbob{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-9px) rotate(3deg)}}
 @keyframes bootsweep{0%{transform:translateX(-110%)}100%{transform:translateX(240%)}}
+/* ---------- narrow windows ----------
+   Both HUD columns are fixed-width, so the failure mode at ~700px is the two of them meeting in
+   the middle — and the boss bar and the announce banner are centred, i.e. they arrive exactly
+   where the gap is narrowest. Everything here is shrinking the furniture so that gap survives,
+   not hiding information: at this width the player still needs every currency. */
+@media (max-width:720px){
+  #rightcol{width:188px;top:14px;right:12px;gap:7px}
+  #currency{padding:8px 10px 9px;border-radius:15px}
+  #coinhud{font-size:28px}
+  #spineval{font-size:18px}
+  #spinecell{padding:3px 7px}
+  #spinecell .cname2{font-size:9px;letter-spacing:.08em}
+  #curow{gap:5px}
+  #curow .cur{font-size:13px;padding:2px 6px}
+  #worldline{font-size:10px;margin-top:7px}
+  /* six chits no longer fit one 168px line, and a wrapped flex row strands the sixth on its own.
+     A 3x2 grid is the same information with the second line looking chosen. */
+  #kills{display:grid;grid-template-columns:repeat(3,1fr);font-size:12px;gap:4px 6px}
+  #kills .row{justify-content:flex-end}
+  #contracts .cname{font-size:10px}
+  #contracts .cprog{font-size:9px}
+  .cicon{width:22px;height:22px;font-size:10px}
+  #hpwrap,#xpwrap{width:min(228px,32vw)}
+  #buffs{max-width:214px}
+  #lvlbadge{width:38px;height:38px;font-size:16px}
+  /* centred furniture, kept clear of the right column */
+  /* Centred at this width, the boss bar's left edge lands on the HP bar. Dropping it below the
+     HP/XP stack (which ends at 106px) is the only move that keeps both readable. */
+  #bosswrap{width:min(400px,40vw);top:112px}
+  /* At this width the right column reaches ~60% of the height, so a banner at 32% would land on
+     the contracts card. Dropping it below the column is better than squeezing it to 300px: the
+     sentence stays readable, and it is still well clear of #zone/#objective at the bottom. */
+  #announce{max-width:min(72vw,420px);top:58%}
+  #levelup{max-width:min(74vw,420px)}
+  #harvestPrompt{max-width:78vw;font-size:15px}
+}
 /* ---------- item 51: visible focus + reduced motion ---------- */
 :where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus{outline:none}
 :where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus-visible{
@@ -336,10 +443,30 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   <div id="pips"></div>
   <div id="gearhud"></div>
   <div id="buffs"></div>
-  <div id="kills"></div>
-  <div id="coinhud">🪙 0</div>
-  <div id="mycohud">🌿 0</div>
-  <div id="contracts"></div>
+  <!-- The whole right side, in one flow. Coins headline it because coins are the only currency
+       every activity pays into, which is what makes them read as a score; the row under them is
+       everything else the player is holding, so nothing needs the Tome opened to be seen. -->
+  <div id="rightcol">
+    <div id="currency">
+      <div id="coinhud">🪙 0</div>
+      <div class="curcap">COINS BANKED</div>
+      <div id="spinecell" class="zero">
+        <span class="cname2 has">🦴 PRY-SPINES</span>
+        <span class="cname2 none">🦴 NONE — BURST A POD</span>
+        <span id="spineval" class="num">0</span>
+      </div>
+      <div id="curow">
+        <div class="cur" id="mycocell"><span id="mycohud">🌿 0</span></div>
+        <div class="cur" id="esscell"><span id="esshud">✦ 0</span></div>
+      </div>
+      <div id="worldline">Scouting the valley…</div>
+    </div>
+    <div id="killwrap">
+      <div class="collabel">BLOOM CULLED</div>
+      <div id="kills"></div>
+    </div>
+    <div id="contracts"></div>
+  </div>
   <div id="harvestPrompt" class="hidden"></div>
   <div id="zone"></div>
   <div id="objective">Hunt the Bloom</div>

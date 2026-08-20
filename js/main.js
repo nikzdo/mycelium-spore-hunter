@@ -1,8 +1,10 @@
 // main.js — MYCELIUM: Spore Hunter — game orchestration
 import * as THREE from 'three';
-import { ParticlePool, RewardPops } from './fx.js';
-import { buildWorld, groundHeight, groundOnly } from './world.js';
-import { Mushroom, Boss, GluttonBoss, Player, Powerup, POWERUPS, RARITIES } from './entities.js';
+import { ParticlePool, RewardPops, FrameMarks } from './fx.js';
+import { buildWorld, groundHeight, groundOnly, COLLIDERS, PARAMS as WORLD_PARAMS } from './world.js';
+import { Mushroom, Boss, GluttonBoss, Player, Powerup, POWERUPS, RARITIES, clearHeadHits } from './entities.js';
+import { buildInteractiveProps, PROP_PARAMS } from './props.js';
+import { buildFauna, FAUNA } from './fauna.js';
 import { GameAudio } from './audio.js';
 import { mulberry32, deriveSeed, randomSeed } from './rng.js';
 import { Progress, MUTATIONS, XP_PER_HIT, XP_PER_BOSS_HIT, xpForLevel, depthMult } from './progress.js';
@@ -267,12 +269,21 @@ function updateHoverTag(dt){
     const sx = locked ? innerWidth*0.5 : pointerX, sy = locked ? innerHeight*0.5 : pointerY;
     tagNdc.set(sx/innerWidth*2-1, -(sy/innerHeight)*2+1);
     tagRay.setFromCamera(tagNdc, camera);
-    let entry = null;
+    let entry = null, txt = '';
     if(tagRoots.length){
       const hits = tagRay.intersectObjects(tagRoots, true);
-      for(const h of hits){ entry = entryFor(h.object); if(entry) break; }
+      for(const h of hits){
+        const e = entryFor(h.object);
+        if(!e) continue;
+        const t = e.label(e.root) || '';
+        // An entry with nothing to say must not EAT the hit. A dead critter and a spent pod both
+        // stay parented (fauna respawns them in place), and three's raycaster does not skip
+        // invisible meshes — so stopping at the first registered hit hid the live critter standing
+        // right behind a dead one.
+        if(!t) continue;
+        entry = e; txt = t; break;
+      }
     }
-    const txt = entry ? (entry.label(entry.root) || '') : '';
     if(!txt) hideHoverTag();
     else if(entry !== tagEntry || txt !== tagText){ // diff-based: the DOM only sees real changes
       tagEntry = entry; tagText = txt;
@@ -307,6 +318,248 @@ function updateContracts(){
   }).join('');
 }
 game.updateContracts = updateContracts;
+
+/* ================= interactive props + fauna (items 11-14, 18, 12) =================
+   The world had scenery you route around and enemies you fight. These are the things you go TO:
+   spore pods you can only reach by leaving the ground, sealed cysts that publish their own odds
+   before you spend, vents that move you across the map, guaranteed treasure at the authored site,
+   and critters you harvest by landing on them.
+
+   Both modules deliberately REPORT instead of acting: props.js and fauna.js compute a payout and
+   hand it back, and every coin, pop, cue and line of copy is decided here. That is what keeps a
+   pod, a kill and a contract all reading as the same "you got paid" beat instead of three. */
+const INTERACT_KEY = 'KeyC', INTERACT_LABEL = 'C';   // free: E/F/R/Q/G are potions, H is harvest
+let props = null, fauna = null;
+const critterPop = new THREE.Vector3();   // reused: pickupText clones before projecting
+let critterHinted = false, nearMissCd = 0;
+/* item 54 — where to land. A critter is novel, harmless and does not attack, so nothing about it
+   suggests "jump on me"; the hovering Puff Drifter is worse, because its shadow is the only thing
+   telling you where its column even is. One pooled ring per nearby critter, re-declared every
+   frame (begin/mark/end), so there is no lifetime to leak and nothing to expire. */
+let critterMarks = null;
+function makeLandRing(){
+  const g = new THREE.RingGeometry(0.62, 0.92, 18);
+  g.rotateX(-Math.PI/2);
+  const m = new THREE.MeshBasicMaterial({ color:0xfff3b0, transparent:true, opacity:0.45,
+    blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.userData.noShadow = true;
+  mesh.renderOrder = 3;
+  return mesh;
+}
+let interactTarget = null;   // the prop [C] acts on right now; recomputed in updateHarvestPrompt
+
+/* Vent travel needs a beat of black between the two places, or a teleport reads as a glitch.
+   Same story as the chip: created here, 220 ms in, 300 ms out. */
+const warpEl = document.createElement('div');
+warpEl.id = 'warpfade';
+warpEl.style.cssText = 'position:fixed;inset:0;z-index:40;background:#0b0710;opacity:0;' +
+  'pointer-events:none;transition:opacity .22s ease-in';
+document.body.appendChild(warpEl);
+
+/* Rebuilt whenever the run is, and clearHeadHits() runs FIRST: a pod from the previous world is
+   still a registered plane in entities.js until something clears it, so a reroll would otherwise
+   leave invisible pods payable in mid-air. Placement runs after buildWorld() on purpose — every
+   predicate reads the FINISHED collider list, which is what stops a pod hovering inside a spire. */
+function buildRunContent(){
+  if(props){ props.dispose(); props = null; }
+  if(fauna){ fauna.dispose(); fauna = null; }
+  clearHeadHits();
+  interactTarget = null;
+  /* Legibility over variety: a ROW of pods at one height is a run you can see and plan, where a
+     scattered singleton is just a thing you happen to bump. PROP_PARAMS is a live tuning object
+     (props.js's own convention, same as world.PARAMS), so this is a dial, not a fork. */
+  PROP_PARAMS.podClusters = 8;                 // rows per world
+  PROP_PARAMS.podPerMin = 3; PROP_PARAMS.podPerVar = 2;   // 3-4 pods per row
+  PROP_PARAMS.podBotVar = 0.28;                // one readable hover height, not a staircase
+  props = buildInteractiveProps(scene, mulberry32(deriveSeed(game.seed, 0x9705)), world,
+    { progress, onEvent: onPropEvent });
+  fauna = buildFauna(scene, mulberry32(deriveSeed(game.seed, 0xfa11a)), world,
+    { progress, particles });
+  game.props = props; game.fauna = fauna;
+  critterHinted = false; nearMissCd = 0;
+  if(!critterMarks) critterMarks = new FrameMarks(scene, makeLandRing);
+  // item 47: the tag names the VERB. Both modules already word their own labels that way, and the
+  // cyst's is progress.cystPrompt() — i.e. the hover chip publishes the real probability too.
+  for(const p of props.pods) game.hoverTags.register(p.mesh, m=>props.labelFor(m), { range:22, lift:1.3 });
+  for(const c of props.cysts) game.hoverTags.register(c.group, ()=> '[' + INTERACT_LABEL + '] ' + props.promptFor(c), { range:20, lift:c.h*1.9 });
+  for(const v of props.vents) game.hoverTags.register(v.mesh, ()=> '🌀 Vent — stand on it, [' + INTERACT_LABEL + '] to ride it', { range:20, lift:2.2 });
+  for(const t of props.treasures) game.hoverTags.register(t.mesh, m=>props.labelFor(m), { range:24, lift:1.4 });
+  for(const root of fauna.hoverTargets()) game.hoverTags.register(root, o=>fauna.labelFor(o), { range:20, lift:1.4 });
+  shadowize(props.root); shadowize(fauna.group);
+}
+// dev-panel prerequisite: every live tuning object in one place, same convention as world.PARAMS
+game.tuning = { world: WORLD_PARAMS, props: PROP_PARAMS, fauna: FAUNA };
+// for verification: the standable height at a column, props included (groundOnly is the same
+// query the camera boom and the projectiles use).
+game.groundAt = (x, z)=> groundOnly(x, z);
+game.propInfo = ()=> !props ? null : { pods: props.pods.length, cysts: props.cysts.length,
+  vents: props.vents.length, treasures: props.treasures.length, treasureSource: props.treasureSource,
+  spent: props.pods.filter(p=>p.spent).length, critters: fauna ? fauna.critters.length : 0,
+  chain: fauna ? fauna.chain : 0, spines: progress.spines };
+
+/* ONE payout chokepoint per prop kind. props.js fires the event; the credit, the pops, the cue
+   and the copy all happen here, so a new prop gets consistent feel for free. */
+function onPropEvent(ev){
+  if(ev.type === 'pod') payoutPod(ev);
+  else if(ev.type === 'cyst') payoutCyst(ev);
+  else if(ev.type === 'travel') doTravel(ev);
+  else if(ev.type === 'treasure') payoutTreasure(ev);
+}
+function payoutPod(ev){
+  // coins and the pop are already banked/fired by props.js (one chokepoint, its side). This half
+  // owns how it reads: a pod that pays has to sound and say that it paid.
+  // COPY IS SHORT ON PURPOSE. The banner is one line at speed; anything longer is read as noise
+  // and overflows on a narrow window.
+  audio.powerup();
+  game.shake(0.16);
+  const spine = !!(ev.spine && ev.spine.got);
+  let txt = (ev.mult > 1 ? '🫧 Rich pod +' : '🫧 Pod +') + ev.coins + ' 🪙';
+  if(ev.chargesLeft > 0) txt += ' · ×' + ev.chargesLeft + ' left';
+  if(spine){ txt += ' · 🦴 Pry-spine!'; audio.unlock(); }
+  announce(txt, spine || ev.mult > 1 ? 'cool' : 'good');
+  updateHUD();
+}
+function payoutTreasure(ev){
+  audio.unlock();
+  rewardPops.pop(ev.x, ev.y + 1.2, ev.z, 8);
+  game.shake(0.3);
+  announce('💎 Crystal +' + ev.coins + ' 🪙' + (ev.left > 0 ? ' · ' + ev.left + ' left' : ''), 'cool');
+  updateHUD();
+}
+function payoutCyst(ev){
+  const r = ev.result;
+  if(!r || !r.ok){
+    audio.click();
+    announce('🦴 No pry-spine — burst a pod or land on a critter', 'bad');
+    return;
+  }
+  if(!r.opened){
+    audio.hiss(0.1, 0.13, 190, 760);
+    announce(`${r.icon} Held — ${r.pct}%/spine · ${r.spines} 🦴 left`, 'bad');
+    updateHUD();
+    return;
+  }
+  audio.unlock();
+  rewardPops.pop(ev.x, ev.y + ev.cyst.h*1.4, ev.z, r.coins > 90 ? 10 : 6);
+  game.shake(0.35);
+  announce(`${r.icon} ${r.name} open! +${r.coins} 🪙` + (r.myco ? ` +${r.myco} 🌿` : '') +
+    ` · ${r.tries} 🦴`, 'cool');
+  if(ev.gear) rollCystGear(ev);
+  updateHUD();
+}
+/* econ's item 15: `gear:true` is a request for exactly ONE roll from main.js's own drop table.
+   It stays here rather than in progress.js so a cyst pays from the same table as a kill — and it
+   drops as a physical pickup, which is how every other reward in this game arrives. */
+function rollCystGear(ev){
+  const pos = new THREE.Vector3(ev.x + 1.7, ev.y, ev.z);
+  const rarity = 2 + ((Math.random()*3)|0);   // rare+ : a cyst is a small boss, not a mob
+  const roll = Math.random();
+  if(roll < 0.40) dropWeapon(pos, rarity, true);
+  else if(roll < 0.72) dropArmor(pos, rarity, true);
+  else if(roll < 0.88) dropPotion(pos, rarity, true);
+  else dropPowerup(pos, rarity);
+}
+/* item 13. Fade, move, then AIM: arriving faced at whatever you happened to be looking at wastes
+   the trip. props.js reports the destination's nearest interest anchor, so the yaw lands on
+   something worth walking toward. */
+let warping = false;
+function doTravel(ev){
+  if(warping) return;
+  warping = true;
+  audio.warp();
+  warpEl.style.transition = 'opacity .22s ease-in';
+  warpEl.style.opacity = '1';
+  setTimeout(()=>{
+    const p = game.player;
+    if(p){
+      p.group.position.set(ev.x, ev.y, ev.z);
+      p.vy = 0; p.jumps = 0; p.grounded = true; p.vel.set(0, 0, 0);
+      if(fauna) fauna.resetChain();
+      if(ev.aimAt) camYaw = Math.atan2(ev.aimAt.x - ev.x, ev.aimAt.z - ev.z);
+      // snap the boom: lerping it across half the map behind the fade arrives mid-flight
+      camPivot.set(ev.x, ev.y + 2.0, ev.z);
+      const dx = -Math.sin(camYaw)*Math.cos(camPitch), dy = Math.sin(camPitch), dz = -Math.cos(camYaw)*Math.cos(camPitch);
+      camPos.set(camPivot.x + dx*camDist, camPivot.y + dy*camDist, camPivot.z + dz*camDist);
+      camTarget.copy(camPivot);
+      announce('🌀 Surfaced — new ground ahead', 'cool');
+    }
+    warpEl.style.transition = 'opacity .3s ease-out';
+    warpEl.style.opacity = '0';
+    setTimeout(()=>{ warping = false; }, 300);
+  }, 220);
+}
+/* The interact key. E/F/R/Q/G are potions, H is harvest, B/TAB/M/1-7/SPACE/SHIFT are taken —
+   so [C] is the world-interaction key, and the contextual prompt names it every time it applies. */
+function tryInteract(){
+  if(game.state !== 'play' || !props) return;
+  const t = interactTarget;
+  if(!t) return;
+  if(t.type === 'cyst') props.pry(t);          // pry() emits; payoutCyst() pays
+  else if(t.type === 'vent') props.travel(t);
+}
+/* item 12. A stomp pays coins and its species' own resource, and the CHAIN is the skill: fauna.js
+   banks coins + the spine roll through progress.stompCritter() and reports the rest for crediting
+   here, so the escalating copy and the escalating cue come out of the same number. */
+function payoutStomp(s){
+  const r = s.reward, c = s.critter;
+  const y = c.y + 1.2;
+  rewardPops.pop(c.x, y, c.z, Math.min(8, 2 + r.chain*2));
+  // essence goes into the Umber bank: mutations drain it fastest, so the commonest, closest,
+  // easiest critter is the one that refills it.
+  if(r.essence){ game.runEssences[0] += r.essence; progress.collect(0, r.essence); audio.essence(0); }
+  if(r.myco){ progress.myco += r.myco; progress.saveMyco(); }
+  if(r.harvest){
+    // credited exactly the way picking that species credits a contract — same door, same payout
+    let paid = 0;
+    for(let i=0;i<r.harvest.n;i++)
+      for(const done of progress.harvestFor(r.harvest.id).completed) paid += done.reward;
+    updateContracts();
+    if(paid){ audio.contract(); announce('Contract paid +' + paid + ' 🌿', 'good'); }
+  }
+  // SHORT. The chain multiplier is the part that has to read at a glance, because seeing ×2 turn
+  // into ×3 is the only thing that teaches a player the chain exists at all.
+  const gain = ['+' + r.coins + ' 🪙'];
+  if(r.essence) gain.push('+' + r.essence + ' ✦');
+  if(r.myco) gain.push('+' + r.myco + ' 🌿');
+  if(r.harvest) gain.push('+' + r.harvest.n + ' 🍄');
+  let txt = r.label + ' ' + gain.join(' ');
+  if(r.chain === 0) txt += ' · chain it!';
+  if(r.spine) txt += ' · 🦴!';
+  announce(txt, r.chain >= 2 || r.spine ? 'cool' : 'good');
+  // the floating number at the critter: the payout comes out of the thing you landed on
+  pickupText(critterPop.set(c.x, c.y + 1.6, c.z), gain.join(' '), r.chain > 0 ? '#ffe98a' : '#b8f0a0');
+  if(r.chain > 0) audio.gearUp(Math.min(6, r.chain + 1)); else audio.powerup();
+  game.shake(0.12 + Math.min(0.28, r.chain*0.08));
+  game.hitStop(0.03);
+  updateHUD();
+}
+
+/* THE TEACHING LAYER. The mechanic worked and still read as decoration, because a harmless animal
+   gives a player no reason to guess that landing on it is the interaction. Three cues, cheapest
+   first: the hover tag names the verb (registered in buildRunContent), a ground ring shows WHERE
+   to land, and a single latched line says it once. */
+function updateCritterCues(dt){
+  if(!fauna || !critterMarks) return;
+  const pp = game.player.group.position;
+  critterMarks.begin();
+  let nearest = null, nd = 1e9;
+  for(const c of fauna.critters){
+    if(c.dead || c.dying) continue;
+    const dx = c.x - pp.x, dz = c.z - pp.z, d2 = dx*dx + dz*dz;
+    if(d2 > 400) continue;                       // 20 m: close enough to be a target
+    if(d2 < nd){ nd = d2; nearest = c; }
+    // the ring sits on the GROUND under the critter, not on the critter: a hovering drifter's
+    // landing spot is the only thing the player actually needs to know.
+    critterMarks.mark(c.x, c.groundY + 0.06, c.z, 1);
+  }
+  critterMarks.end();
+  if(nearest && !critterHinted && nd < 196){
+    critterHinted = true;
+    announce(nearest.sp.icon + ' Harmless — jump and land on it', 'good');
+  }
+}
+
 let harvestPromptId = null;
 function updateHarvestPrompt(){
   const p = game.player;
@@ -318,11 +571,29 @@ function updateHarvestPrompt(){
     if(d < bestD){ bestD = d; best = h; }
   }
   game.nearestHarvest = best;
-  const id = best ? best.species+'|'+best.g.position.x+'|'+best.g.position.z : null;
+  /* One prompt line, and the rarer interaction wins it: a sealed cyst or a vent underfoot outranks
+     a mushroom you can pick anywhere. The cyst's line comes from progress.cystPrompt(), so the
+     real per-spine probability is on screen BEFORE the spine is spent — that is item 14's point. */
+  const pp = p.group.position;
+  const cyst = props ? props.nearestCyst(pp.x, pp.z, pp.y) : null;
+  const vent = (!cyst && props) ? props.ventUnderfoot(pp.x, pp.z, pp.y, p.grounded) : null;
+  interactTarget = cyst || vent || null;
+  if(props) props.setHovered(interactTarget);   // the thing [C] would act on is the thing that glows
+  let txt = null, id = null;
+  if(cyst){
+    txt = '[' + INTERACT_LABEL + '] ' + props.promptFor(cyst);
+    id = 'c|' + cyst.x.toFixed(1) + '|' + cyst.state.tries + '|' + progress.spines;
+  } else if(vent){
+    txt = '[' + INTERACT_LABEL + '] Ride the vent — it surfaces somewhere else on the map';
+    id = 'v|' + vent.i;
+  } else if(best){
+    txt = '[H] Harvest ' + SPECIES_BY_ID[best.species].name;
+    id = 'h|' + best.species + '|' + best.g.position.x + '|' + best.g.position.z;
+  }
   if(id !== harvestPromptId){
     harvestPromptId = id;
     const el = $('harvestPrompt');
-    if(best){ el.textContent = '[H] Harvest '+SPECIES_BY_ID[best.species].name; el.classList.remove('hidden'); }
+    if(txt){ el.textContent = txt; el.classList.remove('hidden'); }
     else el.classList.add('hidden');
   }
 }
@@ -735,6 +1006,11 @@ function tickCounters(dt){
 }
 counter('coins', document.getElementById('coinhud'), v=>'🪙 '+v, { zero:true });
 counter('myco',  document.getElementById('mycohud'), v=>'🌿 '+v, { zero:true });
+// The pry-spine wallet is index.html's #spinecell now: the plaque swaps its own label between
+// "PRY-SPINES" and "NONE — BURST A POD" off the .zero class, so main.js only supplies the number.
+counter('spines', document.getElementById('spineval'), v=>String(v),
+  { zero: document.getElementById('spinecell') });
+counter('ess', document.getElementById('esshud'), v=>'✦ '+v, { zero:true });
 // kills: six rows built once. This used to be an innerHTML rebuild every single frame.
 {
   const k = document.getElementById('kills');
@@ -778,6 +1054,9 @@ function updateHUD(){
   for(let i=0;i<game.kills.length;i++) setCounter('kill'+i, game.kills[i]);
   setCounter('coins', progress.coins);
   setCounter('myco', progress.myco);
+  setCounter('spines', progress.spines);
+  setCounter('ess', progress.bank.reduce((a,b)=>a+b, 0));
+  updateWorldLine();
   // zone
   const d = Math.hypot(p.group.position.x, p.group.position.z);
   const z = d<40?'MEADOW':d<90?'DEEPWOOD':d<140?'GLOAM':'HEART OF THE BLOOM';
@@ -786,6 +1065,26 @@ function updateHUD(){
     setText(document.getElementById('objective'), `Slay ${8-game.rareKills} more rare+ mushroom${8-game.rareKills===1?'':'s'} to lure the Bloom's ruler out`);
   if(game.boss)
     setWidth(document.getElementById('bossfill'), Math.max(0, game.boss.hp/game.boss.maxHp*100));
+}
+
+/* index.html's #worldline asks the cheapest possible "what now": how much of this world is still
+   worth the walk. Diff-based like every other HUD write — the string only reaches the DOM when one
+   of the counts actually changes. */
+function updateWorldLine(){
+  const el = document.getElementById('worldline');
+  if(!el) return;
+  if(!props){ setText(el, 'Scouting the valley…'); return; }
+  let pods = 0, cysts = 0, gems = 0, crit = 0;
+  for(const p of props.pods) if(!p.spent) pods++;
+  for(const c of props.cysts) if(!c.open) cysts++;
+  for(const t of props.treasures) if(!t.collected) gems++;
+  if(fauna) for(const c of fauna.critters) if(!c.dead && !c.dying) crit++;
+  const parts = [];
+  if(pods) parts.push('🫧 ' + pods + ' pods');
+  if(cysts) parts.push('🥚 ' + cysts + ' cysts');
+  if(crit) parts.push('🐛 ' + crit + ' critters');
+  if(gems) parts.push('💎 ' + gems + ' gems');
+  setText(el, parts.length ? parts.join(' · ') : 'Valley picked clean');
 }
 
 /* ---------- SPORE TOME (meta inventory) ---------- */
@@ -1128,19 +1427,22 @@ addEventListener('keydown', e=>{
   // jumps in one keystroke and holding Shift re-triggers the dash the instant it comes off cd.
   if(e.code === 'Space'){ e.preventDefault(); if(!e.repeat) tryJump(); }
   if(e.code === 'KeyH' && game.state === 'play') tryHarvest();
+  // e.repeat guard: holding the key must not spend a spine per frame
+  if(e.code === INTERACT_KEY && !e.repeat && game.state === 'play') tryInteract();
 });
 addEventListener('keyup', e=>{ keys[e.code] = false; endHold(e.code); });
 addEventListener('mousedown', e=>{
   if(game.state==='play' && e.button===0 && document.pointerLockElement) game.player.attack(game);
 });
+/* item 03 — a jump is a REQUEST, not an event. bufferJump() remembers the press for JUMP_BUF and
+   fires it on the landing frame, and accepts one up to COYOTE after walking off a ledge as a
+   ground jump. That forgiveness is what makes a four-tier rock formation climbable at speed
+   instead of a series of pixel-perfect launches. The cue hangs off p.onJump (set in resetRun),
+   never off the return value, because a buffered jump leaves the ground on a later frame. */
 function tryJump(){
   const p = game.player;
   if(game.state!=='play' || !p) return;
-  if(p.jumps < p.getMaxJumps()){
-    p.vy = 11; p.jumps++; p.grounded = false;
-    audio.jump();
-    particles.burst(p.group.position.clone(), 6, {r:1,g:1,b:1, spread:1.5, size:5, life:0.4});
-  }
+  p.bufferJump();
 }
 addEventListener('keydown', e=>{ if(e.code==='ShiftLeft' && !e.repeat && game.state==='play') game.player.startDash(game); });
 
@@ -1200,6 +1502,12 @@ function startRun(){
   $('hud').classList.add('on');
   audio.startBGM();
   announce('Hunt the Bloom — rare caps lure its ruler out', 'good');
+  /* item 30 — the floor under the whole cyst loop. It only fires on a wallet with 0 spines AND
+     too little Mycelium to buy one, so it cannot be farmed by restarting; it just means "no way
+     into any cyst" is not a state a returning player can start a hunt in. */
+  const floor = progress.ensureSpineFloor();
+  if(floor.granted) setTimeout(()=>{ if(game.state === 'play')
+    announce('🦴 Spare pry-spine — one cyst is always in reach', 'good'); }, 2800);
   grabPointer();
   spawnWave(7);
   updateHUD(); updateBuffs(); updateBackpack(); updateContracts();
@@ -1243,8 +1551,28 @@ function resetRun(){
   if(game.player) scene.remove(game.player.group);
   game.player = new Player(scene);
   game.player.moveInput = new THREE.Vector3();
+  // item 09: spawn where the world says it is flat, clear of every collider and outside every
+  // exclusion — dropping the player at the origin regardless of what generated there is how you
+  // start a hunt inside a rock formation.
+  const sp = world.spawnPoint;
+  if(sp) game.player.group.position.set(sp.x, sp.h, sp.z);
+  // item 03: the launch cue belongs to whoever actually leaves the ground, because a buffered
+  // press fires a frame or two after the key went down.
+  game.player.onJump = (p)=>{
+    audio.jump();
+    particles.burst(p.group.position.clone(), 6, {r:1,g:1,b:1, spread:1.5, size:5, life:0.4});
+  };
   shadowize(game.player.group);
+  /* The boom's floor is the player's OWN silhouette — cap, ink hull and all — measured instead of
+     guessed, because a guessed 0.3 m is how the lens ended up inside the hat. */
+  { const b = new THREE.Box3().setFromObject(game.player.group);
+    const sz = b.getSize(new THREE.Vector3());
+    const rad = 0.5*Math.max(sz.x, sz.y, sz.z);
+    camMinDist = Math.max(2.2, rad + CAM_CLEAR + 0.35);
+    camBoom = camDist;
+    game.camMin = camMinDist; }
   applyMutations();
+  buildRunContent();
   $('bosswrap').style.display = 'none';
   document.getElementById('objective').textContent = 'Hunt the Bloom';
 
@@ -1344,56 +1672,121 @@ const camPos = new THREE.Vector3(0, 6, -8);
 const camPivot = new THREE.Vector3();
 const camDesired = new THREE.Vector3();
 const CAM_CLEAR = 0.75; // how far the lens stays off any surface it would otherwise enter
-/* item 05: the old clamp only lifted the FINAL point above the terrain, which is wrong wherever
-   the ground between the player and the camera is higher than both ends — the ravine, a cave
-   mouth, the tower base. Those are exactly the places the game was built for drama. Marching the
-   boom and pulling in at the first blocked sample fixes the case the clamp cannot see, and
-   groundOnly() is the right query because it accounts for props, not just terrain height. */
+/* ---- why this is not just a clamp any more ----
+   Two bugs, and they compounded into the same symptom: on a steep ridge one sample along the boom
+   went subsurface for a single frame, the boom was yanked from 7.5 to its floor IN THAT FRAME, and
+   the floor was 0.3 m — which is inside the player's own cap. The result was one or two frames of
+   backfaces filling the screen. So:
+     - the pull-in is RATE LIMITED (per second, not per frame), so no single bad sample can collapse
+       the boom;
+     - the floor is the player's MEASURED silhouette radius, not a guess, and when even that floor
+       is blocked the pitch is raised instead of the distance shortened further — an over-the-
+       shoulder look down is a view, a lens inside a hat is not;
+     - only colliders wide enough to matter block the LENS. Since item 01, groundOnly() accounts for
+       every prop, which quietly made hovering spore pods and knee-high cysts camera obstacles.
+       They still block MOVEMENT; this filter is camera-only;
+     - the boom is sampled twice as finely and as a ball rather than a point, so a ridge between two
+       samples is met progressively instead of discovered all at once;
+     - releasing needs more clearance than pulling in did (hysteresis), so a lens sitting exactly on
+       a boundary cannot oscillate. */
+const CAM_RELEASE = 0.35;   // extra clearance required before the boom is allowed back out
+const CAM_BLOCK_R = 1.2;    // a collider narrower than this is something you clip, not something
+                            // worth yanking the camera for (tree trunks, pods, small cysts)
+const CAM_PULL_RATE = 26;   // m/s the boom may shorten. Fast, deliberately asymmetric, never instant
+const CAM_PUSH_RATE = 7;    // m/s it may lengthen again
+const CAM_PROBE_R = 0.35;   // the lens is a ball: sample its cross-section, not its centre
+const CAM_LIFT_STEP = 0.22, CAM_LIFT_MAX = 4;   // pitch added, in steps, when the floor is blocked
+let camMinDist = 2.45;      // measured from the player's own bounds in resetRun()
+let camBoom = CAM_DIST_DEFAULT;   // the live boom length, rate limited toward the marched target
+
+// camera-only surface query: terrain, plus the colliders big enough to be walls. NOT groundOnly(),
+// which counts every prop — see the note above.
+function camSurface(x, z){
+  let h = groundHeight(x, z);
+  for(let i=0;i<COLLIDERS.length;i++){
+    const c = COLLIDERS[i];
+    if(c.off || c.r < CAM_BLOCK_R) continue;
+    const dx = x-c.x, dz = z-c.z, rr = c.r + CAM_PROBE_R;
+    if(dx*dx + dz*dz > rr*rr) continue;
+    if(c.top > h) h = c.top;
+  }
+  return h;
+}
+// worst clearance over the lens's own cross-section
+function boomClear(x, y, z){
+  let worst = y - camSurface(x, z);
+  const r = CAM_PROBE_R;
+  let d = y - camSurface(x+r, z); if(d < worst) worst = d;
+  d = y - camSurface(x-r, z);     if(d < worst) worst = d;
+  d = y - camSurface(x, z+r);     if(d < worst) worst = d;
+  d = y - camSurface(x, z-r);     if(d < worst) worst = d;
+  return worst;
+}
+/* item 05: the old clamp only lifted the FINAL point above the terrain, which is wrong wherever the
+   ground between the player and the camera is higher than both ends — the ravine, a cave mouth, the
+   tower base. Those are exactly the places the game was built for drama. Marching the boom and
+   pulling in at the first blocked sample fixes the case the clamp cannot see. */
 function boomDistance(pivot, dirX, dirY, dirZ, want){
-  const SAMPLES = 6;
+  const SAMPLES = 12;
   for(let i=1;i<=SAMPLES;i++){
     const t = want * (i/SAMPLES);
-    const x = pivot.x + dirX*t, y = pivot.y + dirY*t, z = pivot.z + dirZ*t;
-    if(y < groundOnly(x, z) + CAM_CLEAR){
-      // pull to just before the blocked sample. The floor is small on purpose: a boom blocked
-      // at its first sample must be allowed to sit on the player's head, because 0.8 was still
-      // far enough back to be inside the wall the march just found.
-      return Math.max(0.3, want*((i-1)/SAMPLES) - 0.15);
-    }
+    if(boomClear(pivot.x + dirX*t, pivot.y + dirY*t, pivot.z + dirZ*t) < CAM_CLEAR)
+      // pull to just before the blocked sample, but never inside the player's own silhouette
+      return Math.max(camMinDist, want*((i-1)/SAMPLES) - 0.1);
   }
   return want;
 }
 function updateCamera(dt){
   const p = game.player;
   camPivot.copy(p.group.position); camPivot.y += 2.0;
-  const dirX = -Math.sin(camYaw)*Math.cos(camPitch), dirY = Math.sin(camPitch), dirZ = -Math.cos(camYaw)*Math.cos(camPitch);
-  const dist = boomDistance(camPivot, dirX, dirY, dirZ, camDist);
-  camDistNow = dist;
-  camDesired.set(camPivot.x + dirX*dist, camPivot.y + dirY*dist, camPivot.z + dirZ*dist);
+  // If the boom cannot make its own floor at this pitch, look DOWN over the shoulder instead of
+  // pushing the lens into the player. Bounded loop: a few fixed steps, no search.
+  let pitch = camPitch, dirX = 0, dirY = 0, dirZ = 0, target = camDist;
+  for(let lift=0; lift<=CAM_LIFT_MAX; lift++){
+    pitch = Math.min(1.3, camPitch + lift*CAM_LIFT_STEP);
+    const cp = Math.cos(pitch);
+    dirX = -Math.sin(camYaw)*cp; dirY = Math.sin(pitch); dirZ = -Math.cos(camYaw)*cp;
+    target = boomDistance(camPivot, dirX, dirY, dirZ, camDist);
+    if(target > camMinDist + 0.05) break;
+  }
+  // rate limited both ways, per SECOND, with hysteresis on the way out
+  if(target < camBoom) camBoom = Math.max(target, camBoom - CAM_PULL_RATE*dt);
+  else if(target > camBoom + CAM_RELEASE) camBoom = Math.min(target, camBoom + CAM_PUSH_RATE*dt);
+  camBoom = THREE.MathUtils.clamp(camBoom, camMinDist, camDist);
+  camDistNow = camBoom;
+  camDesired.set(camPivot.x + dirX*camBoom, camPivot.y + dirY*camBoom, camPivot.z + dirZ*camBoom);
   const desired = camDesired;
   // last-resort floor: the marched boom can still land the lens on a lip between two samples
-  const minY = groundOnly(desired.x, desired.z) + CAM_CLEAR;
+  const minY = camSurface(desired.x, desired.z) + CAM_CLEAR;
   if(desired.y < minY) desired.y = minY;
-  // snap in, ease out: a blocked boom must be honoured THIS frame or the lens spends the lerp
-  // inside the rock, but returning to full length can take its time.
-  const pull = dist < camPos.distanceTo(camPivot) - 0.05 ? 1 : Math.min(1, dt*6);
-  camPos.lerp(desired, pull);
+  // the boom itself is now smooth, so the lens can chase it quickly without ever snapping
+  camPos.lerp(desired, Math.min(1, dt*14));
   camTarget.lerp(camPivot, Math.min(1, dt*10));
   camera.position.copy(camPos);
   if(game.shakeT > 0){
     game.shakeT -= dt;
-    const s = game.shakeAmp * (game.shakeT/0.3);
-    camera.position.x += (Math.random()-0.5)*s;
-    camera.position.y += (Math.random()-0.5)*s;
-    camera.position.z += (Math.random()-0.5)*s;
+    const sh = game.shakeAmp * (game.shakeT/0.3);
+    camera.position.x += (Math.random()-0.5)*sh;
+    camera.position.y += (Math.random()-0.5)*sh;
+    camera.position.z += (Math.random()-0.5)*sh;
     if(game.shakeT<=0) game.shakeAmp = 0;
   }
   camera.lookAt(camTarget);
 }
 
 let camDistNow = CAM_DIST_DEFAULT; // exposed for verification: the boom length actually used
-game.camInfo = ()=>({ want: camDist, used: camDistNow, y: camera.position.y,
-  ground: groundOnly(camera.position.x, camera.position.z) });
+game.camInfo = ()=>({ want: camDist, used: +camDistNow.toFixed(2), min: +camMinDist.toFixed(2),
+  y: +camera.position.y.toFixed(2), ground: +groundOnly(camera.position.x, camera.position.z).toFixed(2),
+  camGround: +camSurface(camera.position.x, camera.position.z).toFixed(2),
+  clear: +(camera.position.y - camSurface(camera.position.x, camera.position.z)).toFixed(2) });
+// for verification only: set the camera stance directly. Nothing in the game calls it — it exists
+// so a headless session can frame a shot without the mouse it does not have.
+game.camSet = (yaw, pitch, dist)=>{
+  if(yaw !== undefined) camYaw = yaw;
+  if(pitch !== undefined) camPitch = pitch;
+  if(dist !== undefined) camDist = THREE.MathUtils.clamp(dist, CAM_DIST_MIN, CAM_DIST_MAX);
+  return { yaw: camYaw, pitch: camPitch, dist: camDist };
+};
 // for verification: the marched boom vs the old final-Y clamp, from an arbitrary stance.
 // buried = samples along the boom that sit below the surface, i.e. lens inside the world.
 game.camProbe = (x, y, z, yaw, pitch, want=camDist)=>{
@@ -1556,7 +1949,33 @@ function tick(){
     const alive = game.enemies.filter(e=>!e.dead).length;
     if(spawnCd <= 0 && alive < 12){ spawnCd = 2.5; spawnWave(2 + Math.min(4, (game.totalKills/12)|0)); }
 
+    const wasOnGround = p.grounded;
     p.update(sdt, game);
+    /* item 12 — the stomp resolve, right after the player's own vertical resolve so the pop is
+       applied on the frame the feet actually crossed the critter. Landing is what ends a chain;
+       the 1.6 s window is only the fallback for a chain that dies in mid-air. */
+    if(fauna){
+      if(p.grounded && !wasOnGround){
+        fauna.resetChain();                       // landing is what ends a chain
+        // A near miss currently reads as "nothing happened", which reads as broken. One small
+        // floating line turns a miss into information, rate limited so it can never nag.
+        if(nearMissCd <= 0){
+          for(const c of fauna.critters){
+            if(c.dead || c.dying) continue;
+            const dx = c.x - p.group.position.x, dz = c.z - p.group.position.z;
+            if(dx*dx + dz*dz > 9) continue;       // within 3 m: you were aiming at it
+            nearMissCd = 2.5;
+            pickupText(critterPop.set(c.x, c.y + 1.4, c.z), 'land ON it', '#ffd0a0');
+            break;
+          }
+        }
+      }
+      const st = fauna.tryStomp(p.group.position, p.vy);
+      if(st){
+        p.vy = st.popVy; p.jumps = 0; p.grounded = false;   // refresh the air jump so stomps chain
+        payoutStomp(st);
+      }
+    }
     for(const e of game.enemies) e.update(sdt, game);
     game.enemies = game.enemies.filter(e=>!e.dead);
     // enemy separation — stops mushrooms stacking inside each other (jitter)
@@ -1570,8 +1989,11 @@ function tick(){
         const d2 = dx*dx + dz*dz;
         if(d2 < min*min && d2 > 1e-6){
           const d = Math.sqrt(d2), push = (min-d)*0.5/d;
-          ap.x -= dx*push; ap.z -= dz*push;
-          bp.x += dx*push; bp.z += dz*push;
+          // through slideStep, not the transform: separation was the one movement path that
+          // bypassed tryDir(), and with rock tiers in the world it could shove a creature into a
+          // column it could never have walked into. A blocked push is simply refused.
+          a.slideStep(-dx*push, -dz*push, a.baseY, false);
+          b.slideStep(dx*push, dz*push, b.baseY, false);
         }
       }
       // never stand inside the player (lunge overshoot / knockback edge cases)
@@ -1579,7 +2001,7 @@ function tick(){
       const pmin = amin + 0.7, pd2 = pdx*pdx + pdz*pdz;
       if(pd2 < pmin*pmin && pd2 > 1e-6 && a.state !== 'lunge'){
         const d = Math.sqrt(pd2), push = (pmin-d)/d;
-        ap.x += pdx*push; ap.z += pdz*push;
+        a.slideStep(pdx*push, pdz*push, a.baseY, false);
       }
     }
     for(const pw of game.powerups) pw.update(sdt, game);
@@ -1591,7 +2013,7 @@ function tick(){
       pr.life -= sdt;
       pr.mesh.position.addScaledVector(pr.vel, sdt);
       const gp = pr.mesh.position;
-      if(gp.y < groundHeight(gp.x,gp.z)+0.2 || pr.life<=0){ pr.active=false; pr.mesh.visible=false;
+      if(gp.y < groundOnly(gp.x,gp.z)+0.2 || pr.life<=0){ pr.active=false; pr.mesh.visible=false;
         particles.burst(gp, 6, {r:0.8,g:0.4,b:1, spread:2, size:6, life:0.4});
         if(pr.corrosive) spawnPuddle(gp.clone(), pr.dmg*0.6, 2, 4.5);
         continue; }
@@ -1630,6 +2052,12 @@ function tick(){
         {r:0.8,g:0.5,b:1, spread:0.5, size:7, life:1.2, vy:1});
     }
     } // end substep loop
+    // animation + the 20 s respawn clock + the treasure pickup test: once per rendered frame, not
+    // per substep — none of it is physics, and running it six times would just spin the clocks.
+    if(fauna) fauna.update(dt, elapsed, p.group.position, p.vy);
+    if(props) props.update(dt, elapsed, camera, p.group.position);
+    if(nearMissCd > 0) nearMissCd -= dt;
+    updateCritterCues(dt);
     if(harvestCd > 0) harvestCd -= dt;
     updateHarvestPrompt();
     updateHUD(); updateBuffs();

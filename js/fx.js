@@ -352,6 +352,28 @@ export function makeBlobShadow(scale=1){
   return m;
 }
 
+/* ---------- soft additive glow, for sprites and billboards ---------- */
+// INVARIANT (the bug this exists to prevent): a SpriteMaterial or MeshBasicMaterial with NO map
+// is not a soft glow, it is a SOLID SQUARE — alpha is a flat `opacity`, so an additive "glow"
+// sprite without a texture renders as a hard-edged, screen-aligned card of colour with no
+// falloff at all. Any billboarded glow must carry this map. White, so the material's `color`
+// tints it; one cached canvas for the whole scene.
+let _glowTex = null;
+export function glowTexture(){
+  if(_glowTex) return _glowTex;
+  const c=document.createElement('canvas'); c.width=c.height=128;
+  const g=c.getContext('2d');
+  const gr=g.createRadialGradient(64,64,0,64,64,64);
+  // a squared falloff, not linear: a linear ramp still reads as a disc with an edge
+  gr.addColorStop(0,'rgba(255,255,255,1)');   gr.addColorStop(0.22,'rgba(255,255,255,0.62)');
+  gr.addColorStop(0.5,'rgba(255,255,255,0.2)'); gr.addColorStop(0.78,'rgba(255,255,255,0.04)');
+  gr.addColorStop(1,'rgba(255,255,255,0)');
+  g.fillStyle=gr; g.fillRect(0,0,128,128);
+  _glowTex = new THREE.CanvasTexture(c);
+  _glowTex.colorSpace = THREE.SRGBColorSpace;
+  return _glowTex;
+}
+
 /* ---------- reward pops (item 19) ---------- */
 // The universal "you got paid" beat: fired from every payout path so a coin, an essence tick and
 // a contract completion all read as the same event. Pool is owned here and parented to a

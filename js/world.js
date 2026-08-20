@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { makeNoise, fbmOf, srgbTriple, paintTexture, toonMat, addOutline } from './fx.js';
 import { mulberry32, deriveSeed } from './rng.js';
 import { MUSHROOM_SPECIES, SPECIES_BY_ID } from './mushrooms.js';
+import { makeStack, mergeStacks, jitterLattice, PRESETS, ROCK_PAL } from './rockgen.js';
 
 export const WORLD_SIZE = 420;
 
@@ -83,6 +84,40 @@ export const PARAMS = {
   rockAmbient: 70, rockSpread: 0.9, rockSMin: 0.5, rockSVar: 2.2,
   formMin: 3, formVar: 3, formDMin: 20, formDVar: 165, formSpread: 3.5,
   formMemMin: 4, formMemVar: 5, formSMin: 1.2, formSVar: 2.6,
+  /* --- stepped rock formations (items 34, 55): the ONLY props you climb by jumping.
+     stepRise is a level-design constraint, not taste. entities.js: a standing jump is JUMP_VY 11
+     against gravity 30, so the feet clear 11^2/60 = 2.02 m, and STEP 1.5 is the tallest ledge you
+     walk onto for free. Every rise is authored into the band between the two — above STEP so a
+     tier must be jumped, under the apex so it can be. Move either number and re-derive these. --- */
+  /* --- stepped rock formations (items 34, 55): the only props you climb by jumping.
+     Every knob below is a [base, range] pair sampled from one seeded stream, because SCALE IS
+     PART OF THE GENERATION: a world has to be able to produce a knee-high step, a three-jump
+     terrace and a six-tier landmark, sampled continuously rather than snapped to three sizes.
+     stepRise is the load-bearing one: entities.js gives the feet a 2.02 m apex (JUMP_VY 11 vs
+     gravity 30) and STEP 1.5 as the free walk-up, so every rise is authored between them —
+     which is what makes a formation of ANY height a climb rather than a wall. --- */
+  stepRiseMin: 1.55, stepRiseVar: 0.30,   // 1.55-1.85 m per tier: over STEP, under the apex
+  // how many of each size class this world gets: [gentle world, badlands world], lerped by one
+  // seeded bias roll, so seeds differ in CHARACTER (mesa badlands vs one dramatic tower) and not
+  // just in where the same five rocks landed. Same principle as SHAPE for the silhouette.
+  stepSmallN: [8, 4], stepMedN: [1, 5], stepBigN: [1, 3],
+  // the size parameter u, per class. The bands OVERLAP so the realized distribution is continuous.
+  stepUSmall: [0.02, 0.30], stepUMed: [0.30, 0.34], stepUBig: [0.62, 0.38],
+  stepTierMax: 6, stepRMin: 1.5, stepRVar: 7.0, stepCellMin: 2, stepCellVar: 9,
+  // independent of size, so two formations of the same height still differ: a tight shrink reads
+  // as a tower and a loose one as a plateau, cap flatness decides fightable-top vs spiky.
+  stepShrink: [0.62, 0.28], stepTaper: [0.78, 0.19], stepDrift: [0.18, 0.34],
+  // A LEDGE HAS TO BE STANDABLE, so the shrink between tiers is capped by the footprint rather
+  // than rolled freely: the ring left on top of a tier is cr*(1-shrink), surfaceAt pads the tier
+  // above by PLAYER_R*0.55, and a ring narrower than this has nowhere to put the player's feet —
+  // a "staircase" with no treads is just a wall with lines drawn on it.
+  stepLedgeMin: 1.25,
+  stepCapRise: [0.02, 0.30], stepCapJit: [0.02, 0.14], stepWobble: [0.10, 0.20],
+  stepSpacing: [1.7, 0.6], stepSides: [5, 10], stepSink: 0.12,
+  stepEdgeScale: 0.80,   // rim cells stay short and few-tiered: the ramp on, before the climb
+  stepTallMul: 1.8,      // one rim block pushed past the apex, reachable only from a tier
+  stepSlope: 0.42, stepMinH: -1.5, stepPadK: 0.6, stepPadMax: 14, stepCellPad: 2.0,
+  stepDMin: 26, stepDMax: 168, stepEdgeBand: 16, stepSiteApron: 26,
   caveSecondChance: 0.5, caveDMin: 50, caveDVar: 110, caveSpikes: 4,
   caveWalls: 8, caveWallRMin: 2.6, caveWallRVar: 2.4, caveWallSMin: 2.2, caveWallSVar: 1.8,
   boulderDMin: 30, boulderDVar: 140, boulderSMin: 3.2, boulderSVar: 1.2,
@@ -1073,6 +1108,206 @@ export function buildProps(scene, seed, world = WORLD){
       rockHull.setMatrixAt(i, M.compose(P3, Q3, S3.multiplyScalar(1.09)));
     } }
   addTo(scene, rockHull);
+
+  /* ----- stepped rock formations (items 34, 55) — the props you PLATFORM up -----
+     The instanced batch above is rubble: one silhouette, repeated, walked over. This is the other
+     thing rock can be — a multi-tier outcrop where every tier is a floor. rockgen pushes one
+     collider per tier from the same loop that writes that tier's vertices, so "if you can see it
+     you can stand on it" holds by construction instead of by agreement.
+
+     SIZE IS A ROLE, NOT A LOOK. A one-tier lump is a step you take mid-fight; a three-tier
+     terrace is a route; a six-tier tower is a destination you can see from across the valley and
+     decide to walk to. So the size parameter `u` is sampled continuously, every other dial is
+     rolled independently of it, and WHERE a formation goes depends on how big it came out: the
+     big ones have to earn their place on a site apron, a ravine bank or a landmark forecourt,
+     while the small ones scatter freely. A six-tier tower dropped at random in a flat glade is
+     how you end up with landmarks that mean nothing.
+
+     THE ROUTE IS THE POINT. Rises stay inside the 1.55-1.85 m band whatever the size, so every
+     tier is one jump; the tier count falls off toward the rim, so a formation is a ramp on the
+     outside and a staircase in the middle; and one rim block is pushed past the apex so the thing
+     keeps a corner you can only reach from a tier you already climbed. */
+  const stepRng = mulberry32(deriveSeed(seed, 0x57e99));
+  {
+    const pick = (pair)=> pair[0] + stepRng()*pair[1];
+    const lerpN = (pair, t)=> Math.max(0, Math.round(pair[0] + (pair[1] - pair[0])*t));
+    // this world's character, rolled once: 0 = gentle ground with one dramatic tower, 1 = badlands
+    const bias = stepRng();
+    const plan = [];
+    for(let i=0;i<lerpN(PARAMS.stepBigN, bias);i++)   plan.push({ cls:'big',   u: pick(PARAMS.stepUBig) });
+    for(let i=0;i<lerpN(PARAMS.stepMedN, bias);i++)   plan.push({ cls:'med',   u: pick(PARAMS.stepUMed) });
+    for(let i=0;i<lerpN(PARAMS.stepSmallN, bias);i++) plan.push({ cls:'small', u: pick(PARAMS.stepUSmall) });
+
+    const stepBase = (x, z, pad)=> slopeAt(x, z) < PARAMS.stepSlope
+      && !inExclusion(x, z, pad) && groundHeight(x, z) > PARAMS.stepMinH && clearOf(x, z, pad);
+
+    const geos = [];
+    const stats = { bias:+bias.toFixed(3), clusters:0, stacks:0, tiers:0, tall:0, at:[],
+                    byClass:{ small:0, med:0, big:0 }, rises:[], heights:[], radii:[], tierN:[] };
+    const palNames = ['stone','basalt','chalk'];
+    const sitesLeft = SITES.slice();
+
+    for(const item of plan){
+      const u = item.u;
+      // ---- derive the formation from u, then roll every other dial independently of it ----
+      const tiersMax = Math.max(1, Math.min(PARAMS.stepTierMax,
+        Math.round(1 + Math.pow(u, 0.85)*(PARAMS.stepTierMax - 1))));
+      const baseR = PARAMS.stepRMin + u*PARAMS.stepRVar;
+      const cells = Math.max(2, Math.round(PARAMS.stepCellMin + u*PARAMS.stepCellVar));
+      const spacing = pick(PARAMS.stepSpacing);
+      const shrink = Math.min(pick(PARAMS.stepShrink),
+        1 - Math.min(0.38, PARAMS.stepLedgeMin/Math.max(1.6, baseR)));
+      const cols = Math.max(1, Math.round(Math.sqrt(cells*1.3)));
+      const rows = Math.max(1, Math.ceil(cells/cols));
+      // footprint drives the clearance it asks for: a tower needs a forecourt, a step needs none
+      const foot = baseR + baseR*spacing*(Math.max(cols, rows) - 1)*0.5;
+      const pad = Math.min(PARAMS.stepPadMax, Math.max(2, foot*PARAMS.stepPadK));
+
+      // ---- WHERE. Big formations are destinations, so they take the authored anchors first. ----
+      let spot = null, why = 'open';
+      if(item.cls === 'big'){
+        while(!spot && sitesLeft.length){
+          const s = sitesLeft.shift();
+          for(let k=0;k<14;k++){
+            const a = stepRng()*Math.PI*2, d = s.r + PARAMS.stepSiteApron*(0.6 + stepRng()*0.7);
+            const x = s.x + Math.cos(a)*d, z = s.z + Math.sin(a)*d;
+            if(stepBase(x, z, pad)){ spot = { x, z }; why = 'site'; break; }
+          }
+        }
+        if(!spot && RAVINE){
+          // a ravine lip is a point legal to stand on a few metres from one that is not: the gap
+          // between two clearances IS the edge, so RAVINE never has to be published to find it.
+          const p = scatter(stepRng, 1, 0, (x,z)=> stepBase(x,z,pad) && inExclusion(x, z, PARAMS.stepEdgeBand),
+            { r0:PARAMS.stepDMin, r1:PARAMS.stepDMax })[0];
+          if(p){ spot = p; why = 'ravine'; }
+        }
+      }
+      if(!spot){
+        const minD = item.cls === 'big' ? 70 : item.cls === 'med' ? 44 : 20;
+        const p = scatter(stepRng, 1, 0, (x,z)=>{
+          if(!stepBase(x, z, pad)) return false;
+          for(const a of stats.at){ const dx = x-a.x, dz = z-a.z; if(dx*dx + dz*dz < minD*minD) return false; }
+          return true;
+        }, { r0:PARAMS.stepDMin, r1:PARAMS.stepDMax })[0];
+        if(!p) continue;
+        spot = p;
+      }
+
+      const pal = ROCK_PAL[palNames[(stepRng()*palNames.length)|0]];
+      // A formation's own tiers must not reject its own neighbours, so the cell clearance only
+      // looks at what was already standing here when this formation started.
+      const before = COLLIDERS.length;
+      const cellClear = (x, z)=>{
+        for(let i=0;i<before;i++){
+          const c = COLLIDERS[i];
+          if(c.off) continue;
+          const dx = x-c.x, dz = z-c.z, rr = c.r + PARAMS.stepCellPad;
+          if(dx*dx + dz*dz < rr*rr) return false;
+        }
+        return true;
+      };
+      // item 55: the lattice step stays keyed to the UNJITTERED base radius, so the mosaic tiles
+      // cleanly while every cell reads as its own broken chunk.
+      const lat = jitterLattice(stepRng, {
+        shape: cells <= 4 ? 'line' : 'hex',
+        r: baseR, h: PARAMS.stepRiseMin + stepRng()*PARAMS.stepRiseVar, spacing,
+        cx: spot.x, cz: spot.z, cols, rows, count: cells, angle: stepRng()*Math.PI*2,
+        rMul:[0.82, 1.28], hMul:[0.94, 1.0], sides: PARAMS.stepSides, tiers:[1,1],
+        // edgeScale stays 1 here and the crest fall-off is applied below instead: a hex lattice's
+        // own `edge` is measured from the row-offset grid, so on a 3x3 hex NO cell reads as the
+        // centre and the tier gradient silently flattens — which is a five-tier tower coming out
+        // three tiers tall. Distance from the formation's own centre is the honest measure.
+        pos:0.22, tilt:0.04, edgeScale: 1,
+        test: (x,z)=> slopeAt(x,z) < PARAMS.stepSlope && !inExclusion(x, z, PARAMS.stepCellPad)
+          && groundHeight(x, z) > PARAMS.stepMinH && cellClear(x, z),
+      });
+      if(lat.length < 1) continue;
+      // A formation whose crest cell got rejected reads as a ring of rim blocks with nothing in
+      // the middle — i.e. a "big" landmark that is 2 m tall. If nothing landed near the centre and
+      // the centre is legal, the crest goes there explicitly.
+      let hasCore = false;
+      for(const c of lat) if(Math.hypot(c.x - spot.x, c.z - spot.z) < foot*0.35){ hasCore = true; break; }
+      if(!hasCore && cellClear(spot.x, spot.z) && slopeAt(spot.x, spot.z) < PARAMS.stepSlope)
+        lat.unshift({ x:spot.x, z:spot.z, edge:0, r:baseR,
+          h: PARAMS.stepRiseMin + stepRng()*PARAMS.stepRiseVar, tiers:1,
+          sides: PARAMS.stepSides[0] + ((stepRng()*(PARAMS.stepSides[1]-PARAMS.stepSides[0]+1))|0),
+          rotY: stepRng()*Math.PI*2, tiltX:0, tiltZ:0 });
+      // the unreachable corner comes from the RIM, never the crest: pushing a crest cell past the
+      // apex would put the whole staircase out of reach instead of just its last block.
+      let tall = -1;
+      if(tiersMax >= 3) for(let i=0;i<lat.length;i++)
+        if(Math.hypot(lat[i].x - spot.x, lat[i].z - spot.z) >= foot*0.4){ tall = i; break; }
+      const taper = pick(PARAMS.stepTaper);
+      // drift has a FLOOR on anything you are meant to climb: offsetting each tier's centre gives
+      // one flank a ledge much wider than the bare annulus, which is the side the route goes up.
+      // Perfectly concentric tiers narrow to nothing by the third one.
+      const drift = tiersMax >= 3 ? Math.max(0.22, pick(PARAMS.stepDrift)) : pick(PARAMS.stepDrift);
+      const capRise = pick(PARAMS.stepCapRise), capJit = pick(PARAMS.stepCapJit);
+      const wobble = pick(PARAMS.stepWobble);
+
+      let top = 0;
+      const eNorm = Math.max(1e-6, foot*0.9);
+      for(let i=0;i<lat.length;i++){
+        const c = lat[i];
+        const e = Math.min(1, Math.hypot(c.x - spot.x, c.z - spot.z)/eNorm);
+        const fall = 1 + (PARAMS.stepEdgeScale - 1)*e;
+        // tiers fall off toward the rim: that gradient IS the route. A uniform stack height would
+        // be a ring of pillars with nothing to climb.
+        const isTall = i === tall;
+        // ^0.7 widens the crest: with a linear fall-off half the cells come out single-tier and
+        // the formation reads as a plinth with one spike on it rather than as terraces.
+        const tiers = isTall ? 1 : Math.max(1, Math.min(tiersMax,
+          Math.round(1 + Math.pow(1 - e, 0.7)*(tiersMax - 1))));
+        const rise = (isTall ? c.h*PARAMS.stepTallMul : c.h) * fall;
+        const g = makeStack(stepRng, Object.assign({}, PRESETS.tower, {
+          r: c.r*fall, h: rise, tiers, sides: c.sides,
+          taper, bulge: 1.0, wobble, shrink: [shrink, Math.min(0.95, shrink + 0.08)],
+          hScale: [0.94, 1.0], drift, sink: PARAMS.stepSink,
+          capJitter: capJit, capRise,
+          hull: 0.07, base: pal.base, side: pal.side, tint: pal.tint,
+          x: c.x, y: groundHeight(c.x, c.z), z: c.z,
+          rotY: c.rotY, tiltX: c.tiltX, tiltZ: c.tiltZ,
+        }), COLLIDERS);
+        if(g.userData.height > top) top = g.userData.height;
+        stats.rises.push(+rise.toFixed(2));
+        stats.tierN.push(tiers);
+        stats.radii.push(+(c.r*fall).toFixed(2));
+        if(isTall) stats.tall++;
+        stats.tiers += tiers;
+        geos.push(g);
+      }
+      stats.clusters++; stats.byClass[item.cls]++;
+      stats.heights.push(+top.toFixed(2));
+      // exactly the colliders THIS formation pushed, so a climbability probe can ask about its own
+      // tiers instead of guessing which nearby cylinder was a tree
+      const tops = [];
+      for(let i=before;i<COLLIDERS.length;i++) tops.push(+COLLIDERS[i].top.toFixed(2));
+      tops.sort((a,b)=>a-b);
+      stats.at.push({ x:+spot.x.toFixed(2), z:+spot.z.toFixed(2), cls:item.cls, u:+u.toFixed(3),
+        why, cells:lat.length, tiersMax, r:+baseR.toFixed(2), h:+top.toFixed(2), foot:+foot.toFixed(1),
+        shrink:+shrink.toFixed(3), taper:+taper.toFixed(3), drift:+drift.toFixed(3), tops });
+    }
+    stats.stacks = geos.length;
+    if(geos.length){
+      const { geo, hull } = mergeStacks(geos);
+      // Dozens of individually shaped, individually placed rocks in ONE draw call: the placement is
+      // baked into the vertices, which is the one thing an InstancedMesh cannot do.
+      const form = new THREE.Mesh(geo, toonMat({ color:0xffffff, vertexColors:true, rim:0.3 }));
+      form.name = 'rockFormations';   // named so a panel (or a draw-call probe) can find the batch
+      form.castShadow = true; form.receiveShadow = true;
+      addTo(scene, form);
+      // NEVER addOutline() here. It scales a mesh about its own origin, and these vertices are
+      // already in world space, so scaling would push every rock AWAY from the world origin
+      // instead of thickening it. rockgen bakes the ink shell per rock, in local space, before
+      // placement, and merges it separately — that is what `hull` is.
+      if(hull){
+        const ink = new THREE.Mesh(hull, hullMat);
+        ink.name = 'rockFormationsInk';
+        addTo(scene, ink);
+      }
+    }
+    world.rockFormations = stats;   // dev panel / verification: the realized distribution
+  }
 
   /* ----- LANDMARK: rune boulder ----- */
   {
