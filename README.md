@@ -42,6 +42,16 @@ Kill mushrooms in an open world, level up mid-run (temporary stat growth), colle
 
 Melee-only, combo-based: every 3rd hit in a swing chain triggers the equipped weapon's unique **finisher** (a `nova`/`shockwave`/`chainhit`/`devour`/etc. effect defined per-weapon in `weapons.js` and executed in `Player.attack()`). Weapons have distinct silhouettes, stats, and finishers rather than being palette-swapped clones — a dagger trades range and raw damage for crit and attack speed, a greatsword hits like a truck at half the pace, and so on.
 
+### The hit combo
+
+Every hit you land feeds one counter, shown mid-left and escalating through six tiers
+(HITS → NICE → SHARP → BRUTAL → SAVAGE → UNREAL). It counts **one per enemy struck**, not one per
+swing, so a cleave through a group is worth the group; a stomp counts too, and it is the only hit
+you can land airborne, so it is how a chain survives a gap between enemies. Continuous damage —
+the ring cone, a burn tick — deliberately does *not* count, but the cone does keep an existing
+chain alive. The chain lapses after 2.8 seconds without a hit. It is a readout, not a multiplier:
+nothing in the damage maths reads it.
+
 ### Gear collection — stars, duplicates, levels
 
 Both weapons and armor (helmet/ring/charm) share one progression model, deliberately modeled on mobile gacha-style equipment screens (Archero et al.):
@@ -51,7 +61,9 @@ Both weapons and armor (helmet/ring/charm) share one progression model, delibera
 - **Coins level it up**, independent of stars, up to a cap that stars raise (`15 + stars×15`). So stars gate how far coins can take you, and coins are how you actually spend that headroom.
 - Both axes feed one multiplier — `1 + stars×0.12 + level×0.01` — applied to the item's stats. All of this lives in `progress.js` (`gearInfo`, `addDupe`, `levelUpGear`) and persists in `localStorage` across every run.
 
-The Spore Tome's **Equipment** tab is the full permanent collection (every item you've ever found, across all hunts); the in-run **Backpack** only shows what you've found *this* hunt, since equipping something still requires having it on you.
+The Spore Tome's **Equipment** tab is the full permanent collection (every item you've ever found, across all hunts), laid out as a paper doll: the hunter in the middle with their five slots around them — weapon, helmet, ring, charm and the elemental ring — the live ATK/HP/CRIT read off the same getters combat uses, and the whole collection as a grid beside it. Rarity is in the tile's frame and star progress is in its pip row, so the two things you actually compare read without text; clicking any tile or any worn slot opens that item's card, which is where the words live. Banked duplicates appear as their own faded, hatched SHARD tiles — they are real things you own, but they are progress toward the next star rather than a second usable sword, and the tile says so.
+
+The in-run **Backpack** only shows what you've found *this* hunt, since equipping something still requires having it on you.
 
 ### Mutations
 

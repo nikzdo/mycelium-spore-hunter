@@ -404,6 +404,167 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .mut.locked{opacity:.55;filter:saturate(.5)}
 .mut.locked .mutbtn{background:linear-gradient(180deg,#b9b3c9,#7d7592);cursor:not-allowed}
 .mut:not(.locked):not(.maxed):hover{transform:translateY(-2px)}
+/* ============ the Equipment screen (paper doll + inventory) ============
+   Same parchment world as the Tome pages, so this reads as another spread of the same book
+   rather than a bolted-on menu — the frame, the ink border and the two type families are shared.
+   What is NOT shared is the information design: the Tome's other tabs are documents you read
+   top-to-bottom, and this is a screen you OPERATE, so it is a grid with state encoded in form
+   (frame colour = rarity, pip row = stars, arrow = affordable) rather than in sentences. */
+#equipscreen{color:#7a5a34;position:relative;width:min(1060px,94vw);height:min(660px,88vh);display:flex;flex-direction:column;
+  background:linear-gradient(178deg,#fff6e0,#f2e0bc 62%,#e8d2a8);
+  border:5px solid #6b4a2a;border-radius:26px;box-shadow:0 12px 0 rgba(0,0,0,.35),inset 0 0 60px rgba(160,110,50,.18);
+  padding:14px 16px 12px;gap:10px}
+#equipscreen.hidden{display:none}
+#tome.equipmode .tomebook{display:none}
+#eqhead{display:flex;align-items:center;gap:9px;flex:0 0 auto}
+#eqpurse{margin-left:auto;display:flex;gap:12px;font-weight:700;font-size:15px;color:#6b3a1a}
+#eqbody{flex:1;display:flex;gap:14px;min-height:0}
+
+/* ---- the doll. Slots are absolutely positioned AROUND the figure, which is the whole idea:
+        a column of slots is a list, and a ring of slots is a character wearing things. ---- */
+#eqdoll{flex:0 0 372px;position:relative;border:3px solid #c8a86a;border-radius:20px;
+  background:radial-gradient(ellipse at 50% 42%,rgba(255,240,200,.9),rgba(226,200,152,.55));
+  display:flex;flex-direction:column;justify-content:flex-end;align-items:center;padding-bottom:10px}
+/* the arcane circle the hero stands on, straight from the reference — it is what stops the figure
+   floating in the middle of an empty panel */
+#dollring{position:absolute;left:50%;top:70%;transform:translate(-50%,-50%) rotateX(74deg);
+  width:212px;height:212px;border-radius:50%;
+  border:3px dashed rgba(180,120,60,.5);box-shadow:0 0 0 14px rgba(255,220,150,.22)}
+/* 1.28x the first pass. The figure is the subject of the panel and it was reading as a token
+   sitting between the slots rather than as the thing they belong to. */
+#dollart{position:absolute;left:50%;top:52%;transform:translate(-50%,-50%) scale(1.28);
+  transform-origin:50% 50%;width:96px;height:150px}
+#dollart div{position:absolute;border:3px solid var(--ink);box-shadow:0 3px 0 rgba(0,0,0,.18)}
+.dollcap{left:18px;top:0;width:60px;height:34px;border-radius:30px 30px 6px 6px;background:#e0433a}
+.dollface{left:22px;top:31px;width:52px;height:24px;border-radius:5px;background:#ffe6b8}
+.dolltunic{left:20px;top:50px;width:56px;height:62px;border-radius:10px 10px 14px 14px;background:#2f7d5c}
+/* a shade darker than the tunic on purpose: at this size an arm the same colour as the body
+   merges into it and the figure loses its shoulders */
+.dollarmL{left:2px;top:56px;width:18px;height:46px;border-radius:9px;background:#256448}
+.dollarmR{left:76px;top:56px;width:18px;height:46px;border-radius:9px;background:#256448}
+.dollegL{left:26px;top:110px;width:18px;height:38px;border-radius:5px 5px 8px 8px;background:#3a2a44}
+.dollegR{left:52px;top:110px;width:18px;height:38px;border-radius:5px 5px 8px 8px;background:#3a2a44}
+
+/* A slot is the same object as an inventory tile — same frame, same pips, same arrow — because
+   they are the same item in two places, and teaching two visual languages for one thing is how a
+   player stops trusting either. Only the position and the empty state differ. */
+.eqslot,.eqtile{position:relative;width:74px;height:74px;border:3px solid var(--ink);border-radius:14px;
+  background:linear-gradient(180deg,rgba(255,250,235,.95),rgba(228,204,158,.95));
+  box-shadow:0 3px 0 rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;
+  font-size:30px;cursor:pointer;flex:0 0 auto}
+.eqslot{position:absolute}
+/* Vertical spacing is 96 px per row, which is 74 of slot plus 22 of clearance — enough for the
+   pip row above one slot and the caption below the slot over it not to touch. */
+#eqs-helmet{left:50%;top:16px;transform:translateX(-50%)}
+#eqs-weapon{left:16px;top:130px}
+#eqs-ring{right:16px;top:130px}
+#eqs-charm{left:16px;top:244px}
+#eqs-elem{right:16px;top:244px}
+/* rarity lives in the FRAME, not in the icon: an icon is already carrying what the item is */
+.eqslot[data-r],.eqtile[data-r]{border-color:var(--rc,#6b4a2a);
+  box-shadow:0 0 0 2px rgba(255,255,255,.5) inset,0 3px 0 rgba(0,0,0,.25)}
+.eqslot.empty{opacity:.55;font-size:11px;font-weight:700;letter-spacing:.1em;color:#8a6a3f;
+  background:repeating-linear-gradient(45deg,rgba(200,168,106,.35) 0 6px,transparent 6px 12px)}
+.eqslot.on{outline:3px solid #ffcf6b;outline-offset:2px}
+.eqlv,.tilelv{position:absolute;bottom:-2px;left:0;right:0;text-align:center;font-size:10px;
+  font-weight:700;color:#fff6e3;text-shadow:0 1px 0 var(--ink),0 0 3px var(--ink)}
+/* The caption and the pip row both wanted the space above the slot and collided into unreadable
+   mush. The caption goes BELOW instead, under the level chip, because it is the least urgent of
+   the three: you learn where the helmet slot is once and never read the word again, whereas the
+   pips are a live progress read. */
+.eqcap{position:absolute;bottom:-27px;left:-6px;right:-6px;text-align:center;font-size:8.5px;
+  font-weight:700;letter-spacing:.16em;color:#8a6a3f;text-shadow:0 1px 0 rgba(255,250,235,.8)}
+/* the green up-arrow from the reference: "you can afford to improve this, right now" — the one
+   piece of state on the screen that is about the player's WALLET rather than the item */
+.equp{position:absolute;right:-6px;top:-6px;width:19px;height:19px;border-radius:50%;
+  background:#63c94a;border:2px solid var(--ink);color:#fff;font-size:11px;line-height:15px;
+  text-align:center;font-weight:700;box-shadow:0 2px 0 rgba(0,0,0,.3)}
+/* Hidden at zero stars, and that is the difference between a grid and a pin-board: six hollow
+   dots over every single tile is six dots of noise per tile telling you nothing. A pip row that
+   only appears once an item HAS a star means the row itself is information. */
+.eqpips{position:absolute;top:-9px;left:0;right:0;display:flex;gap:2px;justify-content:center}
+.eqpips.none{display:none}
+.eqpips i{width:5px;height:5px;border-radius:50%;background:rgba(90,60,30,.3);border:1px solid var(--ink)}
+.eqpips i.on{background:#ffcf6b}
+#eqstats{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;width:100%;padding:0 10px}
+.eqstat{display:flex;align-items:center;gap:6px;background:rgba(60,38,20,.1);
+  border:2px solid #c8a86a;border-radius:10px;padding:4px 9px;font-weight:700;font-size:13px;color:#6b3a1a}
+.eqstat b{font-variant-numeric:tabular-nums}
+
+/* ---- the inventory half ---- */
+#eqinv{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0}
+#eqfilters{display:flex;gap:7px;align-items:center;flex:0 0 auto}
+#eqfilters .ttab{font-size:11px;padding:5px 11px}
+#eqgrid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));
+  gap:16px 10px;align-content:start;padding:10px 6px 6px;
+  background:rgba(120,84,40,.10);border:2px solid #c8a86a;border-radius:14px}
+.eqtile{width:100%;aspect-ratio:1}
+.eqtile.sel{outline:3px solid #ffcf6b;outline-offset:2px}
+/* A banked duplicate is a real thing you own, so it gets a real tile — but it is not a second
+   usable weapon, and pretending otherwise would be a lie the player acts on. Hence: same frame,
+   faded, hatched, and labelled SHARD. */
+.eqtile.shard{opacity:.62;background:repeating-linear-gradient(45deg,rgba(200,168,106,.5) 0 5px,rgba(255,250,235,.85) 5px 10px)}
+.eqtile.shard .tilelv{font-size:8.5px;letter-spacing:.08em}
+.eqempty{grid-column:1/-1;padding:18px 10px;text-align:center;font-size:13px;color:#8a6a3f}
+#eqhint{flex:0 0 auto;text-align:center;font-size:12px;color:#8a6a3f;padding:2px 0 0}
+/* ---- the item card popup ----
+   Scoped inside #equipscreen so it cannot leak over the rest of the game, and absolutely
+   positioned over the whole spread rather than over the grid: an item card that only covers half
+   the screen looks like a tooltip that got stuck. */
+#eqpop{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(40,24,12,.42);border-radius:22px;z-index:5}
+#eqpop.hidden{display:none}
+/* An explicit base colour, NOT inherited. The card sits inside .overlay, which sets a light text
+   colour for dark screens — so every label that only said `<span>` came out near-white on
+   parchment and the left half of the stat block was invisible while the values were fine. Any
+   element that changes the surface under the text has to restate the text colour. */
+#eqpopcard{color:#7a5a34;position:relative;width:min(430px,86%);
+  background:linear-gradient(178deg,#fffaf0,#f4e4c4 70%,#ead8b4);
+  border:5px solid #6b4a2a;border-radius:22px;box-shadow:0 14px 0 rgba(0,0,0,.32);
+  padding:20px 22px 18px;animation:eqpopin .18s cubic-bezier(.2,1.5,.35,1)}
+@keyframes eqpopin{from{transform:scale(.88);opacity:0}to{transform:scale(1);opacity:1}}
+@media (prefers-reduced-motion: reduce){ #eqpopcard{animation:none} }
+#eqpopclose{position:absolute;right:-10px;top:-12px;width:32px;height:32px;border-radius:50%;
+  border:3px solid var(--ink);background:linear-gradient(180deg,#ff9a8a,#e0553f);color:#fff;
+  font-weight:700;font-size:14px;box-shadow:0 3px 0 #6b4a2a;cursor:pointer}
+#eqpopcard .pophead{display:flex;gap:14px;align-items:center}
+/* the icon gets its own big framed plate: the card's job is to make one item feel like a thing you
+   own, and the grid tile is too small to carry that */
+#eqpopcard .popicon{width:82px;height:82px;flex:0 0 auto;border:4px solid var(--rc,#6b4a2a);
+  border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:42px;
+  background:linear-gradient(180deg,rgba(255,250,235,.95),rgba(228,204,158,.95));
+  box-shadow:0 4px 0 rgba(0,0,0,.25)}
+#eqpopcard .popname{font-family:'Gochi Hand',cursive;font-size:29px;color:#6b3a1a;line-height:1.05}
+#eqpopcard .poprar{font-size:10.5px;font-weight:700;letter-spacing:.16em;color:var(--rc,#8a6a3f)}
+#eqpopcard .popdesc{margin-top:12px;font-size:13px;line-height:1.45;color:#7a5a34}
+#eqpopcard .poprow{display:flex;justify-content:space-between;gap:10px;font-size:12px;
+  color:#8a6a3f;padding:5px 0;border-bottom:1px dashed rgba(140,100,50,.3)}
+#eqpopcard .poprow b{color:#6b3a1a;font-variant-numeric:tabular-nums}
+#eqpopcard .popgrid{margin-top:12px}
+/* the star meter: the one number in the game that is bought with LUCK rather than coins, so it
+   gets a bar of its own instead of being a line of text among the stats */
+#eqpopcard .popstars{display:flex;gap:4px;margin-top:10px;align-items:center}
+#eqpopcard .popstars i{width:15px;height:15px;border-radius:50%;background:rgba(90,60,30,.22);
+  border:2px solid var(--ink)}
+#eqpopcard .popstars i.on{background:#ffcf6b}
+#eqpopcard .popdupe{height:8px;border:2px solid var(--ink);border-radius:999px;margin-top:8px;
+  background:rgba(0,0,0,.2);overflow:hidden}
+#eqpopcard .popdupe span{display:block;height:100%;background:linear-gradient(180deg,#ffe1a0,#f0a83c)}
+#eqpopcard .popbtns{display:flex;gap:9px;margin-top:15px}
+#eqpopcard .popbtns .eqbtn{flex:1}
+#eqpopcard .popnote{margin-top:9px;font-size:11.5px;color:#8a6a3f;text-align:center}
+.eqbtn{font-family:'Fredoka';font-weight:700;font-size:12px;padding:7px 13px;border-radius:999px;
+  border:3px solid var(--ink);background:linear-gradient(180deg,#ffcf6b,#f59b3c);color:#4a2a10;
+  box-shadow:0 3px 0 #6b4a2a;cursor:pointer}
+.eqbtn.alt{background:linear-gradient(180deg,#9fe07a,#5aac3c)}
+.eqbtn:disabled{background:#cbb896;color:#8a7a5a;box-shadow:0 3px 0 #8a7a5a;cursor:default}
+@media (max-width:900px){
+  /* the doll gives up its width first: the grid is the part you cannot use if it is cramped */
+  #eqdoll{flex:0 0 268px}
+  #eqs-weapon,#eqs-charm{left:6px} #eqs-ring,#eqs-elem{right:6px}
+  .eqslot{width:62px;height:62px;font-size:24px}
+}
+
 #tomeclose{margin:18px auto 0;display:block;font-family:'Fredoka';font-weight:600;font-size:16px;
   padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
   background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
@@ -692,6 +853,54 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   <div class="tomebook">
     <div class="tomepage left" id="tomeleft"></div>
     <div class="tomepage right" id="tomeright"></div>
+  </div>
+  <!-- The Equipment screen is a PAPER DOLL, and it needs the full width of the book rather than
+       one page of it: the whole point of the layout is that the slots surround the character, and
+       you cannot surround anything inside a 500 px column. #tome.equipmode hides the two pages and
+       lets this take the space. Portrait reference is a phone (doll above, inventory below); the
+       landscape adaptation is doll BESIDE inventory, which keeps both above the fold. -->
+  <div id="equipscreen" class="hidden">
+    <div id="eqhead">
+      <button class="ttab" id="eqtab-mut">MUTATIONS</button>
+      <button class="ttab on" id="eqtab-gear">EQUIPMENT</button>
+      <div id="eqpurse"></div>
+    </div>
+    <div id="eqbody">
+      <div id="eqdoll">
+        <div id="dollring"></div>
+        <div id="dollart">
+          <!-- the hunter, in the same four blocks the 3D model is built from: cap, face band,
+               tunic, legs. Drawn rather than rendered because a second WebGL view of the player
+               would mean a second camera and a second render pass for a paper doll. -->
+          <div class="dollcap"></div><div class="dollface"></div>
+          <div class="dolltunic"></div><div class="dollarmL"></div><div class="dollarmR"></div>
+          <div class="dollegL"></div><div class="dollegR"></div>
+        </div>
+        <div class="eqslot" id="eqs-helmet"></div>
+        <div class="eqslot" id="eqs-weapon"></div>
+        <div class="eqslot" id="eqs-ring"></div>
+        <div class="eqslot" id="eqs-charm"></div>
+        <div class="eqslot" id="eqs-elem"></div>
+        <div id="eqstats"></div>
+      </div>
+      <div id="eqinv">
+        <div id="eqfilters"></div>
+        <div id="eqgrid"></div>
+        <div id="eqhint" class="dhint">Click any item — worn or in the collection — to open its card.</div>
+      </div>
+    </div>
+    <!-- The item card. A POPUP rather than a strip along the bottom, because the strip forced
+         every item's full text to be on screen at all times: it cost the grid two rows of height
+         to describe one thing the player had already picked. A popup spends that space only when
+         asked, and it can afford to be generous when it does. Click-outside and Esc both close it,
+         and it traps nothing — the grid behind it stays readable, which is the point of a card
+         over a full screen. -->
+    <div id="eqpop" class="hidden">
+      <div id="eqpopcard">
+        <button id="eqpopclose" aria-label="Close">✕</button>
+        <div id="eqpopbody"></div>
+      </div>
+    </div>
   </div>
   <button id="tomeclose">CLOSE TOME</button>
   <div class="tomehint">TAB / I / ESC to close &nbsp;•&nbsp; mutations and your gear collection are permanent across hunts</div>

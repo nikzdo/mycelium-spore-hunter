@@ -1536,6 +1536,25 @@ function essCostHtml(cost){
   }).join('');
 }
 function renderTome(){
+  /* The Equipment tab is a different SHAPE of screen, not a different page of the same one: a
+     paper doll needs the whole width of the book (see the note on #equipscreen). So the two
+     spreads are mutually exclusive rather than one being nested in the other, and this is the one
+     place that decides which is up. Both tab bars are wired to the same two tab handlers, so
+     whichever spread you are looking at, the buttons mean the same thing. */
+  const equipMode = tomeTab === 'equipment';
+  $('tome').classList.toggle('equipmode', equipMode);
+  $('equipscreen').classList.toggle('hidden', !equipMode);
+  if(equipMode){
+    $('eqtab-mut').onclick = ()=>{ tomeTab='alchemy'; closeEqPop(); renderTome(); };
+    $('eqtab-gear').onclick = ()=>{ tomeTab='equipment'; renderTome(); };
+    $('eqpopclose').onclick = closeEqPop;
+    // click-outside closes, but only on the backdrop itself — a click that started inside the card
+    // and drifted out (selecting text, a fat-fingered button) must not dismiss it.
+    $('eqpop').onclick = (e)=>{ if(e.target === $('eqpop')) closeEqPop(); };
+    closeEqPop();
+    renderEquip();
+    return;
+  }
   const p = game.player;
   // LEFT PAGE — hunter record
   const left = $('tomeleft');
@@ -1611,60 +1630,305 @@ function renderTome(){
       div.appendChild(btn);
       right.appendChild(div);
     }
-  } else {
-    const weaponIds = Object.keys(progress.weaponGear);
-    const armorIds = Object.keys(progress.armorGear);
-    if(!weaponIds.length && !armorIds.length){
-      right.insertAdjacentHTML('beforeend', '<div class="invhint2" style="margin:10px 0">No gear found yet — weapons and armor you find on any hunt join your permanent collection here, and every duplicate you find after that stars it up.</div>');
-    }
-    if(weaponIds.length){
-      right.insertAdjacentHTML('beforeend', '<h3>⚔️ Weapons</h3>');
-      for(const id of weaponIds){
-        const w = WEAPONS_BY_ID[id]; if(!w) continue;
-        right.appendChild(renderGearCard('weapon', id, w));
+  }
+  // No `else` branch any more: the equipment spread returned above before this point. Leaving a
+  // dead second renderer here is how two views of one collection drift apart.
+}
+/* ================= the Equipment screen =================
+   A paper doll with the slots around the character, and the collection as a grid of tiles below.
+   Replaces a vertical list of wide cards, and the reason is information design rather than taste:
+   the old list showed three items per screen with a paragraph each, so comparing two weapons meant
+   scrolling and remembering. A grid shows the whole collection at once, and the two facts you
+   actually compare — rarity and how far along it is — are in the frame colour and the pip row, so
+   they read without any text at all.
+
+   ONE TILE RENDERER for both halves. A slot and a grid tile are the same item in two places, so
+   they are the same component with a different position; teaching two visual languages for one
+   thing is how a player stops trusting either.
+
+   DUPLICATES. progress.js is a COLLECTION model, not an instance model: a second Spore Blade is
+   not a second sword, it is progress toward that sword's next star (see README, gear collection).
+   The screen therefore shows banked duplicates as extra tiles — you asked to see multiple
+   instances of the same sword, and these are genuinely multiple things you own — but they are
+   drawn faded, hatched and labelled SHARD, because a tile that looks equippable and is not is a
+   lie the player will act on. Making them真 separate instances would mean deleting the star system
+   the whole progression hangs off; that is a design call, not a UI one. */
+const EQ_SLOTS = [
+  { id:'weapon', cap:'WEAPON',   el:'eqs-weapon' },
+  { id:'helmet', cap:'HELMET',   el:'eqs-helmet' },
+  { id:'ring',   cap:'RING',     el:'eqs-ring' },
+  { id:'charm',  cap:'CHARM',    el:'eqs-charm' },
+  { id:'elem',   cap:'ELEMENTAL',el:'eqs-elem' },
+];
+let eqFilter = 'all';       // all | weapon | armor
+let eqSel = null;           // { kind, id } — the tile whose detail strip is showing
+
+// Every item the player owns, flattened into what the grid draws. `shard` entries are banked
+// duplicates; they carry the same id so selecting one selects the item.
+function eqCollection(){
+  const out = [];
+  const push = (kind, id, def)=>{
+    if(!def) return;
+    const info = progress.gearInfo(kind, id, def.rarity);
+    if(!info) return;
+    out.push({ kind, id, def, info, shard:false });
+    for(let i=0;i<info.dupes;i++) out.push({ kind, id, def, info, shard:true });
+  };
+  if(eqFilter !== 'armor') for(const id of Object.keys(progress.weaponGear)) push('weapon', id, WEAPONS_BY_ID[id]);
+  if(eqFilter !== 'weapon') for(const id of Object.keys(progress.armorGear)) push('armor', id, ARMOR_BY_ID[id]);
+  // rarest first, then the most invested — the ordering a player scanning for "what is my best"
+  // actually wants, and it puts shards next to the item they belong to for free.
+  out.sort((a,b)=> b.def.rarity - a.def.rarity || a.id.localeCompare(b.id) || (a.shard?1:0)-(b.shard?1:0));
+  return out;
+}
+// can the player afford this item's next level right now — the green arrow's whole meaning
+function eqCanUp(info){ return !!(info && !info.maxedLevel && info.levelCost !== null && progress.coins >= info.levelCost); }
+
+/* The shared face of an item, used by both a slot and a tile. Returns innerHTML rather than nodes
+   because both callers rebuild wholesale on open — this is a modal, not a per-frame widget, so the
+   diff-based rule that governs the HUD does not buy anything here. */
+function eqFaceHTML(entry, opts){
+  const { def, info } = entry;
+  const rc = RARITY_COLORS[def.rarity];
+  // `none` collapses the row entirely at zero stars — see the note in the stylesheet
+  const pips = Array.from({length:6},(_,i)=>`<i class="${i<info.stars?'on':''}"></i>`).join('');
+  const lv = entry.shard ? 'SHARD' : 'Lv.' + info.level;
+  return `${opts && opts.cap ? `<span class="eqcap">${opts.cap}</span>` : ''}
+    <span class="eqpips${info.stars ? '' : ' none'}">${pips}</span>
+    <span style="filter:drop-shadow(0 2px 0 rgba(0,0,0,.25))">${def.icon}</span>
+    <span class="${opts && opts.slot ? 'eqlv' : 'tilelv'}" style="background:${rc};border-radius:8px;padding:0 4px">${lv}</span>
+    ${!entry.shard && eqCanUp(info) ? '<span class="equp">▲</span>' : ''}`;
+}
+function eqApplyFrame(el, def){
+  el.dataset.r = def.rarity;
+  el.style.setProperty('--rc', RARITY_COLORS[def.rarity]);
+}
+
+function renderEquip(){
+  const p = game.player;
+  if(!p) return;
+  // ---- purse
+  setHTML($('eqpurse'), `<span>🪙 ${progress.coins}</span><span>🌿 ${progress.myco}</span><span>🗝️ ${progress.lockpicks}</span>`);
+  // ---- the slots
+  for(const sl of EQ_SLOTS){
+    const el = document.getElementById(sl.el);
+    if(!el) continue;
+    el.className = 'eqslot';
+    el.removeAttribute('data-r');
+    el.onclick = null;
+    let entry = null;
+    if(sl.id === 'weapon' && p.equipped){
+      const def = WEAPONS_BY_ID[p.equipped];
+      const info = def && progress.gearInfo('weapon', p.equipped, def.rarity);
+      if(info) entry = { kind:'weapon', id:p.equipped, def, info, shard:false };
+    } else if(sl.id === 'elem'){
+      /* The elemental ring is per-run and has no collection entry at all, so it cannot go through
+         eqFaceHTML — it has no stars and no level, it has SECONDS. Drawn by hand for that reason,
+         and it earns a slot anyway because it is a thing the player is wearing. */
+      const r = p.elemRing;
+      // No card exists for it — an elemental ring is per-run and has no collection entry — so the
+      // slot must not LOOK clickable. A control that responds to nothing is worse than no control.
+      el.style.cursor = 'default';
+      if(r){
+        el.dataset.r = 3;
+        el.style.setProperty('--rc', '#' + new THREE.Color(r.color).getHexString());
+        el.innerHTML = `<span class="eqcap">${sl.cap}</span><span>${r.icon}</span>
+          <span class="eqlv" style="background:#${new THREE.Color(r.color).getHexString()};border-radius:8px;padding:0 4px">${Math.ceil(p.ringCharge)}s</span>`;
+      } else {
+        el.className = 'eqslot empty';
+        el.innerHTML = `<span class="eqcap">${sl.cap}</span>NONE`;
       }
+      continue;
+    } else if(sl.id !== 'weapon'){
+      const id = p.armor[sl.id];
+      const def = id && ARMOR_BY_ID[id];
+      const info = def && progress.gearInfo('armor', id, def.rarity);
+      if(info) entry = { kind:'armor', id, def, info, shard:false };
     }
-    if(armorIds.length){
-      right.insertAdjacentHTML('beforeend', '<h3>🪖 Armor</h3>');
-      for(const id of armorIds){
-        const a = ARMOR_BY_ID[id]; if(!a) continue;
-        right.appendChild(renderGearCard('armor', id, a));
-      }
+    if(entry){
+      eqApplyFrame(el, entry.def);
+      el.innerHTML = eqFaceHTML(entry, { cap: sl.cap, slot:true });
+      el.onclick = ()=>openEqPop(entry.kind, entry.id);
+      if(eqSel && eqSel.id === entry.id) el.classList.add('on');
+    } else {
+      el.className = 'eqslot empty';
+      el.innerHTML = `<span class="eqcap">${sl.cap}</span>NONE`;
     }
   }
-}
-// shared collection-card renderer for the Tome's Equipment tab — same math, same look,
-// whether it's a weapon or a piece of armor. stars come from finding duplicates (see
-// applyPowerup/addDupe); levels are bought with coins, capped by the current star tier.
-function renderGearCard(kind, id, def){
-  const info = progress.gearInfo(kind, id, def.rarity);
-  const div = document.createElement('div');
-  div.className = 'mut' + (info.maxedStars && info.maxedLevel ? ' maxed' : '');
-  const slotTag = kind==='armor' ? ` <span style="color:#8a6a3f;font-size:12px">(${def.slot})</span>` : '';
-  const dupeLine = info.maxedStars ? 'MAX STARS' : `${info.dupes}/${info.dupesNeed} dupes to next ★`;
-  div.innerHTML = `
-    <div class="icon" style="color:${RARITY_COLORS[def.rarity]}">${def.icon}</div>
-    <div class="info">
-      <div class="mname">${def.name}${slotTag}</div>
-      <div class="mdesc">${def.desc}</div>
-      <div class="pips" title="${info.stars}/6 stars">${Array.from({length:6},(_,i)=>`<div class="pip2${i<info.stars?' on':''}"></div>`).join('')}</div>
-      <div class="gearline">Lv.${info.level}${info.maxedLevel?' (MAX)':'/'+info.levelCap} &nbsp;•&nbsp; ×${info.mult.toFixed(2)} power &nbsp;•&nbsp; ${dupeLine}</div>
-    </div>`;
-  const btn = document.createElement('button');
-  btn.className = 'mutbtn';
-  if(info.maxedLevel){
-    btn.textContent = 'MAX LEVEL'; btn.disabled = true;
-  } else {
-    btn.textContent = `+LEVEL 🪙${info.levelCost}`;
-    if(progress.coins >= info.levelCost){
-      btn.onclick = ()=>{
-        if(progress.levelUpGear(kind, id)){ audio.gearUp(info.stars); renderTome(); updateHUD(); updateBackpack(); }
-      };
-    } else btn.disabled = true;
+  // ---- the live stat plaques. Read off the SAME getters combat uses, so this screen can never
+  // advertise a number the fight does not honour.
+  const wdef = WEAPONS_BY_ID[p.equipped];
+  const atk = Math.round((p.baseDmg + (wdef ? wdef.dmg : 0)) * p.dmgMult
+    * progress.gearMultOf('weapon', p.equipped) * (1 + p.getArmorBonus('dmg', game)));
+  const crit = Math.round((0.15 + (wdef ? wdef.crit : 0) + p.getArmorBonus('crit', game)) * 100);
+  setHTML($('eqstats'), `
+    <div class="eqstat">⚔️ ATK <b>${atk}</b></div>
+    <div class="eqstat">❤️ HP <b>${Math.round(p.maxHp)}</b></div>
+    <div class="eqstat">✳ CRIT <b>${crit}%</b></div>
+    <div class="eqstat">🌀 DEPTH <b>${progress.depth}</b></div>`);
+  // ---- filters
+  const filters = [['all','ALL'],['weapon','WEAPONS'],['armor','ARMOR']];
+  const fEl = $('eqfilters');
+  setHTML(fEl, filters.map(([k,label])=>
+    `<button class="ttab${eqFilter===k?' on':''}" data-f="${k}">${label}</button>`).join('')
+    + `<span style="margin-left:auto;font-size:11px;font-weight:700;color:#8a6a3f;letter-spacing:.1em">MY COLLECTION</span>`);
+  for(const b of fEl.querySelectorAll('[data-f]'))
+    b.onclick = ()=>{ eqFilter = b.dataset.f; audio.click(); renderEquip(); };
+  // ---- the grid
+  const grid = $('eqgrid');
+  const items = eqCollection();
+  grid.innerHTML = '';
+  if(!items.length){
+    grid.innerHTML = '<div class="eqempty">Nothing found yet. Weapons and armour you pick up on any hunt join your permanent collection here — and every duplicate after the first stars that item up.</div>';
   }
-  div.appendChild(btn);
-  return div;
+  items.forEach((entry, i)=>{
+    const t = document.createElement('div');
+    t.className = 'eqtile' + (entry.shard ? ' shard' : '')
+      + (!entry.shard && eqSel && eqSel.id === entry.id && eqSel.kind === entry.kind ? ' sel' : '');
+    eqApplyFrame(t, entry.def);
+    t.innerHTML = eqFaceHTML(entry, {});
+    t.title = entry.shard ? `${entry.def.name} duplicate — banked toward the next ★`
+      : `${entry.def.name} · ${entry.def.desc}`;
+    // a shard opens the SAME card as the item it belongs to — it is that item's progress, so
+    // sending the player somewhere else would be inventing a second thing that does not exist
+    makeActivatable(t, ()=>openEqPop(entry.kind, entry.id));
+    grid.appendChild(t);
+  });
 }
+/* THE ITEM CARD. A popup, not a strip: the strip cost the grid two rows of height permanently in
+   order to describe one item the player had already picked, and it could never be generous enough
+   to be worth that. A card is asked for, so it can afford to spend real space on the thing —
+   the full stat block, the star meter, the duplicate bar, and per-item stats that the list
+   version had no room for at all.
+
+   ONE renderer for weapons and armour, because the two share the entire progression model and
+   only differ in which stat lines they have. `statLines` is the only branch. */
+/* TWO STAT TABLES, NOT ONE, and this is the trap worth documenting: `dmg` and `atkSpeed` exist on
+   both weapons and armour and MEAN DIFFERENT THINGS on each.
+     - a weapon's `dmg` is an additive offset and can be negative (Bone Dagger is -3);
+       a ring's `dmg` is a fraction (Azure Sigil is +10%).
+     - a weapon's `atkSpeed` is a TIME multiplier where LOWER IS FASTER (dagger 0.72, cleaver 1.18);
+       a ring's `atkSpeed` is a bonus fraction where higher is better (Verdant Loop 0.05).
+   A single formatter over both produced "Attack speed +1" on a baseline sword — a number that is
+   not a bonus, printed as one. So each catalog gets its own table, each row owns its own
+   formatter, and a value equal to the baseline prints nothing at all rather than a decorative
+   "+0": a stat line the player can safely ignore is a stat line that should not be there. */
+const signPct = (frac)=> (frac >= 0 ? '+' : '−') + Math.round(Math.abs(frac)*100) + '%';
+// weapon swing speed: the stored number is a duration multiplier, so invert it to say what the
+// player actually feels
+const swingPct = (mult)=> mult <= 0 ? '' :
+  (mult < 1 ? '+' + Math.round((1/mult - 1)*100) + '% faster'
+            : '−' + Math.round((1 - 1/mult)*100) + '% slower');
+const EQ_WEAPON_STATS = [
+  { k:'dmg',       label:'Damage',      fmt:v=> (v > 0 ? '+' : '−') + Math.abs(v) },
+  { k:'range',     label:'Reach',       fmt:v=> (v > 0 ? '+' : '−') + Math.abs(v).toFixed(1) + ' m' },
+  { k:'crit',      label:'Crit chance', fmt:v=> signPct(v) },
+  { k:'atkSpeed',  label:'Swing speed', fmt:swingPct, base:1 },
+  { k:'knockback', label:'Knockback',   fmt:v=> signPct(v - 1), base:1 },
+];
+const EQ_ARMOR_STATS = [
+  { k:'hp',           label:'Max HP',       fmt:v=> '+' + v },
+  { k:'dmgReduction', label:'Damage taken', fmt:v=> '−' + Math.round(v*100) + '%' },
+  { k:'crit',         label:'Crit chance',  fmt:v=> signPct(v) },
+  { k:'atkSpeed',     label:'Attack speed', fmt:v=> signPct(v) },
+  { k:'dmg',          label:'Damage',       fmt:v=> signPct(v) },
+  { k:'lifesteal',    label:'Lifesteal',    fmt:v=> signPct(v) },
+  { k:'magnet',       label:'Pickup range', fmt:v=> signPct(v) },
+  { k:'dropBonus',    label:'Drop luck',    fmt:v=> signPct(v) },
+];
+const EQ_SPECIALS = {
+  cleave:'Hits everything in a wide arc', execute:'Bonus damage to wounded prey',
+  lifesteal:'Heals a share of the damage dealt',
+};
+function eqStatRows(kind, def){
+  const table = kind === 'weapon' ? EQ_WEAPON_STATS : EQ_ARMOR_STATS;
+  const rows = [];
+  for(const st of table){
+    const v = def[st.k];
+    if(v === undefined || v === null) continue;
+    if(v === (st.base ?? 0)) continue;                 // exactly baseline: say nothing
+    const txt = st.fmt(v);
+    if(!txt) continue;
+    rows.push(`<div class="poprow"><span>${st.label}</span><b>${txt}</b></div>`);
+  }
+  if(kind === 'weapon' && def.special && EQ_SPECIALS[def.special.type])
+    rows.push(`<div class="poprow"><span>Trait</span><b>${EQ_SPECIALS[def.special.type]}</b></div>`);
+  return rows.join('');
+}
+function openEqPop(kind, id){
+  eqSel = { kind, id };
+  renderEqPop();
+  $('eqpop').classList.remove('hidden');
+  audio.click();
+}
+function closeEqPop(){ $('eqpop').classList.add('hidden'); }
+game.closeEqPop = closeEqPop;
+
+function renderEqPop(){
+  const el = $('eqpopbody');
+  if(!eqSel) return;
+  const p = game.player;
+  const def = eqSel.kind === 'weapon' ? WEAPONS_BY_ID[eqSel.id] : ARMOR_BY_ID[eqSel.id];
+  const info = def && progress.gearInfo(eqSel.kind, eqSel.id, def.rarity);
+  if(!def || !info){ eqSel = null; return closeEqPop(); }
+  const rc = RARITY_COLORS[def.rarity];
+  const equipped = eqSel.kind === 'weapon' ? p.equipped === eqSel.id : p.armor[def.slot] === eqSel.id;
+  // "held" vs "owned" is a real distinction and the buttons must respect it: the collection is
+  // permanent across hunts, but wearing something still requires having found it THIS hunt.
+  const held = eqSel.kind === 'weapon' ? p.weapons.includes(eqSel.id)
+    : p.armorOwned[def.slot].includes(eqSel.id);
+  const stars = Array.from({length:6},(_,i)=>`<i class="${i<info.stars?'on':''}"></i>`).join('');
+  const fin = eqSel.kind === 'weapon' && def.finisher
+    ? `<div class="poprow"><span>Finisher</span><b>${def.finisher.name}</b></div>` : '';
+  el.style.setProperty('--rc', rc);
+  el.innerHTML = `
+    <div class="pophead">
+      <div class="popicon" style="--rc:${rc}">${def.icon}</div>
+      <div style="min-width:0">
+        <div class="poprar">${RARITIES[def.rarity].name.toUpperCase()}${eqSel.kind==='armor'?' · '+def.slot.toUpperCase():' · WEAPON'}</div>
+        <div class="popname">${def.name}</div>
+      </div>
+    </div>
+    <div class="popdesc">${def.desc}</div>
+    <div class="popgrid">
+      <div class="poprow"><span>Level</span><b>${info.level}${info.maxedLevel?' (MAX)':' / '+info.levelCap}</b></div>
+      <div class="poprow"><span>Total power</span><b>×${info.mult.toFixed(2)}</b></div>
+      ${fin}${eqStatRows(eqSel.kind, def)}
+    </div>
+    <div class="popstars" title="${info.stars} of 6 stars">${stars}
+      <span style="margin-left:auto;font-size:11px;font-weight:700;color:#8a6a3f">${
+        info.maxedStars ? 'MAX ★' : `${info.dupes}/${info.dupesNeed} to ★${info.stars+1}`}</span></div>
+    <div class="popdupe"><span style="width:${Math.round(info.dupeProgress01*100)}%"></span></div>
+    <div class="popbtns">
+      <button class="eqbtn" id="eqlevel">${info.maxedLevel ? 'MAX LEVEL' : '+LEVEL 🪙' + info.levelCost}</button>
+      <button class="eqbtn alt" id="eqwear">${equipped ? 'WORN' : held ? 'WEAR IT' : 'NOT ON YOU'}</button>
+    </div>
+    <div class="popnote">${
+      info.maxedStars ? 'Fully starred — every further duplicate refines into coins.'
+      : held ? 'Stars come from finding duplicates. Levels are bought with coins.'
+      : 'In your permanent collection, but not on you this hunt — find one to wear it.'}</div>`;
+  const lvl = document.getElementById('eqlevel');
+  if(info.maxedLevel || progress.coins < info.levelCost) lvl.disabled = true;
+  else lvl.onclick = ()=>{
+    if(progress.levelUpGear(eqSel.kind, eqSel.id)){
+      audio.gearUp(info.stars);
+      renderEquip(); renderEqPop();     // the card stays open: levelling is a thing you do twice
+      updateHUD(); updateBackpack();
+    }
+  };
+  const wear = document.getElementById('eqwear');
+  if(equipped || !held) wear.disabled = true;
+  else wear.onclick = ()=>{
+    if(eqSel.kind === 'weapon') p.equipWeapon(eqSel.id);
+    else p.equipArmor(def.slot, eqSel.id, game);
+    audio.click();
+    renderEquip(); renderEqPop(); updateHUD(); updateBackpack();
+  };
+}
+// innerHTML with the same "only write when it changed" guard the rest of the UI uses. Cheap here,
+// but it keeps a re-render from throwing away focus on a button the player is tabbing through.
+function setHTML(el, html){ if(el && el.__h !== html){ el.__h = html; el.innerHTML = html; } }
+
 function openTome(){
   if(game.state === 'tome') return;
   tomeReturn = game.state;
@@ -1677,6 +1941,10 @@ function openTome(){
 }
 function closeTome(){
   $('tome').classList.add('hidden');
+  // the equipment spread is a sibling of the book, not a child, so hiding the book does not hide
+  // it — leave it up and it survives into the next overlay
+  $('equipscreen').classList.add('hidden');
+  $('tome').classList.remove('equipmode');
   game.state = tomeReturn;
   if(tomeReturn === 'play') grabPointer();
   const overlayFor = { title:'title', intro:'intro', pause:'pause', over:'gameover', win:'victory' };
@@ -1844,6 +2112,10 @@ addEventListener('keydown', e=>{
     document.getElementById('mutebtn').textContent = 'MUTE: '+(m?'ON':'OFF'); }
   if(e.code === 'Escape' && game.state === 'play') pauseGame();
   else if(e.code === 'Escape' && game.state === 'pause') resumeGame();
+  // innermost surface first: Esc with an item card open closes the CARD, not the whole Tome.
+  // Getting this order wrong is the classic modal bug — one keypress dismissing two layers.
+  else if(e.code === 'Escape' && game.state === 'tome'
+     && $('eqpop') && !$('eqpop').classList.contains('hidden')) game.closeEqPop();
   else if(e.code === 'Escape' && game.state === 'tome') closeTome();
   else if(e.code === 'Escape' && game.state === 'inventory') closeInventory();
   if((e.code === 'Tab' || e.code === 'KeyI') && (game.state === 'play' || game.state === 'pause' || game.state === 'tome')){
