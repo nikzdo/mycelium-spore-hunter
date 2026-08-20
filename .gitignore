@@ -1,2 +1,5 @@
 screenshots/
 .wrangler/
+.playwright-mcp/
+# verification screenshots — evidence for a change, not part of the game
+shots/

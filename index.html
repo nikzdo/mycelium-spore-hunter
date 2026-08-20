@@ -11,6 +11,8 @@
 :root{
   --ink:#1c1410; --cream:#fff6e3; --amber:#ffb347; --leaf:#7ec850;
   --hp:#ff5a5a; --stam:#ffd94a; --rare:#4da6ff; --epic:#b46bff; --leg:#ffc23d;
+  /* one hue per currency, reused everywhere that currency appears, so the colour IS the label */
+  --coin:#ffe98a; --myco:#a8f0a0; --lockpick:#f2ddb0; --ess:#dcc6ff; --dry:#ffc4b4;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
 html,body{width:100%;height:100%;overflow:hidden;background:#0d0a14;font-family:'Fredoka',sans-serif;color:var(--cream)}
@@ -62,26 +64,143 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #hpfill{background:linear-gradient(180deg,#ff8a7a,#e33e3e)}
 #bosswrap{position:absolute;top:20px;left:50%;transform:translateX(-50%);width:min(560px,60vw);display:none}
 #bossfill{background:linear-gradient(180deg,#d9a6ff,#8b3fe0)}
-#pips{position:absolute;top:112px;left:24px;display:flex;gap:7px}
+#pips{position:absolute;top:120px;left:24px;display:flex;gap:7px}
 .pip{width:20px;height:20px;border:3px solid var(--ink);border-radius:50%;background:#3a2f4d;box-shadow:0 2px 0 var(--ink)}
 .pip.full{background:linear-gradient(180deg,#ffe98a,#ffb52e)}
-#gearhud{position:absolute;top:142px;left:24px;display:flex;gap:6px}
+#gearhud{position:absolute;top:148px;left:24px;display:flex;gap:6px}
 .gearslot{width:26px;height:26px;border:2px solid var(--ink);border-radius:8px;background:#241c33;
   display:flex;align-items:center;justify-content:center;font-size:14px;opacity:.35;box-shadow:0 2px 0 var(--ink);position:relative}
 .gearslot.on{opacity:1;box-shadow:0 0 0 2px var(--rc,#ffb347),0 2px 0 var(--ink)}
 .gearslot .gt{position:absolute;bottom:-6px;right:-6px;background:#ffe98a;color:var(--ink);font-size:8px;font-weight:700;
   border:1px solid var(--ink);border-radius:999px;padding:0 3px}
-#buffs{position:absolute;top:174px;left:24px;display:flex;gap:8px;flex-wrap:wrap;max-width:300px}
+#buffs{position:absolute;top:182px;left:24px;display:flex;gap:8px;flex-wrap:wrap;max-width:300px}
 .buff{width:38px;height:38px;border:3px solid var(--ink);border-radius:12px;background:linear-gradient(180deg,#3d3152,#241c33);
   display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 3px 0 var(--ink);position:relative}
 .buff .n{position:absolute;bottom:-7px;right:-7px;background:var(--amber);color:var(--ink);font-size:11px;font-weight:700;
   border:2px solid var(--ink);border-radius:999px;padding:0 5px}
-#kills{position:absolute;top:22px;right:24px;text-align:right;font-size:14px;font-weight:600;text-shadow:0 2px 0 var(--ink)}
-#kills .row{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-bottom:3px}
-.dot{width:12px;height:12px;border-radius:50%;border:2px solid var(--ink)}
-#coinhud{position:absolute;top:168px;right:24px;font-size:15px;font-weight:700;color:#ffe98a;text-shadow:0 2px 0 var(--ink)}
-#mycohud{position:absolute;top:192px;right:24px;font-size:15px;font-weight:700;color:#a8f0a0;text-shadow:0 2px 0 var(--ink)}
-#contracts{position:absolute;top:220px;right:24px;width:216px;display:flex;flex-direction:column;gap:6px}
+/* ---------- top-right column: wallet, then culled tally, then contracts ----------
+   ONE absolutely-positioned column owns the whole right side, and everything inside it is in
+   normal flow. Before this, #kills/#coinhud/#mycohud/#contracts each carried their own hardcoded
+   `top:`, and #contracts (220px) already sat on top of the injected lockpick wallet (216px) — four
+   independent magic numbers cannot stay non-overlapping through a font change or a new row, so
+   the stacking is a flex column instead. */
+#rightcol{position:absolute;top:18px;right:20px;width:250px;display:flex;flex-direction:column;gap:9px;align-items:stretch}
+/* COINS ARE THE SCORE, WHICH IS WHY THEY GET THE ONLY LARGE NUMBER ON SCREEN. Every source pays
+   them — mushroom kills, spore pods, sealed chests, critter stomps — so coins are the one figure
+   that always moves. Mycelium (contracts only) and essence (kills only) each see one slice of a
+   hunt, so neither can carry a headline; they read as the secondary row they are. */
+#currency{background:linear-gradient(180deg,rgba(50,38,66,.74),rgba(24,17,34,.8));
+  border:3px solid var(--ink);border-radius:18px;padding:9px 12px 10px;
+  box-shadow:0 4px 0 var(--ink),0 14px 30px rgba(0,0,0,.45);backdrop-filter:blur(3px)}
+#coinhud{font-size:38px;line-height:1.04;font-weight:700;color:var(--coin);text-align:right;
+  white-space:nowrap;text-shadow:0 3px 0 var(--ink),0 0 22px rgba(255,190,70,.35)}
+.curcap{text-align:right;font-size:10px;font-weight:700;letter-spacing:.2em;color:#f0dfbe;opacity:.92;
+  text-shadow:0 2px 0 var(--ink);margin:0 1px 8px 0}
+/* Pry-lockpicks gate EVERY sealed chest, so running dry is the one wallet fact that changes what you
+   should do next. It gets a full-width plaque above the other two rather than a third small pill. */
+#lockpickcell{display:flex;align-items:center;gap:8px;border:3px solid var(--ink);border-radius:12px;
+  padding:4px 9px;background:linear-gradient(180deg,#5a452e,#312418);box-shadow:0 3px 0 var(--ink)}
+#lockpickcell .cname2{font-size:10px;font-weight:700;letter-spacing:.13em;color:#f0e0c0;text-shadow:0 2px 0 var(--ink)}
+#lockpickval{margin-left:auto;font-size:22px;font-weight:700;color:var(--lockpick);text-shadow:0 2px 0 var(--ink)}
+#curow{display:flex;gap:7px;margin-top:7px}
+#curow .cur{flex:1;display:flex;align-items:center;justify-content:flex-end;
+  border:2px solid rgba(255,246,227,.22);border-radius:10px;padding:3px 8px;background:rgba(20,12,26,.5);
+  font-size:15px;font-weight:700;text-shadow:0 2px 0 var(--ink)}
+#mycohud{color:var(--myco)}
+#esshud{color:var(--ess)}
+/* The cheapest possible "what now": how much of this world is still worth walking to.
+   The dashed rule moves to the CAPTION, not the counts: the caption and the counts are one block
+   and the divider's job is to separate that block from the wallet above it. Left on #worldline it
+   cut the caption off from the numbers it names, which is the opposite of what item 06 asked for. */
+#worldcap{margin-top:9px;padding-top:7px;border-top:2px dashed rgba(255,246,227,.2)}
+#worldline{margin-top:3px;
+  font-size:11px;font-weight:600;line-height:1.45;color:#ece0c8;text-align:right;text-wrap:balance;
+  text-shadow:0 2px 0 var(--ink)}
+#killwrap{background:rgba(20,12,26,.5);border:2px solid rgba(255,246,227,.18);border-radius:12px;padding:6px 9px 7px}
+.collabel{font-size:9.5px;font-weight:700;letter-spacing:.22em;color:#e4d3b0;opacity:.75;text-align:right;
+  margin-bottom:5px;text-shadow:0 2px 0 var(--ink)}
+/* six rarities on one wrapped line, not six stacked lines — this is a tally, not a leaderboard */
+#kills{display:flex;flex-wrap:wrap;gap:5px 10px;justify-content:flex-end;font-size:13px;font-weight:600;
+  text-shadow:0 2px 0 var(--ink)}
+#kills .row{display:flex;gap:5px;align-items:center}
+.dot{width:11px;height:11px;border-radius:50%;border:2px solid var(--ink)}
+/* item 11 — the heal slot when you are actually hurt. Only ever on ONE slot and only under a
+   third HP (see the gate in updateBackpack), so the pulse still means something when it appears.
+   Honours prefers-reduced-motion by falling back to a static ring: the information is the ring,
+   the motion is only what makes it catch the eye. */
+.potslot.urgent{border-color:#ff9a8a!important;box-shadow:0 0 0 3px rgba(255,120,100,.45),0 3px 0 var(--ink)}
+.potslot.urgent{animation:healpulse .6s infinite alternate}
+@keyframes healpulse{from{box-shadow:0 0 0 2px rgba(255,120,100,.30),0 3px 0 var(--ink)}
+  to{box-shadow:0 0 0 6px rgba(255,120,100,.55),0 3px 0 var(--ink)}}
+@media (prefers-reduced-motion: reduce){ .potslot.urgent{animation:none} }
+#contracts{display:flex;flex-direction:column;gap:6px}
+/* ---- the hit combo counter ----
+   Everything here animates via transform/opacity/filter only, so a 40-hit chain never touches
+   layout. The one colour the whole widget wears is --ch, set per tier from main.js, which is why
+   the number, the label and the bar can never disagree about what tier you are on.
+   `transform-origin: left center` on the wrapper: a counter that grows from its centre drifts
+   away from the number's own left edge as the digit count changes, and the pop then reads as the
+   whole widget sliding rather than punching. */
+#combo{position:absolute;left:2.6%;top:37%;pointer-events:none;
+  opacity:0;transform:translateX(-14px) scale(.72) rotate(-3deg);
+  transition:opacity .16s ease-out, transform .22s cubic-bezier(.2,1.5,.35,1)}
+#combo.on{opacity:1;transform:translateX(0) scale(1) rotate(-3deg)}
+/* the lapse: fall away and out, so a chain ending has a shape instead of just vanishing */
+#combo.done{opacity:0;transform:translateX(0) translateY(16px) scale(.86) rotate(-3deg);
+  transition:opacity .34s ease-in, transform .34s ease-in}
+#combowrap{display:flex;align-items:baseline;gap:2px;transform-origin:left center}
+#combonum{font-family:'Gochi Hand',cursive;font-size:76px;line-height:.86;font-weight:400;
+  color:var(--ch,#fff6e3);font-variant-numeric:tabular-nums;
+  /* a heavy ink outline, not a glow: the number sits over open terrain of any brightness and the
+     toon look is drawn with ink, so it is drawn with ink here too */
+  text-shadow:0 0 0 var(--ink),3px 0 0 var(--ink),-3px 0 0 var(--ink),0 3px 0 var(--ink),
+    0 -3px 0 var(--ink),3px 3px 0 var(--ink),-3px 3px 0 var(--ink),3px -3px 0 var(--ink),
+    -3px -3px 0 var(--ink),0 7px 0 rgba(0,0,0,.35)}
+#combox{font-family:'Gochi Hand',cursive;font-size:38px;line-height:1;color:var(--ch,#fff6e3);
+  opacity:.85;text-shadow:2px 0 0 var(--ink),-2px 0 0 var(--ink),0 2px 0 var(--ink),0 -2px 0 var(--ink)}
+/* The label needs the SAME multi-directional ink as the number, not a drop shadow. It sits over
+   whatever terrain the fight happens on — measured against dense grass, a single 0 2px shadow left
+   "BRUTAL" almost unreadable while the outlined number beside it stayed crisp. Letter-spacing is
+   what makes the outline affordable here: spaced caps have gaps for the ink to sit in. */
+#combolabel{margin-top:-1px;font-size:14px;font-weight:700;letter-spacing:.3em;
+  color:var(--ch,#fff6e3);
+  text-shadow:2px 0 0 var(--ink),-2px 0 0 var(--ink),0 2px 0 var(--ink),0 -2px 0 var(--ink),
+    2px 2px 0 var(--ink),-2px 2px 0 var(--ink),2px -2px 0 var(--ink),-2px -2px 0 var(--ink)}
+#combobar{margin-top:5px;width:104px;height:6px;border:2px solid var(--ink);border-radius:999px;
+  background:rgba(0,0,0,.45);overflow:hidden}
+/* scaleX from the left, driven by ONE WAAPI animation per hit rather than a width write per frame */
+#combofill{height:100%;width:100%;transform-origin:left center;background:var(--ch,#fff6e3);
+  border-radius:999px}
+@media (prefers-reduced-motion: reduce){
+  #combo,#combo.done{transition:opacity .18s linear}
+}
+
+/* item 05 — the elemental ring chip. Anchored to the bottom-right of the action bar, so the two
+   things you spend in a fight (potions, ring) are in one place. `firing` is the only animated
+   state: a charge that visibly drains is what makes "seconds of holding" legible as a cost. */
+#ringslot{position:absolute;left:50%;bottom:14px;margin-left:224px;display:flex;gap:8px;align-items:center;
+  background:linear-gradient(180deg,rgba(50,38,66,.8),rgba(24,17,34,.86));border:3px solid var(--ink);
+  border-radius:14px;padding:6px 10px 6px 8px;box-shadow:0 4px 0 var(--ink);min-width:132px}
+#ringslot.empty{display:none}
+#ringicon{font-size:22px;line-height:1;filter:drop-shadow(0 2px 0 var(--ink))}
+#ringbody{flex:1;min-width:0}
+#ringtop{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+#ringname{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#ffe9b8;
+  text-shadow:0 2px 0 var(--ink)}
+#ringsecs{font-size:12px;font-weight:700;color:#fff6e3;text-shadow:0 2px 0 var(--ink);
+  font-variant-numeric:tabular-nums}
+#ringbar{height:7px;border:2px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.45);
+  overflow:hidden;margin:4px 0 3px}
+#ringfill{height:100%;width:100%;border-radius:999px;background:#ff7a24;transition:width .1s linear}
+#ringkey{font-size:9px;font-weight:700;letter-spacing:.18em;color:#e4d3b0;opacity:.8;
+  text-shadow:0 2px 0 var(--ink)}
+#ringslot.firing{border-color:#ffe9b8}
+#ringslot.firing #ringicon{animation:ringpulse .34s infinite alternate}
+@keyframes ringpulse{from{transform:scale(1)}to{transform:scale(1.18)}}
+/* The lockpick wallet lives in #currency now (see #lockpickcell). main.js injects its own
+   absolutely-positioned #lockpickhud at top:216px — retire any such duplicate rather than let two
+   lockpick counters sit on top of the panel. Safe to delete once main.js stops creating it. */
+#hud > #lockpickhud{display:none!important}
 .contract{display:flex;gap:8px;align-items:center;background:rgba(20,12,26,.55);border:2px solid rgba(255,246,227,.2);
   border-radius:12px;padding:6px 8px}
 .cicon{width:26px;height:26px;border-radius:50% 50% 50% 4px;border:2px solid var(--ink);flex:0 0 auto;
@@ -91,13 +210,25 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .cbar{height:7px;border:1px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.4);overflow:hidden;margin:3px 0 2px}
 .cfill{height:100%;background:linear-gradient(180deg,#c8f088,#7ec850);border-radius:999px;transition:width .18s ease-out}
 .cprog{font-size:10px;color:#e8e0d0}
-#harvestPrompt{position:absolute;top:56%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:19px;
+/* The chest line publishes its odds, so this pill carries a sentence too — capped and wrapping for
+   the same reason #announce is, or a 45%-per-lockpick prompt runs off the edge on a narrow window.
+   56% -> 51% because both of these are sentences that wrap: a two-line chest prompt reached within
+   8px of the two-line banner below it, and they are exactly the pair most likely to be up at once
+   (you pry a chest, the payout announces). The clearance is now 45px at 1280 and 96px at 700. */
+#harvestPrompt{position:absolute;top:51%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:17px;
   color:#eaffd8;text-shadow:0 2px 0 var(--ink);background:rgba(40,70,20,.55);padding:6px 20px;border-radius:999px;
-  border:2px solid rgba(180,255,140,.45);white-space:nowrap}
-.dmg.harvest{font-size:16px;font-weight:700}
-#objective{position:absolute;bottom:98px;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:20px;
+  border:2px solid rgba(180,255,140,.45);max-width:min(86vw,600px);text-align:center;line-height:1.3;text-wrap:balance}
+.dmg.harvest{font-size:9px;font-weight:700;letter-spacing:.02em;-webkit-text-stroke-width:2px}
+/* The zone label and the objective were two absolutely-positioned boxes pinned 50px apart, which
+   is a stack that only holds while the objective is one line. "Slay 6 more rare+ mushrooms to lure
+   the Bloom's ruler out" wraps to two lines at 700px and grew straight up through the label. One
+   flex column anchored off the bottom instead: the gap is declared, so extra lines push the label
+   up rather than into it, and #announce has a known clearance above the whole stack to keep. */
+#bottomstack{position:absolute;bottom:98px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:11px;max-width:min(88vw,560px)}
+#objective{font-family:'Gochi Hand';font-size:20px;text-align:center;line-height:1.25;
   color:#ffe9b8;text-shadow:0 2px 0 var(--ink);background:rgba(28,20,16,.45);padding:6px 22px;border-radius:999px;border:2px solid rgba(255,246,227,.25)}
-#zone{position:absolute;bottom:136px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink)}
+#zone{font-size:13px;letter-spacing:.2em;font-weight:700;color:#ffd9a0;text-shadow:0 2px 0 var(--ink);text-align:center}
 /* ---------- backpack (weapon + potion quickbar, bottom-center) ---------- */
 #backpack{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;
   background:rgba(20,12,26,.4);border:2px solid rgba(255,246,227,.18);border-radius:20px;padding:10px 14px}
@@ -151,14 +282,36 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
   background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
 /* ---------- tome tabs (alchemy / forge) ---------- */
-.tometabs{display:flex;gap:8px;justify-content:center;margin-bottom:10px}
+/* The shared tab bar. Both spreads are width:min(1060px,94vw), so the wrapper takes that width
+   and the bar aligns with the top-left corner of whichever one is showing — the buttons then sit
+   in the same place in both, which is the whole point. flex-start, not centre: a centred bar over
+   two spreads of identical width would also be stable, but the request was top-left, and left is
+   also where the eye lands first. */
+#tomewrap{width:min(1060px,94vw);display:flex;flex-direction:column;align-items:stretch;gap:9px}
+#tometabbar{display:flex;gap:8px;justify-content:flex-start;padding-left:4px}
+/* Both spreads give up the bar's height rather than overflowing the viewport with it, and they
+   give up a little MORE than the bar costs. Measured at 1280x720 with 82vh: bar 33 + gap 9 +
+   spread 590 + CLOSE TOME 64 + hint 25 came to exactly 720 — nothing clipped, but zero slack, so
+   any shorter window would have started cutting the top off the tab bar. 78vh leaves ~28 px. */
+#tomewrap .tomebook,#tomewrap #equipscreen{width:100%;height:min(628px,78vh)}
+.tometabs{display:none}
 .ttab{font-family:'Fredoka';font-weight:700;font-size:12px;letter-spacing:.06em;padding:7px 14px;border-radius:999px;
   border:2px solid #6b4a2a;cursor:pointer;background:rgba(255,250,235,.4);color:#6b3a1a}
 .ttab.on{background:linear-gradient(180deg,#ffcf6b,#f59b3c);box-shadow:0 2px 0 #6b4a2a}
-/* damage numbers */
-.dmg{position:fixed;z-index:30;font-weight:700;pointer-events:none;text-shadow:0 2px 0 var(--ink),0 0 12px rgba(0,0,0,.4);
-  animation:dmgpop .8s ease-out forwards;font-size:22px;color:#fff}
-.dmg.crit{font-size:30px;color:var(--leg)}
+/* damage numbers — several land in the same half-second during a fight, so the whole family is
+   sized to be readable while overlapping rather than sized as if each one arrived alone. The
+   relative hierarchy is what carries the meaning (crit reads bigger, harvest reads smaller), so
+   the family scales together: 22/30/16 -> 14/19/11 -> 11/15/9. `nowrap` keeps a two-digit hit on
+   one line near a screen edge, where the -50% translate is what pushes it out, not the wrapping.
+   The ring is the other half of the fix: a drop shadow alone leaves white digits sitting on lit
+   grass with nothing between them, so every glyph carries a closed outline in the same ink the
+   HUD borders use. `paint-order:stroke fill` is what keeps the stroke BEHIND the fill — without
+   it a 2.5px stroke at 11px eats the counters and the digit reads as a blob. */
+.dmg{position:fixed;z-index:30;font-weight:700;pointer-events:none;white-space:nowrap;
+  -webkit-text-stroke:2.5px var(--ink);paint-order:stroke fill;
+  text-shadow:0 1px 0 var(--ink),0 2px 7px rgba(0,0,0,.6);
+  animation:dmgpop .8s ease-out forwards;font-size:11px;color:#fff}
+.dmg.crit{font-size:15px;color:var(--leg);-webkit-text-stroke-width:3px}
 .dmg.player{color:#ff6b6b}
 @keyframes dmgpop{0%{transform:translate(-50%,0) scale(.4);opacity:0}15%{opacity:1;transform:translate(-50%,-14px) scale(1.25)}
   100%{transform:translate(-50%,-70px) scale(.9);opacity:0}}
@@ -168,14 +321,36 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   transform:translate(-50%,-100%);box-shadow:0 2px 0 rgba(0,0,0,.3)}
 .enemyhp.boss{width:96px;height:9px}
 .enemyhp .fill{height:100%;background:linear-gradient(180deg,#ff8a7a,#e33e3e);transition:width .12s ease-out}
-#announce{position:fixed;top:32%;left:50%;transform:translateX(-50%);z-index:40;font-size:clamp(30px,5vw,58px);font-weight:700;
-  color:var(--cream);text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,180,80,.6);opacity:0;pointer-events:none;letter-spacing:.04em;white-space:nowrap}
+/* The announce line stopped being two words ("LEVEL UP!") the moment it started naming the
+   counterplay ("Nearly out — F drinks Vitality, Shift dashes you clear"). A sentence set at 58px
+   with `nowrap` and no max-width can only run off both edges, so this is a sentence-sized banner
+   now: 58 -> 32 -> 26px, capped, centred, and allowed to take a second line. `balance` is what
+   makes that second line look chosen instead of leftover.
+
+   The vertical position is not taste, it is measured. main.js clamps the hover chip's anchor into
+   [40px, height-40px] and draws the chip ABOVE it, so a prop whose origin is off the top of the
+   view parks a chip at the very top — sampling a full demo run, the chip's box sits in 0-10% of
+   the height on 54% of frames, 10-22% on 24%, 22-34% on 20%, 34-46% on 16%, and 58-88% on under
+   1%. A banner anywhere in the upper two thirds therefore WILL collide with it eventually, which
+   is what "Shield — take one hit for free" landing on "Epic · 349 HP" was. So the banner lives in
+   the one quiet band, anchored off the bottom stack (25px above #zone) rather than at a percent,
+   which keeps that clearance fixed as the window changes height. The plate is the backstop: at
+   z-index 40 over the chip's 31, an overlap that does happen costs the chip, never the sentence —
+   and it is what makes the line readable over lit grass at all. */
+#announce{position:fixed;bottom:190px;left:50%;transform:translateX(-50%);z-index:40;
+  font-size:clamp(15px,2.2vw,26px);font-weight:700;width:max-content;max-width:min(84vw,600px);
+  text-align:center;line-height:1.2;text-wrap:balance;
+  background:rgba(20,12,26,.58);backdrop-filter:blur(3px);
+  border:2px solid rgba(255,246,227,.22);border-radius:18px;padding:8px 22px;
+  color:var(--cream);text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,180,80,.6);opacity:0;pointer-events:none;letter-spacing:.03em}
 #announce.show{animation:ann 2.6s ease-out forwards}
 @keyframes ann{0%{opacity:0;transform:translateX(-50%) scale(.6)}12%{opacity:1;transform:translateX(-50%) scale(1.08)}
   20%{transform:translateX(-50%) scale(1)}80%{opacity:1}100%{opacity:0}}
 #fps{position:fixed;bottom:8px;right:10px;z-index:60;font-size:11px;opacity:.6}
 /* ---------- XP bar + level badge ---------- */
-#xpwrap{position:absolute;top:52px;left:24px;width:min(320px,34vw);display:flex;align-items:center;gap:10px}
+/* The left column is a hardcoded stack too, and the HP bar's bottom edge (22 + 40) was landing
+   3px inside the XP label. Every top below is spaced off the box above it, measured, not guessed. */
+#xpwrap{position:absolute;top:68px;left:24px;width:min(320px,34vw);display:flex;align-items:center;gap:10px}
 #lvlbadge{flex:0 0 auto;width:44px;height:44px;border:3px solid var(--ink);border-radius:50%;
   background:radial-gradient(circle at 35% 30%,#ffe98a,#e8962e);color:var(--ink);font-weight:700;font-size:19px;
   display:flex;align-items:center;justify-content:center;box-shadow:0 3px 0 var(--ink),0 0 18px rgba(255,200,80,.5)}
@@ -184,8 +359,10 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #xpfill{background:linear-gradient(180deg,#fff3a0,#ffb52e)}
 #xplabel{font-size:11px;font-weight:700;letter-spacing:.1em;text-shadow:0 2px 0 var(--ink);margin-bottom:3px;color:#ffe9b8}
 /* ---------- level-up banner ---------- */
-#levelup{position:fixed;top:22%;left:50%;transform:translateX(-50%);z-index:41;pointer-events:none;opacity:0;
-  font-family:'Gochi Hand',cursive;font-size:clamp(40px,6vw,74px);color:#ffe98a;letter-spacing:.08em;white-space:nowrap;
+/* Same fix as #announce. That one moved to the bottom band, so these two can never meet. */
+#levelup{position:fixed;top:20%;left:50%;transform:translateX(-50%);z-index:41;pointer-events:none;opacity:0;
+  font-family:'Gochi Hand',cursive;font-size:clamp(26px,3.6vw,44px);color:#ffe98a;letter-spacing:.06em;
+  max-width:min(88vw,620px);text-align:center;line-height:1.12;text-wrap:balance;
   text-shadow:0 0 24px rgba(255,200,60,.9),0 4px 0 var(--ink),0 8px 30px rgba(0,0,0,.5)}
 #levelup.show{animation:lvl 2.2s ease-out forwards}
 @keyframes lvl{0%{opacity:0;transform:translateX(-50%) translateY(30px) scale(.5)}
@@ -245,16 +422,325 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .mut.locked{opacity:.55;filter:saturate(.5)}
 .mut.locked .mutbtn{background:linear-gradient(180deg,#b9b3c9,#7d7592);cursor:not-allowed}
 .mut:not(.locked):not(.maxed):hover{transform:translateY(-2px)}
+/* ============ the Equipment screen (paper doll + inventory) ============
+   Same parchment world as the Tome pages, so this reads as another spread of the same book
+   rather than a bolted-on menu — the frame, the ink border and the two type families are shared.
+   What is NOT shared is the information design: the Tome's other tabs are documents you read
+   top-to-bottom, and this is a screen you OPERATE, so it is a grid with state encoded in form
+   (frame colour = rarity, pip row = stars, arrow = affordable) rather than in sentences. */
+#equipscreen{color:#7a5a34;position:relative;width:min(1060px,94vw);height:min(660px,88vh);display:flex;flex-direction:column;
+  background:linear-gradient(178deg,#fff6e0,#f2e0bc 62%,#e8d2a8);
+  border:5px solid #6b4a2a;border-radius:26px;box-shadow:0 12px 0 rgba(0,0,0,.35),inset 0 0 60px rgba(160,110,50,.18);
+  padding:14px 16px 12px;gap:10px}
+#equipscreen.hidden{display:none}
+#tome.equipmode .tomebook{display:none}
+#eqhead{display:flex;align-items:center;gap:9px;flex:0 0 auto;min-height:22px}
+#eqpurse{margin-left:auto;display:flex;gap:12px;font-weight:700;font-size:15px;color:#6b3a1a}
+#eqbody{flex:1;display:flex;gap:14px;min-height:0}
+
+/* ---- the doll. Slots are absolutely positioned AROUND the figure, which is the whole idea:
+        a column of slots is a list, and a ring of slots is a character wearing things. ---- */
+#eqdoll{flex:0 0 372px;position:relative;border:3px solid #c8a86a;border-radius:20px;
+  background:radial-gradient(ellipse at 50% 42%,rgba(255,240,200,.9),rgba(226,200,152,.55));
+  display:flex;flex-direction:column;justify-content:flex-end;align-items:center;padding-bottom:10px}
+/* the arcane circle the hero stands on, straight from the reference — it is what stops the figure
+   floating in the middle of an empty panel */
+#dollring{position:absolute;left:50%;top:70%;transform:translate(-50%,-50%) rotateX(74deg);
+  width:212px;height:212px;border-radius:50%;
+  border:3px dashed rgba(180,120,60,.5);box-shadow:0 0 0 14px rgba(255,220,150,.22)}
+/* 1.28x the first pass. The figure is the subject of the panel and it was reading as a token
+   sitting between the slots rather than as the thing they belong to. */
+#dollart{position:absolute;left:50%;top:52%;transform:translate(-50%,-50%) scale(1.28);
+  transform-origin:50% 50%;width:96px;height:150px}
+#dollart div{position:absolute;border:3px solid var(--ink);box-shadow:0 3px 0 rgba(0,0,0,.18)}
+.dollcap{left:18px;top:0;width:60px;height:34px;border-radius:30px 30px 6px 6px;background:#e0433a}
+.dollface{left:22px;top:31px;width:52px;height:24px;border-radius:5px;background:#ffe6b8}
+.dolltunic{left:20px;top:50px;width:56px;height:62px;border-radius:10px 10px 14px 14px;background:#2f7d5c}
+/* a shade darker than the tunic on purpose: at this size an arm the same colour as the body
+   merges into it and the figure loses its shoulders */
+.dollarmL{left:2px;top:56px;width:18px;height:46px;border-radius:9px;background:#256448}
+.dollarmR{left:76px;top:56px;width:18px;height:46px;border-radius:9px;background:#256448}
+.dollegL{left:26px;top:110px;width:18px;height:38px;border-radius:5px 5px 8px 8px;background:#3a2a44}
+.dollegR{left:52px;top:110px;width:18px;height:38px;border-radius:5px 5px 8px 8px;background:#3a2a44}
+
+/* A slot is the same object as an inventory tile — same frame, same pips, same arrow — because
+   they are the same item in two places, and teaching two visual languages for one thing is how a
+   player stops trusting either. Only the position and the empty state differ. */
+.eqslot,.eqtile{position:relative;width:74px;height:74px;border:3px solid var(--ink);border-radius:14px;
+  background:linear-gradient(180deg,rgba(255,250,235,.95),rgba(228,204,158,.95));
+  box-shadow:0 3px 0 rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;
+  font-size:30px;cursor:pointer;flex:0 0 auto}
+.eqslot{position:absolute}
+/* Vertical spacing is 96 px per row, which is 74 of slot plus 22 of clearance — enough for the
+   pip row above one slot and the caption below the slot over it not to touch. */
+#eqs-helmet{left:50%;top:16px;transform:translateX(-50%)}
+#eqs-weapon{left:16px;top:130px}
+#eqs-ring{right:16px;top:130px}
+#eqs-charm{left:16px;top:244px}
+#eqs-elem{right:16px;top:244px}
+/* rarity lives in the FRAME, not in the icon: an icon is already carrying what the item is */
+.eqslot[data-r],.eqtile[data-r]{border-color:var(--rc,#6b4a2a);
+  box-shadow:0 0 0 2px rgba(255,255,255,.5) inset,0 3px 0 rgba(0,0,0,.25)}
+.eqslot.empty{opacity:.55;font-size:11px;font-weight:700;letter-spacing:.1em;color:#8a6a3f;
+  background:repeating-linear-gradient(45deg,rgba(200,168,106,.35) 0 6px,transparent 6px 12px)}
+.eqslot.on{outline:3px solid #ffcf6b;outline-offset:2px}
+.eqlv,.tilelv{position:absolute;bottom:-2px;left:0;right:0;text-align:center;font-size:10px;
+  font-weight:700;color:#fff6e3;text-shadow:0 1px 0 var(--ink),0 0 3px var(--ink)}
+/* The caption and the pip row both wanted the space above the slot and collided into unreadable
+   mush. The caption goes BELOW instead, under the level chip, because it is the least urgent of
+   the three: you learn where the helmet slot is once and never read the word again, whereas the
+   pips are a live progress read. */
+.eqcap{position:absolute;bottom:-27px;left:-6px;right:-6px;text-align:center;font-size:8.5px;
+  font-weight:700;letter-spacing:.16em;color:#8a6a3f;text-shadow:0 1px 0 rgba(255,250,235,.8)}
+/* the green up-arrow from the reference: "you can afford to improve this, right now" — the one
+   piece of state on the screen that is about the player's WALLET rather than the item */
+.equp{position:absolute;right:-6px;top:-6px;width:19px;height:19px;border-radius:50%;
+  background:#63c94a;border:2px solid var(--ink);color:#fff;font-size:11px;line-height:15px;
+  text-align:center;font-weight:700;box-shadow:0 2px 0 rgba(0,0,0,.3)}
+/* Hidden at zero stars, and that is the difference between a grid and a pin-board: six hollow
+   dots over every single tile is six dots of noise per tile telling you nothing. A pip row that
+   only appears once an item HAS a star means the row itself is information. */
+.eqpips{position:absolute;top:-9px;left:0;right:0;display:flex;gap:2px;justify-content:center}
+.eqpips.none{display:none}
+.eqpips i{width:5px;height:5px;border-radius:50%;background:rgba(90,60,30,.3);border:1px solid var(--ink)}
+.eqpips i.on{background:#ffcf6b}
+#eqstats{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;width:100%;padding:0 10px}
+.eqstat{display:flex;align-items:center;gap:6px;background:rgba(60,38,20,.1);
+  border:2px solid #c8a86a;border-radius:10px;padding:4px 9px;font-weight:700;font-size:13px;color:#6b3a1a}
+.eqstat b{font-variant-numeric:tabular-nums}
+
+/* ---- the inventory half ---- */
+#eqinv{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0}
+#eqfilters{display:flex;gap:7px;align-items:center;flex:0 0 auto}
+#eqfilters .ttab{font-size:11px;padding:5px 11px}
+#eqgrid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));
+  gap:16px 10px;align-content:start;padding:10px 6px 6px;
+  background:rgba(120,84,40,.10);border:2px solid #c8a86a;border-radius:14px}
+.eqtile{width:100%;aspect-ratio:1}
+.eqtile.sel{outline:3px solid #ffcf6b;outline-offset:2px}
+/* A banked duplicate is a real thing you own, so it gets a real tile — but it is not a second
+   usable weapon, and pretending otherwise would be a lie the player acts on. Hence: same frame,
+   faded, hatched, and labelled SHARD. */
+.eqtile.shard{opacity:.62;background:repeating-linear-gradient(45deg,rgba(200,168,106,.5) 0 5px,rgba(255,250,235,.85) 5px 10px)}
+.eqtile.shard .tilelv{font-size:8.5px;letter-spacing:.08em}
+.eqempty{grid-column:1/-1;padding:18px 10px;text-align:center;font-size:13px;color:#8a6a3f}
+#eqhint{flex:0 0 auto;text-align:center;font-size:12px;color:#8a6a3f;padding:2px 0 0}
+/* ---- the item card popup ----
+   Scoped inside #equipscreen so it cannot leak over the rest of the game, and absolutely
+   positioned over the whole spread rather than over the grid: an item card that only covers half
+   the screen looks like a tooltip that got stuck. */
+#eqpop{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(40,24,12,.42);border-radius:22px;z-index:5}
+#eqpop.hidden{display:none}
+/* An explicit base colour, NOT inherited. The card sits inside .overlay, which sets a light text
+   colour for dark screens — so every label that only said `<span>` came out near-white on
+   parchment and the left half of the stat block was invisible while the values were fine. Any
+   element that changes the surface under the text has to restate the text colour. */
+#eqpopcard{color:#7a5a34;position:relative;width:min(430px,86%);
+  background:linear-gradient(178deg,#fffaf0,#f4e4c4 70%,#ead8b4);
+  border:5px solid #6b4a2a;border-radius:22px;box-shadow:0 14px 0 rgba(0,0,0,.32);
+  padding:20px 22px 18px;animation:eqpopin .18s cubic-bezier(.2,1.5,.35,1)}
+@keyframes eqpopin{from{transform:scale(.88);opacity:0}to{transform:scale(1);opacity:1}}
+@media (prefers-reduced-motion: reduce){ #eqpopcard{animation:none} }
+#eqpopclose{position:absolute;right:-10px;top:-12px;width:32px;height:32px;border-radius:50%;
+  border:3px solid var(--ink);background:linear-gradient(180deg,#ff9a8a,#e0553f);color:#fff;
+  font-weight:700;font-size:14px;box-shadow:0 3px 0 #6b4a2a;cursor:pointer}
+#eqpopcard .pophead{display:flex;gap:14px;align-items:center}
+/* the icon gets its own big framed plate: the card's job is to make one item feel like a thing you
+   own, and the grid tile is too small to carry that */
+#eqpopcard .popicon{width:82px;height:82px;flex:0 0 auto;border:4px solid var(--rc,#6b4a2a);
+  border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:42px;
+  background:linear-gradient(180deg,rgba(255,250,235,.95),rgba(228,204,158,.95));
+  box-shadow:0 4px 0 rgba(0,0,0,.25)}
+#eqpopcard .popname{font-family:'Gochi Hand',cursive;font-size:29px;color:#6b3a1a;line-height:1.05}
+#eqpopcard .poprar{font-size:10.5px;font-weight:700;letter-spacing:.16em;color:var(--rc,#8a6a3f)}
+#eqpopcard .popdesc{margin-top:12px;font-size:13px;line-height:1.45;color:#7a5a34}
+#eqpopcard .poprow{display:flex;justify-content:space-between;gap:10px;font-size:12px;
+  color:#8a6a3f;padding:5px 0;border-bottom:1px dashed rgba(140,100,50,.3)}
+#eqpopcard .poprow b{color:#6b3a1a;font-variant-numeric:tabular-nums}
+#eqpopcard .popgrid{margin-top:12px}
+/* the star meter: the one number in the game that is bought with LUCK rather than coins, so it
+   gets a bar of its own instead of being a line of text among the stats */
+#eqpopcard .popstars{display:flex;gap:4px;margin-top:10px;align-items:center}
+#eqpopcard .popstars i{width:15px;height:15px;border-radius:50%;background:rgba(90,60,30,.22);
+  border:2px solid var(--ink)}
+#eqpopcard .popstars i.on{background:#ffcf6b}
+#eqpopcard .popdupe{height:8px;border:2px solid var(--ink);border-radius:999px;margin-top:8px;
+  background:rgba(0,0,0,.2);overflow:hidden}
+#eqpopcard .popdupe span{display:block;height:100%;background:linear-gradient(180deg,#ffe1a0,#f0a83c)}
+#eqpopcard .popbtns{display:flex;gap:9px;margin-top:15px}
+#eqpopcard .popbtns .eqbtn{flex:1}
+#eqpopcard .popnote{margin-top:9px;font-size:11.5px;color:#8a6a3f;text-align:center}
+.eqbtn{font-family:'Fredoka';font-weight:700;font-size:12px;padding:7px 13px;border-radius:999px;
+  border:3px solid var(--ink);background:linear-gradient(180deg,#ffcf6b,#f59b3c);color:#4a2a10;
+  box-shadow:0 3px 0 #6b4a2a;cursor:pointer}
+.eqbtn.alt{background:linear-gradient(180deg,#9fe07a,#5aac3c)}
+.eqbtn:disabled{background:#cbb896;color:#8a7a5a;box-shadow:0 3px 0 #8a7a5a;cursor:default}
+@media (max-width:900px){
+  /* the doll gives up its width first: the grid is the part you cannot use if it is cramped */
+  #eqdoll{flex:0 0 268px}
+  #eqs-weapon,#eqs-charm{left:6px} #eqs-ring,#eqs-elem{right:6px}
+  .eqslot{width:62px;height:62px;font-size:24px}
+}
+
 #tomeclose{margin:18px auto 0;display:block;font-family:'Fredoka';font-weight:600;font-size:16px;
   padding:10px 34px;border-radius:999px;border:3px solid var(--ink);cursor:pointer;
   background:linear-gradient(180deg,#9be26e,#58a839);color:var(--ink);box-shadow:0 4px 0 var(--ink)}
 .tomehint{text-align:center;font-size:12px;color:#c8b8e8;margin-top:10px;letter-spacing:.1em}
+/* ---------- item 44: tabular numerals ---------- */
+/* Every readout whose digits CHANGE while you read it. Proportional digits reflow the whole
+   line as a count ticks, which reads as jitter and hides the change itself. */
+#kills,#coinhud,#mycohud,#lockpickval,#esshud,#worldline,#lvlbadge,#xplabel,#fps,#bossname,.cprog,.tstat,.glvl,
+.buff .n,.gearslot .gt,.hotslot .htier,.potslot .pcnt,.potslot .ptimer,
+.essrow .cnt,.istats,.mut .cost,.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+/* ---------- item 45: zero-state, and HUD stats that ARE the control ---------- */
+/* A count of 0 is information. Greyed out, absence is legible at a glance instead of read. */
+.zero{opacity:.42;filter:saturate(.22)}
+#coinhud.zero,#mycohud.zero,#esshud.zero{color:#cfc6b4}
+/* Pry-lockpicks are the exception to "fade the zero". Fading is right for a count you merely have
+   none of; it is wrong for the one resource whose absence BLOCKS an interaction, because the
+   player has to notice it without looking for it. So an empty lockpick plaque doesn't recede — it
+   goes hollow and dashed and swaps its own label for what to do about it, which is legible as
+   "empty" before the digit is read at all. */
+#lockpickcell .cname2.none,#lockpickcell.zero .cname2.has{display:none}
+#lockpickcell.zero .cname2.none{display:block;color:var(--dry)}
+#lockpickcell.zero{opacity:1;filter:none;background:rgba(20,12,26,.45);
+  border-style:dashed;border-color:#7a5f4a;box-shadow:none}
+#lockpickcell.zero #lockpickval{color:#a89880}
+.potslot.zero{opacity:.4;filter:grayscale(.7)}
+.potslot.zero .pcnt,.buff.zero .n,.gearslot.zero .gt{background:#8e86a0;color:#241c33}
+/* The kill tally is six counters that all start at zero, so at run start the plaque is a row of
+   noughts and saturated dots claiming the same contrast as the currencies above it. A rarity you
+   have not met yet reads as a hollow dot — the outline still says the slot exists — and while all
+   six are zero the plaque itself recedes, because a panel with nothing to report should not be
+   competing for the eye. `:has()` is what lets "all six are zero" be a CSS state at all; the rows
+   stop double-fading inside a receded plaque so the two dims don't multiply into invisible. */
+#kills .row.zero{opacity:.32;filter:grayscale(1)}
+#kills .row.zero .dot{background:transparent!important;border-color:rgba(255,246,227,.45)}
+#killwrap:not(:has(.row:not(.zero))){opacity:.42;background:rgba(20,12,26,.3);border-color:rgba(255,246,227,.09)}
+#killwrap:not(:has(.row:not(.zero))) #kills .row.zero{opacity:.8}
+/* The ammo counter is the loadout switch, so it has to LOOK pressable. #hud is pointer-events:none,
+   so anything interactive inside it must re-arm pointer events for itself. */
+[data-weapon],[data-potion],[data-gear]{pointer-events:auto;cursor:pointer;
+  transition:transform .12s ease-out,box-shadow .12s ease-out,opacity .12s}
+[data-weapon]:hover,[data-potion]:hover,[data-gear]:hover{transform:translateY(-3px);opacity:1}
+[data-weapon]:active,[data-potion]:active,[data-gear]:active{transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+/* .sel marks the active choice — same ring language as .active/.on so the two can coexist. */
+.hotslot.sel,.potslot.sel{opacity:1;filter:none;
+  box-shadow:0 0 0 3px var(--rc,var(--amber)),0 3px 0 var(--ink),0 0 16px var(--rc,rgba(255,180,60,.6))}
+.gearslot.sel{opacity:1;box-shadow:0 0 0 2px var(--rc,var(--amber)),0 2px 0 var(--ink)}
+.hotslot.sel .hnum,.potslot.sel .pkey{background:var(--cream);color:var(--ink)}
+/* ---------- item 48: announcements name their kind ---------- */
+/* One neutral style makes a reward and a threat read the same. Colour + glow carry the kind;
+   contextual prompts stay in #harvestPrompt, which is a different job. */
+#announce.good{color:#eaffd8;text-shadow:0 4px 0 var(--ink),0 0 40px rgba(150,240,110,.65)}
+#announce.bad{color:#ffd0c4;text-shadow:0 4px 0 var(--ink),0 0 40px rgba(255,70,50,.7);letter-spacing:.08em}
+#announce.cool{color:#dcc6ff;text-shadow:0 4px 0 var(--ink),0 0 44px rgba(180,107,255,.75)}
+/* ---------- item 50: boot overlay ---------- */
+/* World generation is one long blocking frame. It cannot be hidden, only owned: say what is
+   happening, then fade out once the first real frame has landed so pop-in happens behind this. */
+#boot{z-index:70;opacity:0;visibility:hidden;pointer-events:none;
+  background:radial-gradient(ellipse at center,#241a33 0%,#0d0a14 78%);
+  transition:opacity .5s ease-out,visibility 0s linear .5s}
+#boot.on{opacity:1;visibility:visible;pointer-events:auto;transition:opacity .12s ease-out,visibility 0s}
+#boot .bootcap{font-size:clamp(44px,7vw,86px);line-height:1;filter:drop-shadow(0 10px 24px rgba(0,0,0,.6));
+  animation:bootbob 2.4s ease-in-out infinite}
+#boot .boottitle{margin-top:18px;font-size:clamp(20px,2.6vw,30px);font-weight:700;letter-spacing:.16em;
+  color:var(--cream);text-shadow:0 3px 0 var(--ink)}
+#boot .bootsub{margin-top:10px;font-family:'Gochi Hand',cursive;font-size:clamp(15px,1.8vw,20px);
+  color:#ffe9b8;opacity:.9;max-width:min(520px,86vw);line-height:1.5}
+#boot .bootbar{margin-top:22px;width:min(300px,64vw);height:12px;border:3px solid var(--ink);border-radius:999px;
+  background:rgba(20,12,26,.65);box-shadow:0 3px 0 var(--ink);overflow:hidden}
+/* Indeterminate on purpose: generation reports no progress, so a fake percentage would lie.
+   The sweep freezes during the stall — that IS the honest signal. */
+#boot .bootfill{height:100%;width:42%;border-radius:999px;background:linear-gradient(180deg,#ffcf6b,#f59b3c);
+  animation:bootsweep 1.5s ease-in-out infinite}
+@keyframes bootbob{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-9px) rotate(3deg)}}
+@keyframes bootsweep{0%{transform:translateX(-110%)}100%{transform:translateX(240%)}}
+/* ---------- narrow windows ----------
+   Both HUD columns are fixed-width, so the failure mode at ~700px is the two of them meeting in
+   the middle — and the boss bar and the announce banner are centred, i.e. they arrive exactly
+   where the gap is narrowest. Everything here is shrinking the furniture so that gap survives,
+   not hiding information: at this width the player still needs every currency. */
+@media (max-width:720px){
+  #rightcol{width:188px;top:14px;right:12px;gap:7px}
+  #currency{padding:8px 10px 9px;border-radius:15px}
+  #coinhud{font-size:28px}
+  #lockpickval{font-size:18px}
+  #lockpickcell{padding:3px 7px}
+  #lockpickcell .cname2{font-size:9px;letter-spacing:.08em}
+  #curow{gap:5px}
+  #curow .cur{font-size:13px;padding:2px 6px}
+  #worldline{font-size:10px;margin-top:7px}
+  /* At 700px the harvest prompt (top 51%, up to 86vw wide) reaches most of the way across, so the
+     counter moves UP out of its band and shrinks — it is still the biggest thing on the left. */
+  #combo{left:2%;top:25%}
+  #combonum{font-size:54px}
+  #combox{font-size:28px}
+  #combolabel{font-size:11px;letter-spacing:.22em}
+  #combobar{width:82px}
+  /* At this width the strip ABOVE the action bar is already taken — #bottomstack (zone +
+     objective) ends 4px from where a chip placed there would start, and the objective line is a
+     wrapping sentence, so "just nudge it up" only moves the collision. The action bar is centred
+     and 394px wide, which leaves a clear ~150px gutter on either side at exactly the same height:
+     the chip docks into the left one. Measured at 700x640: chip 8-140 x 560-606, bottomstack ends
+     542, action bar starts 153 — nothing touches. */
+  #ringslot{margin-left:0;left:8px;transform:none;bottom:10px;min-width:0;padding:4px 8px;gap:6px}
+  #ringicon{font-size:18px}
+  #ringkey{font-size:8px;letter-spacing:.12em}
+  /* six chits no longer fit one 168px line, and a wrapped flex row strands the sixth on its own.
+     A 3x2 grid is the same information with the second line looking chosen. */
+  #kills{display:grid;grid-template-columns:repeat(3,1fr);font-size:12px;gap:4px 6px}
+  #kills .row{justify-content:flex-end}
+  #contracts .cname{font-size:10px}
+  #contracts .cprog{font-size:9px}
+  .cicon{width:22px;height:22px;font-size:10px}
+  #hpwrap,#xpwrap{width:min(228px,32vw)}
+  #buffs{max-width:214px}
+  #lvlbadge{width:38px;height:38px;font-size:16px}
+  /* centred furniture, kept clear of the right column */
+  /* Centred at this width, the boss bar's left edge lands on the HP bar. Dropping it below the
+     HP/XP stack (which ends at 106px) is the only move that keeps both readable. */
+  #bosswrap{width:min(400px,40vw);top:112px}
+  /* The banner is bottom-anchored now, which already clears the right column (it reaches ~60% of
+     the height here) and the bottom stack. All this width needs is a tighter cap and less plate,
+     so three lines of sentence still fit between #zone and the contracts card. */
+  #announce{max-width:min(80vw,400px);padding:7px 16px;border-radius:15px;bottom:215px}
+  #levelup{max-width:min(74vw,420px)}
+  #harvestPrompt{max-width:78vw;font-size:15px;top:46%}
+}
+/* ---------- item 51: visible focus + reduced motion ---------- */
+:where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus{outline:none}
+:where(button,[tabindex],[data-weapon],[data-potion],[data-gear],.tbtn,.invbtn,.mutbtn,.ttab,.cta):focus-visible{
+  outline:3px solid var(--cream);outline-offset:3px;box-shadow:0 0 0 6px rgba(28,20,16,.65)}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important}
+  /* Transient banners are animation-driven: killing the animation outright would either strand
+     them on screen or skip them entirely, so swap in fade-only versions at the same timing. */
+  #announce.show{animation:annRM 2.6s ease-out forwards!important}
+  #levelup.show{animation:annRM 2.2s ease-out forwards!important}
+  .dmg{animation:dmgRM .8s ease-out forwards!important}
+  #boot .bootfill{animation:none!important;width:100%;opacity:.5}
+  #boot .bootcap{animation:none!important}
+  @keyframes annRM{0%{opacity:0}8%{opacity:1}80%{opacity:1}100%{opacity:0}}
+  @keyframes dmgRM{0%{opacity:0;transform:translate(-50%,-20px)}15%{opacity:1}100%{opacity:0;transform:translate(-50%,-20px)}}
+}
 </style>
 </head>
 <body>
 <div id="game"></div>
 <div id="grade"></div>
 <div id="dmgvin"></div>
+
+<!-- item 50: shown (class "on") right before world generation, removed after the first rendered
+     frame. Covers the generation stall and the pop-in that follows it. -->
+<div id="boot" class="overlay">
+  <div class="bootcap">🍄</div>
+  <div class="boottitle">GROWING THE VALLEY</div>
+  <div class="bootsub" id="bootnote">Seeding terrain, scattering the Bloom, fitting colliders. One long breath, then you're in.</div>
+  <div class="bootbar"><div class="bootfill"></div></div>
+</div>
 
 <div id="hud">
   <div id="hpwrap"><div class="barlabel">SPORE HUNTER</div><div class="bar"><div class="fill" id="hpfill" style="width:100%"></div></div></div>
@@ -266,13 +752,62 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   <div id="pips"></div>
   <div id="gearhud"></div>
   <div id="buffs"></div>
-  <div id="kills"></div>
-  <div id="coinhud">🪙 0</div>
-  <div id="mycohud">🌿 0</div>
-  <div id="contracts"></div>
+  <!-- The whole right side, in one flow. Coins headline it because coins are the only currency
+       every activity pays into, which is what makes them read as a score; the row under them is
+       everything else the player is holding, so nothing needs the Tome opened to be seen. -->
+  <div id="rightcol">
+    <div id="currency">
+      <div id="coinhud">🪙 0</div>
+      <div class="curcap">COINS BANKED</div>
+      <div id="lockpickcell" class="zero">
+        <span class="cname2 has">🗝️ LOCKPICKS</span>
+        <span class="cname2 none">🗝️ NONE — BURST A POD</span>
+        <span id="lockpickval" class="num">0</span>
+      </div>
+      <div id="curow">
+        <div class="cur" id="mycocell"><span id="mycohud">🌿 0</span></div>
+        <div class="cur" id="esscell"><span id="esshud">✦ 0</span></div>
+      </div>
+      <!-- item 06. The counts alone were unreadable: "24 pods · 6 chests · 10 critters · 4 gems"
+           floating under a wallet looks like more wallet, and a player reasonably asked what it
+           was. A caption fixes it for the price of one line — the numbers are unchanged, the
+           SENTENCE they belong to is what was missing. -->
+      <div class="curcap" id="worldcap">STILL OUT THERE</div>
+      <div id="worldline">Scouting the valley…</div>
+    </div>
+    <div id="killwrap">
+      <div class="collabel">BLOOM CULLED</div>
+      <div id="kills"></div>
+    </div>
+    <div id="contracts"></div>
+  </div>
   <div id="harvestPrompt" class="hidden"></div>
-  <div id="zone"></div>
-  <div id="objective">Hunt the Bloom</div>
+  <div id="bottomstack">
+    <div id="zone"></div>
+    <div id="objective">Hunt the Bloom</div>
+  </div>
+  <!-- The hit combo. Mid-left because it is the only large clear space on screen: the right
+       column is the wallet, the bottom is the action bar and the objective, the top-left is the
+       health/XP/dash stack. Deliberately OUTSIDE #hud's flow so its pop animation cannot reflow
+       anything — it scales and rotates, and a transform on an absolutely-positioned element is a
+       compositor-only change. -->
+  <div id="combo">
+    <div id="combowrap"><span id="combonum">0</span><span id="combox">×</span></div>
+    <div id="combolabel">HITS</div>
+    <div id="combobar"><div id="combofill"></div></div>
+  </div>
+  <!-- item 05 — the elemental ring slot. It sits beside the potion bar rather than in it because
+       it is not a potion: it is HELD, it has a charge rather than a count, and it has exactly one
+       slot. `empty` hides it entirely — a key label under an inert chip is a control that lies
+       about being available. -->
+  <div id="ringslot" class="empty">
+    <div id="ringicon">🔥</div>
+    <div id="ringbody">
+      <div id="ringtop"><span id="ringname">Fire</span><span id="ringsecs">0s</span></div>
+      <div id="ringbar"><div id="ringfill"></div></div>
+      <div id="ringkey">HOLD Z</div>
+    </div>
+  </div>
   <div id="backpack">
     <div id="bpWeapons"></div>
     <div class="bpdiv"></div>
@@ -333,10 +868,65 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 </div>
 
 <div id="tome" class="overlay hidden">
+  <!-- ONE tab bar for both spreads, and it lives OUT here on purpose. It used to be duplicated
+       inside each spread — centred on the Mutations page, top-left of the Equipment screen — so
+       switching tabs moved the very buttons you had just clicked, which is the one thing a tab
+       control must never do. Hoisting it into a wrapper that both spreads share means its position
+       is decided by the wrapper and cannot depend on which spread is up. -->
+  <div id="tomewrap">
+    <div id="tometabbar">
+      <button class="ttab" id="ttab-alch">MUTATIONS</button>
+      <button class="ttab" id="ttab-equip">EQUIPMENT</button>
+    </div>
   <div class="tomebook">
     <div class="tomepage left" id="tomeleft"></div>
     <div class="tomepage right" id="tomeright"></div>
   </div>
+  <!-- The Equipment screen is a PAPER DOLL, and it needs the full width of the book rather than
+       one page of it: the whole point of the layout is that the slots surround the character, and
+       you cannot surround anything inside a 500 px column. #tome.equipmode hides the two pages and
+       lets this take the space. Portrait reference is a phone (doll above, inventory below); the
+       landscape adaptation is doll BESIDE inventory, which keeps both above the fold. -->
+  <div id="equipscreen" class="hidden">
+    <div id="eqhead"><div id="eqpurse"></div></div>
+    <div id="eqbody">
+      <div id="eqdoll">
+        <div id="dollring"></div>
+        <div id="dollart">
+          <!-- the hunter, in the same four blocks the 3D model is built from: cap, face band,
+               tunic, legs. Drawn rather than rendered because a second WebGL view of the player
+               would mean a second camera and a second render pass for a paper doll. -->
+          <div class="dollcap"></div><div class="dollface"></div>
+          <div class="dolltunic"></div><div class="dollarmL"></div><div class="dollarmR"></div>
+          <div class="dollegL"></div><div class="dollegR"></div>
+        </div>
+        <div class="eqslot" id="eqs-helmet"></div>
+        <div class="eqslot" id="eqs-weapon"></div>
+        <div class="eqslot" id="eqs-ring"></div>
+        <div class="eqslot" id="eqs-charm"></div>
+        <div class="eqslot" id="eqs-elem"></div>
+        <div id="eqstats"></div>
+      </div>
+      <div id="eqinv">
+        <div id="eqfilters"></div>
+        <div id="eqgrid"></div>
+        <div id="eqhint" class="dhint">Click any item — worn or in the collection — to open its card.</div>
+      </div>
+    </div>
+    <!-- The item card. A POPUP rather than a strip along the bottom, because the strip forced
+         every item's full text to be on screen at all times: it cost the grid two rows of height
+         to describe one thing the player had already picked. A popup spends that space only when
+         asked, and it can afford to be generous when it does. Click-outside and Esc both close it,
+         and it traps nothing — the grid behind it stays readable, which is the point of a card
+         over a full screen. -->
+    <div id="eqpop" class="hidden">
+      <div id="eqpopcard">
+        <button id="eqpopclose" aria-label="Close">✕</button>
+        <div id="eqpopbody"></div>
+      </div>
+    </div>
+  </div>
+  </div><!-- /#tomewrap -->
   <button id="tomeclose">CLOSE TOME</button>
   <div class="tomehint">TAB / I / ESC to close &nbsp;•&nbsp; mutations and your gear collection are permanent across hunts</div>
 </div>
