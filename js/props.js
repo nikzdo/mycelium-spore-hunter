@@ -17,7 +17,7 @@
 //
 import * as THREE from 'three';
 import { toonMat, addOutline, paintStates, canvasStates, linearColor, anchorToBase,
-         makeProgressBar, RewardPops } from './fx.js';
+         makeProgressBar, glowTexture, RewardPops } from './fx.js';
 import { COLLIDERS, groundHeight, groundOnly, slopeAt, inExclusion, scatter } from './world.js';
 import { registerHeadHit, PLAYER_H } from './entities.js';
 import { mulberry32, deriveSeed } from './rng.js';
@@ -183,40 +183,126 @@ function podGeo(r, h){
   return anchorToBase(g).geo;
 }
 
-// a faceted crystal cluster: one tall point plus two shards, merged so the whole cluster is
-// ONE mesh. Emissive only — item 18's crystals spawn and despawn, and the README rule is that
-// nothing which does that gets a real PointLight.
-//
-// INVARIANT: each shard is a SIX-sided tapered prism capped with a six-sided point, and the cap
-// shares the body's segment count so their facets stay in phase. The facet count is the whole
-// read: an octahedron only ever shows two plates to the camera, so the rim highlight covers the
-// entire silhouette at once and a "gem" flattens into cut paper. Six vertical facets means the
-// band shading and the rim land on different plates, which is what makes it look cut.
-function crystalShard(r, bodyH, tipH){
-  // caps stay closed: the crystal floats at treasureLift, so its underside is on camera
-  const body = new THREE.CylinderGeometry(r*0.80, r*0.94, bodyH, 6, 1);
-  body.translate(0, bodyH*0.5, 0);
-  const tip = new THREE.ConeGeometry(r*0.80, tipH, 6, 1);
-  tip.translate(0, bodyH + tipH*0.5, 0);
-  return [nonIndexed(body), nonIndexed(tip)];
-}
-function crystalGeo(rng){
-  const parts = crystalShard(0.44, 1.22, 0.98);          // the point: ~2.2 m, the silhouette
-  for(let i=0;i<2;i++){
-    // one transform per SHARD, applied to both of its halves — roll the numbers before the loop
-    // or the body and the tip lean and land differently and the shard comes apart.
-    // stubby on purpose: a satellite as slender as the point reads as a flap of paper stuck to
-    // the side, not as a second crystal. Fat and short is what makes it a cluster.
-    const sub = crystalShard(0.19 + rng()*0.09, 0.26 + rng()*0.18, 0.30 + rng()*0.14);
-    const a = rng()*TAU, d = 0.34 + rng()*0.16, lean = 0.18 + rng()*0.22, lift = 0.05 + rng()*0.10;
-    for(const s of sub){
-      s.rotateZ(Math.cos(a)*lean); s.rotateX(-Math.sin(a)*lean);   // lean AWAY from the point
-      s.translate(Math.cos(a)*d, lift, Math.sin(a)*d);
-      parts.push(s);
+/* a faceted crystal cluster: four shards of falling height leaning off a shared base, merged so
+   the whole cluster is ONE mesh. Emissive only — item 18's crystals spawn and despawn, and the
+   README rule is that nothing which does that gets a real PointLight.
+
+   INVARIANT (the bug this exists to prevent): a shard is ONE continuously tapering spire, never a
+   prism with a cone on top. A constant-radius body plus a tall nose cone plus short flared
+   satellites round the foot is not a gem — it is a ROCKET, which is exactly what the previous
+   build read as: straight tube, nose cone, engine skirt. Three rules keep the silhouette a gem:
+     - every ring in the profile CHANGES radius, so there is no cylindrical section to read as a
+       fuselage. The widest ring sits low (the "belt"), which is what makes a shard look grown
+       rather than machined;
+     - the apex is pushed OFF-AXIS, so the termination reads as a cut face instead of a nose;
+     - no shard stands vertical, and the satellites are slender-and-tall rather than stubby-and-
+       flared, because a fat flared cone at the foot of a tall point is a fin.
+   Facet count is the other half of the read: an octahedron only ever shows two plates to the
+   camera, so the rim highlight covers the whole silhouette at once and a "gem" flattens into cut
+   paper. Five or six vertical facets, jittered so no two are the same width, put the toon bands
+   and the rim on different plates — that is what makes it look cut. */
+
+/* [yFrac, radiusFrac], bottom to top; the apex is implied at yFrac 1. Two rules:
+   - radiusFrac must never repeat twice in a row — a repeat IS a cylinder;
+   - keep the ring COUNT low. Rings are where the silhouette can bend, so four of them curve the
+     outline and the shard turns into a teardrop; three leave three tall bands of flat facets and
+     two hard slope changes, which is what reads as cut stone. The termination slope is steeper
+     than the body slope on purpose — that shoulder is the whole difference between a crystal
+     terminating and a cone coming to a point. */
+const SHARD_PROFILE = [[0.00, 0.34], [0.26, 1.00], [0.66, 0.58]];
+
+function shardGeo(rng, sides, r, h){
+  // the jitter is rolled ONCE per shard and reused by every ring, so a facet stays a single flat
+  // plane all the way up. Roll it per ring instead and the shard turns into a crumpled sack.
+  const jr = [], ja = [];
+  for(let i=0;i<sides;i++){ jr.push(0.74 + rng()*0.52); ja.push((rng()-0.5)*0.26); }
+  const rings = [];
+  for(const [yf, rf] of SHARD_PROFILE){
+    const ring = [];
+    for(let i=0;i<sides;i++){
+      const a = (i/sides)*TAU + ja[i], rr = r*rf*jr[i];
+      ring.push([Math.cos(a)*rr, yf*h, Math.sin(a)*rr]);
+    }
+    rings.push(ring);
+  }
+  const aa = rng()*TAU, ad = r*0.20*rng();
+  const apex = [Math.cos(aa)*ad, h, Math.sin(aa)*ad];
+  const foot = [0, 0, 0];                    // closed: the crystal floats, so its underside is on camera
+  const v = [];
+  const tri = (a, b, c)=>{ v.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2]); };
+  // winding is outward-facing (verified against the cross product, not guessed): get it backwards
+  // and every facet lights from behind while the ink hull covers the front.
+  for(let k=0;k<rings.length-1;k++){
+    const lo = rings[k], hi = rings[k+1];
+    for(let i=0;i<sides;i++){
+      const j = (i+1)%sides;
+      tri(lo[i], hi[j], lo[j]); tri(lo[i], hi[i], hi[j]);
     }
   }
+  const top = rings[rings.length-1];
+  for(let i=0;i<sides;i++) tri(top[i], apex, top[(i+1)%sides]);
+  for(let i=0;i<sides;i++) tri(foot, rings[0][i], rings[0][(i+1)%sides]);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  return g;                                  // non-indexed already; mergeGeos needs it that way
+}
+
+/* Proportions are the whole silhouette, and two of these numbers are the ones that were wrong.
+   ASPECT: a shard is at most ~3.5x as tall as it is wide. Past about 4:1 a tapering spire stops
+   being a crystal and becomes a missile no matter how it is faceted.
+   HEIGHT SPREAD: the second shard is ~78% of the first, not 30%. Small shards round the foot of
+   one dominant point are FINS; two shards of comparable height leaning opposite ways are a
+   cluster. The tilts grow as the shards shrink so the little ones splay outward like a druse
+   instead of standing to attention beside the big one. */
+const CRYSTAL_SHARDS = [
+  { sides:6, r:0.52, h:1.62, tilt:0.17, d:0.05 },
+  { sides:6, r:0.42, h:1.26, tilt:0.42, d:0.34 },
+  { sides:5, r:0.33, h:0.92, tilt:0.70, d:0.42 },
+  { sides:5, r:0.25, h:0.58, tilt:1.00, d:0.46 },
+];
+
+/* Treasure-glow tuning. MODULE scope, not the build block: update() reads the same numbers, and
+   a glow whose size is set in one place and ramped in another is a glow that drifts. */
+const HALO_R = 1.55;         // world half-size, and the ONE number that decides whether the glow
+                             // reads. It has to be much wider than the cluster (~0.65 m of
+                             // radius), because the texture's bright core sits behind the gem: the
+                             // wider the quad, the higher up the falloff the gem's edge lands, so
+                             // width and apparent brightness are the same dial. Past ~1.8 the
+                             // fringe reaches the ground and it goes back to being a pale disc.
+const HALO_ASPECT = 1.12;    // the cluster is taller than it is wide, so its light is too
+/* Opacity is the CORE of the falloff, and the core is behind the gem — which is why this number
+   looks reckless and is not. The texture is at alpha ~0.22 where the gem's silhouette ends, so
+   what the eye actually receives outside the gem is 0.72*0.22 ~ 0.16 of a pale cyan: a bloom, not
+   a wash. Tuned by measurement, not by taste: at 0.42 the glow was invisible in a mid shot, which
+   is how a treasure stops reading as treasure. The core can only clip if the gem gets narrower
+   than the texture core (0.29 m of radius) at HALO_Y, and no shard in CRYSTAL_SHARDS does. */
+const HALO_OP = 0.72;
+const HALO_OP_HOT = 1.00;    // hover: obviously hotter, and the exposed shoulder still lands ~0.22
+const HALO_Y = 0.86;         // up the crystal, not at its foot — the light comes from the body
+/* The ramps are the actual size cap. Below HALO_NEAR_OFF the glow is gone, so no camera position
+   can make it fill the frame; past HALO_FAR_START it fades out, because a treasure you cannot
+   resolve does not need a draw call. NEAR_FULL sits under CAM_DIST_MIN (4.2 m, main.js), so normal
+   play never sees the near ramp at all — it only catches a lens clipped into the prop. */
+const HALO_NEAR_OFF = 1.1, HALO_NEAR_FULL = 3.2;
+const HALO_FAR_START = 90, HALO_FAR_OFF = 120;
+
+function crystalGeo(rng){
+  const parts = [];
+  const a0 = rng()*TAU;
+  for(let i=0;i<CRYSTAL_SHARDS.length;i++){
+    const s = CRYSTAL_SHARDS[i];
+    const g = shardGeo(rng, s.sides, s.r*(0.90 + rng()*0.20), s.h*(0.90 + rng()*0.20));
+    // fan the shards round the axis instead of stacking them on one side: a cluster that leans
+    // all one way reads as a single broken spike, not as several crystals sharing a base.
+    const a = a0 + (i/CRYSTAL_SHARDS.length)*TAU + rng()*0.5;
+    const t = s.tilt*(0.7 + rng()*0.6);
+    g.rotateZ(Math.cos(a)*t); g.rotateX(-Math.sin(a)*t);     // lean away from the main spire
+    const d = s.d*(0.7 + rng()*0.6);
+    g.translate(Math.cos(a)*d, 0, Math.sin(a)*d);            // bases stay level, so they share one
+    parts.push(g);
+  }
   const geo = mergeGeos(parts);
-  geo.computeVertexNormals();
+  geo.computeVertexNormals();                // non-indexed, so this gives FLAT per-facet normals
   return anchorToBase(geo).geo;
 }
 
@@ -739,14 +825,27 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     const hot = keepMat(toonMat({ color: PAL.treasure.core, emissive: PAL.treasure.glow,
       emissiveIntensity: 0.68, rim: 0.72, rimColor: 0xffffff,
       coolTint: 0x5a9bc8, warmTint: 0xeafaff }));
-    // emissive + an additive shell, NEVER a PointLight: these despawn on pickup, and adding or
-    // removing a real light forces a shader recompile on every other material in the scene.
-    // The shell hugs the crystal (1.0, not 1.15): any wider and it stops reading as the crystal's
-    // own glow and starts reading as a pale disc laid over the ground behind it.
-    const haloGeo = keepGeo(new THREE.SphereGeometry(1.0, 10, 8));
-    const haloMat = keepMat(new THREE.MeshBasicMaterial({ color: PAL.treasure.glow,
-      transparent:true, opacity:0.10, blending:THREE.AdditiveBlending, depthWrite:false,
-      side: THREE.BackSide }));
+    /* emissive + an additive glow, NEVER a PointLight: these despawn on pickup, and adding or
+       removing a real light forces a shader recompile on every other material in the scene.
+
+       INVARIANT: the glow is a camera-facing BILLBOARD carrying fx.glowTexture(), never a shell.
+       Two bugs, one shape:
+       - LOOK. `opacity` is FLAT. An additive sphere therefore has constant alpha and renders as a
+         hard-edged DISC sitting behind the gem — the same bug as the mapless square halo, in round
+         form. Only the radial map gives a falloff, which is why fx says any billboarded glow must
+         carry it.
+       - COST. A shell is a thing the camera can stand INSIDE, and once it does it paints the whole
+         viewport with an additive layer at full strength, at every distance. Two triangles whose
+         world size we own cannot do that. (Measured: four deliberately full-screen additive shells
+         cost under a millisecond on this machine, so this is a ceiling being removed, not a fire
+         being put out — see the ramp below for the part that actually guarantees the ceiling.)
+       Sprite, not a quad we spin ourselves: the renderer billboards it for free, so the update
+       loop stays allocation-free and never touches a quaternion. */
+    const haloMat = keepMat(new THREE.SpriteMaterial({ map: glowTexture(),
+      color: PAL.treasure.glow, transparent:true, opacity: HALO_OP,
+      // fog OFF on purpose: fog mixes toward the fog colour, which on an additive layer means a
+      // distant glow ADDS sky to the sky. The distance ramp below does the fading instead.
+      blending: THREE.AdditiveBlending, depthWrite:false, fog:false }));
 
     // Fall back gracefully. The terrain wave is adding authored sites this wave and exposing them
     // on the world object; probe the plausible field names, then landmarks, then high ground. The
@@ -809,8 +908,12 @@ export function buildProps(scene, rng, world = {}, opts = {}){
         // trick assumes in the first place. Any tall, base-anchored prop needs this.
         const ink = addOutline(mesh, INK);
         ink.position.y = -crystalH*INK*0.5;
-        const halo = shared(new THREE.Mesh(haloGeo, haloMat));
-        halo.position.y = 0.78;
+        // one material clone per gem: the ramp is per-camera-distance, so the four cannot share
+        // an opacity. Same parameters means the same compiled program, so this is four uniforms,
+        // not four shaders. keepMat() puts each clone on the module's own teardown list.
+        const halo = shared(new THREE.Sprite(keepMat(haloMat.clone())));
+        halo.position.y = HALO_Y;
+        halo.scale.set(HALO_R*2, HALO_R*2*HALO_ASPECT, 1);
         halo.raycast = ()=>{};
         mesh.add(halo);
         root.add(mesh);
@@ -901,7 +1004,23 @@ export function buildProps(scene, rng, world = {}, opts = {}){
       if(tr.collected) continue;
       tr.mesh.position.y = tr.restY + Math.sin(t*P.treasureBobRate + tr.phase)*P.treasureBob;
       tr.mesh.rotation.y += dt*tr.spin;
-      tr.halo.scale.setScalar(1 + Math.sin(t*2.2 + tr.phase)*0.08);
+      /* The glow's size AND opacity both ride one 0..1 ramp `k`, so the billboard can never be the
+         biggest thing on screen however close the lens gets, and stops being drawn once it is too
+         far to read. Plain-number maths on four props: no allocation, no sqrt we don't need. */
+      let k = 1;
+      if(camera){
+        const cx = camera.position.x - tr.x, cy = camera.position.y - (tr.restY + HALO_Y),
+              cz = camera.position.z - tr.z;
+        const d = Math.sqrt(cx*cx + cy*cy + cz*cz);
+        k = smooth(clamp01((d - HALO_NEAR_OFF)/(HALO_NEAR_FULL - HALO_NEAR_OFF)))
+          * (1 - clamp01((d - HALO_FAR_START)/(HALO_FAR_OFF - HALO_FAR_START)));
+      }
+      tr.halo.visible = k > 0.02;
+      if(tr.halo.visible){
+        const s = HALO_R*2*(1 + Math.sin(t*2.2 + tr.phase)*0.08)*k;
+        tr.halo.scale.set(s, s*HALO_ASPECT, 1);
+        tr.halo.material.opacity = (tr.hovered ? HALO_OP_HOT : HALO_OP)*k;
+      }
       if(playerPos){
         const dx = playerPos.x - tr.x, dz = playerPos.z - tr.z;
         const dy = playerPos.y - tr.restY;

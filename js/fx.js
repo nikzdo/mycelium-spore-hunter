@@ -253,14 +253,40 @@ export class ParticlePool {
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos,3));
     geo.setAttribute('aColor', new THREE.BufferAttribute(this.col,4));
     geo.setAttribute('aSize', new THREE.BufferAttribute(this.sz,1));
+    /* INVARIANT (the bug this exists to prevent): an additive particle needs a CEILING on both
+       its on-screen size and its per-sprite alpha, because additive blending has no ceiling of
+       its own. Both halves of that were missing, and both symptoms came out of the same frame:
+         - `aSize * (300/dist)` is unbounded. A size-11 puff at the player, ~7.5 m from the lens,
+           is a 440-pixel sprite. main.js's level-up fires 58 of them at once. Overdraw goes as
+           the SQUARE of that number, which is how a burst turned 120 fps into 20.
+         - `smoothstep(0.5, 0.1, r)` held alpha at 1.0 across the inner fifth of every sprite —
+           a solid plate, not a glow. N overlapping plates sum to N, and under ACES at exposure
+           1.28 anything reaching 1.0 clips to flat white, so four particles were already paper.
+       The fix is a size cap (uMaxPx, in framebuffer pixels), a falloff that peaks at one pixel
+       instead of a fifth of the sprite, and a headroom factor so a handful can overlap and still
+       read as light. Tune the headroom, never the falloff's solid core — there isn't one now. */
+    const maxPx = (opts.maxPointPx ?? 96) *
+      Math.min(2, (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1));
     const mat = new THREE.ShaderMaterial({
       transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms: { uMaxPx: { value: maxPx } },
       vertexShader:`attribute vec4 aColor; attribute float aSize; varying vec4 vC;
-        void main(){ vC=aColor; vec4 mv=modelViewMatrix*vec4(position,1.0);
-        gl_PointSize = aSize * (300.0 / -mv.z); gl_Position = projectionMatrix*mv; }`,
+        uniform float uMaxPx;
+        void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0);
+        float dist = -mv.z;
+        gl_PointSize = min(aSize * (300.0 / dist), uMaxPx);
+        vC = aColor;
+        // and fade anything that gets BETWEEN the lens and the world: a puff at 0.6 m fills the
+        // viewport however small its world size, and the boom does shorten into the player.
+        vC.a *= smoothstep(0.55, 2.2, dist);
+        gl_Position = projectionMatrix*mv; }`,
       fragmentShader:`varying vec4 vC;
-        void main(){ vec2 d = gl_PointCoord - 0.5; float r = length(d);
-        float a = smoothstep(0.5, 0.1, r); gl_FragColor = vec4(vC.rgb, vC.a*a); if(gl_FragColor.a<0.01) discard; }`
+        void main(){ vec2 d = gl_PointCoord - 0.5;
+        float a = 1.0 - clamp(length(d)*2.0, 0.0, 1.0);
+        a = a*a*0.70;                       // squared falloff + headroom; see the invariant above
+        float al = vC.a*a;
+        if(al < 0.004) discard;
+        gl_FragColor = vec4(vC.rgb, al); }`
     });
     this.points = new THREE.Points(geo, mat);
     this.points.frustumCulled = false;
