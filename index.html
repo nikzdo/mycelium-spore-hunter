@@ -12,7 +12,7 @@
   --ink:#1c1410; --cream:#fff6e3; --amber:#ffb347; --leaf:#7ec850;
   --hp:#ff5a5a; --stam:#ffd94a; --rare:#4da6ff; --epic:#b46bff; --leg:#ffc23d;
   /* one hue per currency, reused everywhere that currency appears, so the colour IS the label */
-  --coin:#ffe98a; --myco:#a8f0a0; --spine:#f2ddb0; --ess:#dcc6ff; --dry:#ffc4b4;
+  --coin:#ffe98a; --myco:#a8f0a0; --lockpick:#f2ddb0; --ess:#dcc6ff; --dry:#ffc4b4;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
 html,body{width:100%;height:100%;overflow:hidden;background:#0d0a14;font-family:'Fredoka',sans-serif;color:var(--cream)}
@@ -81,12 +81,12 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 /* ---------- top-right column: wallet, then culled tally, then contracts ----------
    ONE absolutely-positioned column owns the whole right side, and everything inside it is in
    normal flow. Before this, #kills/#coinhud/#mycohud/#contracts each carried their own hardcoded
-   `top:`, and #contracts (220px) already sat on top of the injected spine wallet (216px) — four
+   `top:`, and #contracts (220px) already sat on top of the injected lockpick wallet (216px) — four
    independent magic numbers cannot stay non-overlapping through a font change or a new row, so
    the stacking is a flex column instead. */
 #rightcol{position:absolute;top:18px;right:20px;width:250px;display:flex;flex-direction:column;gap:9px;align-items:stretch}
 /* COINS ARE THE SCORE, WHICH IS WHY THEY GET THE ONLY LARGE NUMBER ON SCREEN. Every source pays
-   them — mushroom kills, spore pods, sealed cysts, critter stomps — so coins are the one figure
+   them — mushroom kills, spore pods, sealed chests, critter stomps — so coins are the one figure
    that always moves. Mycelium (contracts only) and essence (kills only) each see one slice of a
    hunt, so neither can carry a headline; they read as the secondary row they are. */
 #currency{background:linear-gradient(180deg,rgba(50,38,66,.74),rgba(24,17,34,.8));
@@ -96,20 +96,24 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   white-space:nowrap;text-shadow:0 3px 0 var(--ink),0 0 22px rgba(255,190,70,.35)}
 .curcap{text-align:right;font-size:10px;font-weight:700;letter-spacing:.2em;color:#f0dfbe;opacity:.92;
   text-shadow:0 2px 0 var(--ink);margin:0 1px 8px 0}
-/* Pry-spines gate EVERY sealed cyst, so running dry is the one wallet fact that changes what you
+/* Pry-lockpicks gate EVERY sealed chest, so running dry is the one wallet fact that changes what you
    should do next. It gets a full-width plaque above the other two rather than a third small pill. */
-#spinecell{display:flex;align-items:center;gap:8px;border:3px solid var(--ink);border-radius:12px;
+#lockpickcell{display:flex;align-items:center;gap:8px;border:3px solid var(--ink);border-radius:12px;
   padding:4px 9px;background:linear-gradient(180deg,#5a452e,#312418);box-shadow:0 3px 0 var(--ink)}
-#spinecell .cname2{font-size:10px;font-weight:700;letter-spacing:.13em;color:#f0e0c0;text-shadow:0 2px 0 var(--ink)}
-#spineval{margin-left:auto;font-size:22px;font-weight:700;color:var(--spine);text-shadow:0 2px 0 var(--ink)}
+#lockpickcell .cname2{font-size:10px;font-weight:700;letter-spacing:.13em;color:#f0e0c0;text-shadow:0 2px 0 var(--ink)}
+#lockpickval{margin-left:auto;font-size:22px;font-weight:700;color:var(--lockpick);text-shadow:0 2px 0 var(--ink)}
 #curow{display:flex;gap:7px;margin-top:7px}
 #curow .cur{flex:1;display:flex;align-items:center;justify-content:flex-end;
   border:2px solid rgba(255,246,227,.22);border-radius:10px;padding:3px 8px;background:rgba(20,12,26,.5);
   font-size:15px;font-weight:700;text-shadow:0 2px 0 var(--ink)}
 #mycohud{color:var(--myco)}
 #esshud{color:var(--ess)}
-/* The cheapest possible "what now": how much of this world is still worth walking to. */
-#worldline{margin-top:9px;padding-top:7px;border-top:2px dashed rgba(255,246,227,.2);
+/* The cheapest possible "what now": how much of this world is still worth walking to.
+   The dashed rule moves to the CAPTION, not the counts: the caption and the counts are one block
+   and the divider's job is to separate that block from the wallet above it. Left on #worldline it
+   cut the caption off from the numbers it names, which is the opposite of what item 06 asked for. */
+#worldcap{margin-top:9px;padding-top:7px;border-top:2px dashed rgba(255,246,227,.2)}
+#worldline{margin-top:3px;
   font-size:11px;font-weight:600;line-height:1.45;color:#ece0c8;text-align:right;text-wrap:balance;
   text-shadow:0 2px 0 var(--ink)}
 #killwrap{background:rgba(20,12,26,.5);border:2px solid rgba(255,246,227,.18);border-radius:12px;padding:6px 9px 7px}
@@ -120,11 +124,42 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   text-shadow:0 2px 0 var(--ink)}
 #kills .row{display:flex;gap:5px;align-items:center}
 .dot{width:11px;height:11px;border-radius:50%;border:2px solid var(--ink)}
+/* item 11 — the heal slot when you are actually hurt. Only ever on ONE slot and only under a
+   third HP (see the gate in updateBackpack), so the pulse still means something when it appears.
+   Honours prefers-reduced-motion by falling back to a static ring: the information is the ring,
+   the motion is only what makes it catch the eye. */
+.potslot.urgent{border-color:#ff9a8a!important;box-shadow:0 0 0 3px rgba(255,120,100,.45),0 3px 0 var(--ink)}
+.potslot.urgent{animation:healpulse .6s infinite alternate}
+@keyframes healpulse{from{box-shadow:0 0 0 2px rgba(255,120,100,.30),0 3px 0 var(--ink)}
+  to{box-shadow:0 0 0 6px rgba(255,120,100,.55),0 3px 0 var(--ink)}}
+@media (prefers-reduced-motion: reduce){ .potslot.urgent{animation:none} }
 #contracts{display:flex;flex-direction:column;gap:6px}
-/* The pry-spine wallet lives in #currency now (see #spinecell). main.js injects its own
-   absolutely-positioned #spinehud at top:216px — retire any such duplicate rather than let two
-   spine counters sit on top of the panel. Safe to delete once main.js stops creating it. */
-#hud > #spinehud{display:none!important}
+/* item 05 — the elemental ring chip. Anchored to the bottom-right of the action bar, so the two
+   things you spend in a fight (potions, ring) are in one place. `firing` is the only animated
+   state: a charge that visibly drains is what makes "seconds of holding" legible as a cost. */
+#ringslot{position:absolute;left:50%;bottom:14px;margin-left:224px;display:flex;gap:8px;align-items:center;
+  background:linear-gradient(180deg,rgba(50,38,66,.8),rgba(24,17,34,.86));border:3px solid var(--ink);
+  border-radius:14px;padding:6px 10px 6px 8px;box-shadow:0 4px 0 var(--ink);min-width:132px}
+#ringslot.empty{display:none}
+#ringicon{font-size:22px;line-height:1;filter:drop-shadow(0 2px 0 var(--ink))}
+#ringbody{flex:1;min-width:0}
+#ringtop{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+#ringname{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#ffe9b8;
+  text-shadow:0 2px 0 var(--ink)}
+#ringsecs{font-size:12px;font-weight:700;color:#fff6e3;text-shadow:0 2px 0 var(--ink);
+  font-variant-numeric:tabular-nums}
+#ringbar{height:7px;border:2px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.45);
+  overflow:hidden;margin:4px 0 3px}
+#ringfill{height:100%;width:100%;border-radius:999px;background:#ff7a24;transition:width .1s linear}
+#ringkey{font-size:9px;font-weight:700;letter-spacing:.18em;color:#e4d3b0;opacity:.8;
+  text-shadow:0 2px 0 var(--ink)}
+#ringslot.firing{border-color:#ffe9b8}
+#ringslot.firing #ringicon{animation:ringpulse .34s infinite alternate}
+@keyframes ringpulse{from{transform:scale(1)}to{transform:scale(1.18)}}
+/* The lockpick wallet lives in #currency now (see #lockpickcell). main.js injects its own
+   absolutely-positioned #lockpickhud at top:216px — retire any such duplicate rather than let two
+   lockpick counters sit on top of the panel. Safe to delete once main.js stops creating it. */
+#hud > #lockpickhud{display:none!important}
 .contract{display:flex;gap:8px;align-items:center;background:rgba(20,12,26,.55);border:2px solid rgba(255,246,227,.2);
   border-radius:12px;padding:6px 8px}
 .cicon{width:26px;height:26px;border-radius:50% 50% 50% 4px;border:2px solid var(--ink);flex:0 0 auto;
@@ -134,11 +169,11 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 .cbar{height:7px;border:1px solid var(--ink);border-radius:999px;background:rgba(0,0,0,.4);overflow:hidden;margin:3px 0 2px}
 .cfill{height:100%;background:linear-gradient(180deg,#c8f088,#7ec850);border-radius:999px;transition:width .18s ease-out}
 .cprog{font-size:10px;color:#e8e0d0}
-/* The cyst line publishes its odds, so this pill carries a sentence too — capped and wrapping for
-   the same reason #announce is, or a 45%-per-spine prompt runs off the edge on a narrow window.
-   56% -> 51% because both of these are sentences that wrap: a two-line cyst prompt reached within
+/* The chest line publishes its odds, so this pill carries a sentence too — capped and wrapping for
+   the same reason #announce is, or a 45%-per-lockpick prompt runs off the edge on a narrow window.
+   56% -> 51% because both of these are sentences that wrap: a two-line chest prompt reached within
    8px of the two-line banner below it, and they are exactly the pair most likely to be up at once
-   (you pry a cyst, the payout announces). The clearance is now 45px at 1280 and 96px at 700. */
+   (you pry a chest, the payout announces). The clearance is now 45px at 1280 and 96px at 700. */
 #harvestPrompt{position:absolute;top:51%;left:50%;transform:translateX(-50%);font-family:'Gochi Hand';font-size:17px;
   color:#eaffd8;text-shadow:0 2px 0 var(--ink);background:rgba(40,70,20,.55);padding:6px 20px;border-radius:999px;
   border:2px solid rgba(180,255,140,.45);max-width:min(86vw,600px);text-align:center;line-height:1.3;text-wrap:balance}
@@ -335,23 +370,23 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 /* ---------- item 44: tabular numerals ---------- */
 /* Every readout whose digits CHANGE while you read it. Proportional digits reflow the whole
    line as a count ticks, which reads as jitter and hides the change itself. */
-#kills,#coinhud,#mycohud,#spineval,#esshud,#worldline,#lvlbadge,#xplabel,#fps,#bossname,.cprog,.tstat,.glvl,
+#kills,#coinhud,#mycohud,#lockpickval,#esshud,#worldline,#lvlbadge,#xplabel,#fps,#bossname,.cprog,.tstat,.glvl,
 .buff .n,.gearslot .gt,.hotslot .htier,.potslot .pcnt,.potslot .ptimer,
 .essrow .cnt,.istats,.mut .cost,.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
 /* ---------- item 45: zero-state, and HUD stats that ARE the control ---------- */
 /* A count of 0 is information. Greyed out, absence is legible at a glance instead of read. */
 .zero{opacity:.42;filter:saturate(.22)}
 #coinhud.zero,#mycohud.zero,#esshud.zero{color:#cfc6b4}
-/* Pry-spines are the exception to "fade the zero". Fading is right for a count you merely have
+/* Pry-lockpicks are the exception to "fade the zero". Fading is right for a count you merely have
    none of; it is wrong for the one resource whose absence BLOCKS an interaction, because the
-   player has to notice it without looking for it. So an empty spine plaque doesn't recede — it
+   player has to notice it without looking for it. So an empty lockpick plaque doesn't recede — it
    goes hollow and dashed and swaps its own label for what to do about it, which is legible as
    "empty" before the digit is read at all. */
-#spinecell .cname2.none,#spinecell.zero .cname2.has{display:none}
-#spinecell.zero .cname2.none{display:block;color:var(--dry)}
-#spinecell.zero{opacity:1;filter:none;background:rgba(20,12,26,.45);
+#lockpickcell .cname2.none,#lockpickcell.zero .cname2.has{display:none}
+#lockpickcell.zero .cname2.none{display:block;color:var(--dry)}
+#lockpickcell.zero{opacity:1;filter:none;background:rgba(20,12,26,.45);
   border-style:dashed;border-color:#7a5f4a;box-shadow:none}
-#spinecell.zero #spineval{color:#a89880}
+#lockpickcell.zero #lockpickval{color:#a89880}
 .potslot.zero{opacity:.4;filter:grayscale(.7)}
 .potslot.zero .pcnt,.buff.zero .n,.gearslot.zero .gt{background:#8e86a0;color:#241c33}
 /* The kill tally is six counters that all start at zero, so at run start the plaque is a row of
@@ -411,12 +446,21 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   #rightcol{width:188px;top:14px;right:12px;gap:7px}
   #currency{padding:8px 10px 9px;border-radius:15px}
   #coinhud{font-size:28px}
-  #spineval{font-size:18px}
-  #spinecell{padding:3px 7px}
-  #spinecell .cname2{font-size:9px;letter-spacing:.08em}
+  #lockpickval{font-size:18px}
+  #lockpickcell{padding:3px 7px}
+  #lockpickcell .cname2{font-size:9px;letter-spacing:.08em}
   #curow{gap:5px}
   #curow .cur{font-size:13px;padding:2px 6px}
   #worldline{font-size:10px;margin-top:7px}
+  /* At this width the strip ABOVE the action bar is already taken — #bottomstack (zone +
+     objective) ends 4px from where a chip placed there would start, and the objective line is a
+     wrapping sentence, so "just nudge it up" only moves the collision. The action bar is centred
+     and 394px wide, which leaves a clear ~150px gutter on either side at exactly the same height:
+     the chip docks into the left one. Measured at 700x640: chip 8-140 x 560-606, bottomstack ends
+     542, action bar starts 153 — nothing touches. */
+  #ringslot{margin-left:0;left:8px;transform:none;bottom:10px;min-width:0;padding:4px 8px;gap:6px}
+  #ringicon{font-size:18px}
+  #ringkey{font-size:8px;letter-spacing:.12em}
   /* six chits no longer fit one 168px line, and a wrapped flex row strands the sixth on its own.
      A 3x2 grid is the same information with the second line looking chosen. */
   #kills{display:grid;grid-template-columns:repeat(3,1fr);font-size:12px;gap:4px 6px}
@@ -488,15 +532,20 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
     <div id="currency">
       <div id="coinhud">🪙 0</div>
       <div class="curcap">COINS BANKED</div>
-      <div id="spinecell" class="zero">
-        <span class="cname2 has">🦴 PRY-SPINES</span>
-        <span class="cname2 none">🦴 NONE — BURST A POD</span>
-        <span id="spineval" class="num">0</span>
+      <div id="lockpickcell" class="zero">
+        <span class="cname2 has">🗝️ LOCKPICKS</span>
+        <span class="cname2 none">🗝️ NONE — BURST A POD</span>
+        <span id="lockpickval" class="num">0</span>
       </div>
       <div id="curow">
         <div class="cur" id="mycocell"><span id="mycohud">🌿 0</span></div>
         <div class="cur" id="esscell"><span id="esshud">✦ 0</span></div>
       </div>
+      <!-- item 06. The counts alone were unreadable: "24 pods · 6 chests · 10 critters · 4 gems"
+           floating under a wallet looks like more wallet, and a player reasonably asked what it
+           was. A caption fixes it for the price of one line — the numbers are unchanged, the
+           SENTENCE they belong to is what was missing. -->
+      <div class="curcap" id="worldcap">STILL OUT THERE</div>
       <div id="worldline">Scouting the valley…</div>
     </div>
     <div id="killwrap">
@@ -509,6 +558,18 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   <div id="bottomstack">
     <div id="zone"></div>
     <div id="objective">Hunt the Bloom</div>
+  </div>
+  <!-- item 05 — the elemental ring slot. It sits beside the potion bar rather than in it because
+       it is not a potion: it is HELD, it has a charge rather than a count, and it has exactly one
+       slot. `empty` hides it entirely — a key label under an inert chip is a control that lies
+       about being available. -->
+  <div id="ringslot" class="empty">
+    <div id="ringicon">🔥</div>
+    <div id="ringbody">
+      <div id="ringtop"><span id="ringname">Fire</span><span id="ringsecs">0s</span></div>
+      <div id="ringbar"><div id="ringfill"></div></div>
+      <div id="ringkey">HOLD Z</div>
+    </div>
   </div>
   <div id="backpack">
     <div id="bpWeapons"></div>

@@ -79,6 +79,13 @@ let stemTex = null;
 const _fwd = new THREE.Vector3(), _tip = new THREE.Vector3(), _to = new THREE.Vector3();
 
 /* =============== MUSHROOM ENEMY =============== */
+/* Elemental scratch + tuning shared by every creature. ELEM_BURN_TICK is here rather than in
+   rings.js because it is a property of how a creature takes damage, not of the ring: 0.4 s is
+   coarse enough that a burn is a handful of hit() calls rather than one per frame, and fine enough
+   that the ticks still read as a rhythm. */
+const ELEM_BURN_TICK = 0.4;
+const BURN_FROM = new THREE.Vector3();   // reused: burn ticks must not allocate
+
 export class Mushroom {
   constructor(scene, rarityIdx, pos, zoneMult){
     const R = RARITIES[rarityIdx];
@@ -91,6 +98,13 @@ export class Mushroom {
     this.attackCd = 2 + Math.random()*2; this.lungeT = 0;
     this.vel = new THREE.Vector3(); this.kb = new THREE.Vector3();
     this.flash = 0; this.auraT = 0;
+    /* elemental status (rings.js). Two timers and two magnitudes — no objects, no arrays, because
+       these are read on every enemy every frame. `_baseSpeed` is captured lazily in update()
+       rather than here: Boss and GluttonBoss overwrite this.speed in their OWN constructors after
+       super() runs, so reading it now would bank the base mushroom's speed for a boss. */
+    this.burnT = 0; this.burnDps = 0; this.burnTick = 0;
+    this.chillT = 0; this.chillSlow = 0;
+    this._baseSpeed = undefined; this._elemLit = false;
     // item 57 wander/detour state. A heading is kept until it fails, and an alternative that
     // cleared is held for MOB_DETOUR seconds — the naive "add a fixed turn every blocked frame"
     // thrashes the same failing angle and reads as a broken animal.
@@ -174,6 +188,21 @@ export class Mushroom {
     scene.add(g);
     this.baseY = g.position.y;
   }
+  /* THE ONE DOOR for every elemental effect, whatever applied it. Effects REFRESH rather than
+     stack — max(), not += — and that is a balance decision, not laziness: a held cone re-touches
+     the same creature every frame, so a stacking burn would multiply by frame rate and a 60 Hz
+     player would do twice the damage of a 30 Hz one. Refresh-to-longest is the only rule that
+     makes a held emitter frame-rate independent. */
+  applyElement(kind, ring){
+    if(this.dead || !ring) return;
+    if(kind === 'burn'){
+      if(ring.burnDur > this.burnT) this.burnT = ring.burnDur;
+      if(ring.burnDps > this.burnDps) this.burnDps = ring.burnDps;
+    } else if(kind === 'chill'){
+      if(ring.chillDur > this.chillT) this.chillT = ring.chillDur;
+      if(ring.chillSlow > this.chillSlow) this.chillSlow = ring.chillSlow;
+    }
+  }
   hit(dmg, from, game, kbMult=1){
     if(this.dead) return;
     this.hp -= dmg; this.flash = 1;
@@ -252,6 +281,34 @@ export class Mushroom {
   update(dt, game){
     if(this.dead) return;
     this.t += dt;
+    /* Elemental tick, FIRST, because the AI below reads this.speed a dozen times and the chill has
+       to be in it before any of them. Writing this.speed is deliberately the whole mechanism: it
+       means chase, lunge, hop and wander are all slowed by construction instead of each needing to
+       remember to ask. `_baseSpeed` is captured here on the first frame — by which point every
+       constructor in the hierarchy has finished writing its own speed. */
+    if(this._baseSpeed === undefined) this._baseSpeed = this.speed;
+    if(this.chillT > 0){
+      this.chillT -= dt;
+      if(this.chillT <= 0){ this.chillT = 0; this.chillSlow = 0; this.speed = this._baseSpeed; }
+      else this.speed = this._baseSpeed * (1 - this.chillSlow);
+    }
+    if(this.burnT > 0){
+      this.burnT -= dt;
+      this.burnTick -= dt;
+      if(this.burnTick <= 0){
+        this.burnTick = ELEM_BURN_TICK;
+        // through hit(), so a burn kill pays essence, coins, XP and the kill counter exactly like
+        // a sword kill — one damage chokepoint, per the README. kbMult 0: fire does not shove.
+        // BURN_FROM is a module scratch offset from the creature itself; hit() normalizes
+        // (position - from), and a zero-length vector there would be NaN and launch it to infinity.
+        BURN_FROM.copy(this.group.position); BURN_FROM.z -= 1;
+        this.hit(this.burnDps*ELEM_BURN_TICK, BURN_FROM, game, 0);
+        if(this.dead) return;
+        if(game.particles) game.particles.puff(this.group.position.x, this.group.position.y + 0.9*this.R.scale,
+          this.group.position.z, { color:0xff8a2a, n:2, size:8, life:0.42, rise:2.6, spread:1.1, grav:-1.4, alpha:0.8 });
+      }
+      if(this.burnT <= 0){ this.burnT = 0; this.burnDps = 0; }
+    }
     const g = this.group;
     const player = game.player;
     const toP = player.group.position.clone().sub(g.position); toP.y = 0;
@@ -361,6 +418,19 @@ export class Mushroom {
       this.cap.material.emissive.copy(this._rc);
       if(this.aura) this.aura.material.color.copy(this._rc);
       if(this.groundRing) this.groundRing.material.color.copy(this._rc);
+    }
+    /* Elemental tint LAST, so it beats both the hit flash and the mythic hue cycle above — both of
+       those write cap.material.emissive every frame, so anything written before them is erased.
+       `_elemLit` is what restores emissBase exactly once when the last effect expires: without it
+       either the tint sticks forever or every un-lit creature pays an emissive write per frame. */
+    if(this.burnT > 0 || this.chillT > 0){
+      const b = this.emissBase, f = Math.max(0, this.flash);
+      if(this.burnT > 0) this.cap.material.emissive.setRGB(b.r + f + 0.55, b.g + f*0.3 + 0.16, b.b + f*0.2);
+      else this.cap.material.emissive.setRGB(b.r + f, b.g + f*0.3 + 0.22, b.b + f*0.2 + 0.52);
+      this._elemLit = true;
+    } else if(this._elemLit && this.flash <= 0){
+      this.cap.material.emissive.copy(this.emissBase);
+      this._elemLit = false;
     }
     this.blob.position.y = 0.05 - (g.position.y - this.baseY);
   }
@@ -606,6 +676,13 @@ export class Player {
     // backpack potions (stack counts) + active booster timers (seconds remaining)
     this.potions = { power:0, haste:0, swift:0, vitality:0, fortify:0 };
     this.potionTimers = { power:0, haste:0, swift:0, fortify:0 };
+    /* rings.js — the elemental ring slot. Per-run state, so it lives here and is discarded with
+       the hunt, exactly like `potions` and unlike anything in progress.js. ONE slot: picking up a
+       second ring replaces the first, which is the whole reason the HUD only ever has to show one
+       charge bar. `ringCharge` is in SECONDS of holding remaining, so the bar the player reads and
+       the number the drain subtracts are the same quantity. */
+    this.elemRing = null;      // a RINGS entry, or null
+    this.ringCharge = 0;       // seconds left. 0 with a ring set means spent-and-not-yet-cleared.
     // armor: one equipped id per slot + everything found this run (forge tiers persist in Progress)
     this.armor = { helmet:null, ring:null, charm:null };
     this.armorOwned = { helmet:[], ring:[], charm:[] };
@@ -1061,6 +1138,9 @@ export class Powerup {
     let orbGeo;
     if(def.shape === 'coin') orbGeo = new THREE.CylinderGeometry(0.38, 0.38, 0.09, 14);
     else if(def.shape === 'gem') orbGeo = new THREE.OctahedronGeometry(0.36, 0);
+    // a ring drop is a RING: the hole is the entire read, and a torus is the only shape in this
+    // list you can identify from the silhouette alone at pickup distance
+    else if(def.shape === 'ring') orbGeo = new THREE.TorusGeometry(0.30, 0.11, 8, 16);
     else orbGeo = new THREE.IcosahedronGeometry(0.5, 1);
     const orb = new THREE.Mesh(orbGeo,
       toonMat({ color:def.color, emissive:def.color, emissiveIntensity:0.9, rim:0.9 }));

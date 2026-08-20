@@ -7,10 +7,12 @@ import { buildInteractiveProps, PROP_PARAMS } from './props.js';
 import { buildFauna, FAUNA } from './fauna.js';
 import { GameAudio } from './audio.js';
 import { mulberry32, deriveSeed, randomSeed } from './rng.js';
-import { Progress, MUTATIONS, XP_PER_HIT, XP_PER_BOSS_HIT, xpForLevel, depthMult } from './progress.js';
+import { Progress, MUTATIONS, XP_PER_HIT, XP_PER_BOSS_HIT, xpForLevel, depthMult,
+  questKind } from './progress.js';
 import { WEAPONS, WEAPONS_BY_ID } from './weapons.js';
 import { ARMOR, ARMOR_BY_ID, ARMOR_SLOTS, SLOT_ICON } from './armor.js';
 import { POTIONS, POTIONS_BY_ID } from './potions.js';
+import { RINGS, RINGS_BY_ID, RING_KEY, RING_KEY_LABEL } from './rings.js';
 import { SPECIES_BY_ID, hexCss } from './mushrooms.js';
 import { rollBossTrait } from './bossTraits.js';
 
@@ -266,9 +268,9 @@ function pickupText(worldPos, text, color){
   if(rec) rec.el.style.color = color;
 }
 /* ---------- hover tags (item 47) ----------
-   Naming the thing is not enough — the tag names the VERB. "🥚 Sealed cyst" tells you nothing;
-   "🥚 Sealed cyst — [E] pry with a spine (3 held)" tells you what to do about it. Props join a
-   registry with a label provider, so a later wave's pods/cysts/vents get tags for free:
+   Naming the thing is not enough — the tag names the VERB. "🧰 Sealed chest" tells you nothing;
+   "🧰 Sealed chest — [E] pry with a lockpick (3 held)" tells you what to do about it. Props join a
+   registry with a label provider, so a later wave's pods/chests/vents get tags for free:
 
      const off = game.hoverTags.register(prop.group, ()=> '🪙 12 coins — walk over it',
                                          { range: 20, lift: 1.4 });
@@ -361,26 +363,55 @@ function updateHoverTag(dt){
   if(l !== tagL || t !== tagT){ tagL = l; tagT = t; tagEl.style.left = l+'px'; tagEl.style.top = t+'px'; }
 }
 
+/* item 08 — a contract row has to read for SIX kinds now, not one, so the two things that used to
+   come from the species (the swatch colour and the icon) come from the kind when there is no
+   species. The NAME is the objective sentence rather than a noun: "Harvest 7 Azure Cap" tells you
+   what to do, "Azure Cap" only tells you what the quest is about — and for a vent or a chest
+   quest a bare noun tells you nothing at all. progress.contractLabel() owns the phrasing so this
+   and the Tome cannot drift. */
+const QUEST_TINT = { harvest:'#9be26e', pod:'#ff9dc4', chest:'#ffd79a', vent:'#c8a0ff',
+                     stomp:'#ffcf5a', gem:'#8fe8ff' };
+function contractFace(c){
+  const kind = c.kind || 'harvest';
+  const sp = kind === 'harvest' ? SPECIES_BY_ID[c.species] : null;
+  return {
+    icon: sp ? sp.icon : questKind(kind).icon,
+    tint: sp ? hexCss(sp.color) : (QUEST_TINT[kind] || '#9be26e'),
+    label: progress.contractLabel(c, sp && sp.name),
+  };
+}
 function updateContracts(){
   const el = $('contracts'); if(!el) return;
   el.innerHTML = progress.contracts.map(c=>{
-    const sp = SPECIES_BY_ID[c.species];
+    const f = contractFace(c);
     const pct = Math.min(100, c.have/c.need*100);
     return `<div class="contract">
-      <div class="cicon" style="background:${hexCss(sp.color)}">${sp.icon}</div>
+      <div class="cicon" style="background:${f.tint}">${f.icon}</div>
       <div class="cinfo">
-        <div class="cname">${sp.name}</div>
+        <div class="cname">${f.label}</div>
         <div class="cbar"><div class="cfill" style="width:${pct}%"></div></div>
         <div class="cprog">${c.have}/${c.need} &nbsp;•&nbsp; +${c.reward} 🌿</div>
       </div>
     </div>`;
   }).join('');
 }
+/* ONE payout announce for every quest kind, so a finished vent contract sounds exactly like a
+   finished harvest contract — which is the point of having one board. Callers pass the result of
+   any progress.advanceQuests()/harvestFor() call plus where on screen it happened. */
+function payQuests(res, x, y, z){
+  if(!res || !res.completed.length) return 0;
+  updateContracts();
+  const paid = res.completed.reduce((a,c)=>a+c.reward, 0);
+  audio.contract();          // its own cue — a contract payout is not an alchemy purchase
+  if(x !== undefined) rewardPops.pop(x, y, z, 6);
+  announce('✅ Contract paid +' + paid + ' 🌿 — spend it in the Tome', 'good');
+  return paid;
+}
 game.updateContracts = updateContracts;
 
 /* ================= interactive props + fauna (items 11-14, 18, 12) =================
    The world had scenery you route around and enemies you fight. These are the things you go TO:
-   spore pods you can only reach by leaving the ground, sealed cysts that publish their own odds
+   spore pods you can only reach by leaving the ground, sealed chests that publish their own odds
    before you spend, vents that move you across the map, guaranteed treasure at the authored site,
    and critters you harvest by landing on them.
 
@@ -439,9 +470,9 @@ function buildRunContent(){
   critterHinted = false; nearMissCd = 0;
   if(!critterMarks) critterMarks = new FrameMarks(scene, makeLandRing);
   // item 47: the tag names the VERB. Both modules already word their own labels that way, and the
-  // cyst's is progress.cystPrompt() — i.e. the hover chip publishes the real probability too.
+  // chest's is progress.chestPrompt() — i.e. the hover chip publishes the real probability too.
   for(const p of props.pods) game.hoverTags.register(p.mesh, m=>props.labelFor(m), { range:22, lift:1.3 });
-  for(const c of props.cysts) game.hoverTags.register(c.group, ()=> '[' + INTERACT_LABEL + '] ' + props.promptFor(c), { range:20, lift:c.h*1.9 });
+  for(const c of props.chests) game.hoverTags.register(c.group, ()=> '[' + INTERACT_LABEL + '] ' + props.promptFor(c), { range:20, lift:c.h*1.9 });
   for(const v of props.vents) game.hoverTags.register(v.mesh, ()=> '🌀 Vent — stand on it, [' + INTERACT_LABEL + '] to ride it', { range:20, lift:2.2 });
   for(const t of props.treasures) game.hoverTags.register(t.mesh, m=>props.labelFor(m), { range:24, lift:1.4 });
   for(const root of fauna.hoverTargets()) game.hoverTags.register(root, o=>fauna.labelFor(o), { range:20, lift:1.4 });
@@ -452,18 +483,32 @@ game.tuning = { world: WORLD_PARAMS, props: PROP_PARAMS, fauna: FAUNA };
 // for verification: the standable height at a column, props included (groundOnly is the same
 // query the camera boom and the projectiles use).
 game.groundAt = (x, z)=> groundOnly(x, z);
-game.propInfo = ()=> !props ? null : { pods: props.pods.length, cysts: props.cysts.length,
+game.propInfo = ()=> !props ? null : { pods: props.pods.length, chests: props.chests.length,
   vents: props.vents.length, treasures: props.treasures.length, treasureSource: props.treasureSource,
   spent: props.pods.filter(p=>p.spent).length, critters: fauna ? fauna.critters.length : 0,
-  chain: fauna ? fauna.chain : 0, spines: progress.spines };
+  chain: fauna ? fauna.chain : 0, lockpicks: progress.lockpicks,
+  strandedCritters: fauna ? fauna.strandedCount : 0,
+  ventFams: props.vents.map(v=>v.fam.id), ventCool: props.vents.map(v=>+v.cool.toFixed(1)),
+  ring: game.player && game.player.elemRing ? game.player.elemRing.id : null,
+  ringCharge: game.player ? +(game.player.ringCharge||0).toFixed(1) : 0,
+  stomps: game.stompCount|0, ringsFound: game.ringsFound|0,
+  quests: progress.contracts.map(c=>(c.kind||'harvest')+':'+c.have+'/'+c.need) };
 
 /* ONE payout chokepoint per prop kind. props.js fires the event; the credit, the pops, the cue
    and the copy all happen here, so a new prop gets consistent feel for free. */
 function onPropEvent(ev){
   if(ev.type === 'pod') payoutPod(ev);
-  else if(ev.type === 'cyst') payoutCyst(ev);
+  else if(ev.type === 'chest') payoutChest(ev);
   else if(ev.type === 'travel') doTravel(ev);
+  else if(ev.type === 'ventCool') ventRefused(ev);
   else if(ev.type === 'treasure') payoutTreasure(ev);
+}
+/* item 10. A refused input has to SAY it was refused and say why, or the vent reads as broken.
+   The cue is deliberately the flat click and not the error hiss: nothing went wrong, you were
+   just early. */
+function ventRefused(ev){
+  audio.click();
+  announce('🌀 Vent still venting — ' + Math.ceil(ev.left) + 's', 'bad');
 }
 function payoutPod(ev){
   // coins and the pop are already banked/fired by props.js (one chokepoint, its side). This half
@@ -472,11 +517,14 @@ function payoutPod(ev){
   // and overflows on a narrow window.
   audio.powerup();
   game.shake(0.16);
-  const spine = !!(ev.spine && ev.spine.got);
-  let txt = (ev.mult > 1 ? '🫧 Rich pod +' : '🫧 Pod +') + ev.coins + ' 🪙';
+  const lockpick = !!(ev.lockpick && ev.lockpick.got);
+  let txt = (ev.mult > 1 ? '🌸 Rich pod +' : '🌸 Pod +') + ev.coins + ' 🪙';
   if(ev.chargesLeft > 0) txt += ' · ×' + ev.chargesLeft + ' left';
-  if(spine){ txt += ' · 🦴 Pry-spine!'; audio.unlock(); }
-  announce(txt, spine || ev.mult > 1 ? 'cool' : 'good');
+  if(lockpick){ txt += ' · 🗝️ +1 lockpick'; audio.unlock(); }
+  announce(txt, lockpick || ev.mult > 1 ? 'cool' : 'good');
+  // item 08: the quest board counts the verb, not the payout, so a pod that pays nothing new
+  // (a spent charge) still does not count and a rich pod does not count twice.
+  payQuests(progress.advanceQuests('pod'), ev.x, ev.y + 1.4, ev.z);
   updateHUD();
 }
 function payoutTreasure(ev){
@@ -484,40 +532,47 @@ function payoutTreasure(ev){
   rewardPops.pop(ev.x, ev.y + 1.2, ev.z, 8);
   game.shake(0.3);
   announce('💎 Crystal +' + ev.coins + ' 🪙' + (ev.left > 0 ? ' · ' + ev.left + ' left' : ''), 'cool');
+  payQuests(progress.advanceQuests('gem'), ev.x, ev.y + 1.6, ev.z);
   updateHUD();
 }
-function payoutCyst(ev){
+function payoutChest(ev){
   const r = ev.result;
   if(!r || !r.ok){
     audio.click();
-    announce('🦴 No pry-spine — burst a pod or land on a critter', 'bad');
+    announce('🗝️ No lockpick — burst a pod or land on a critter', 'bad');
     return;
   }
   if(!r.opened){
     audio.hiss(0.1, 0.13, 190, 760);
-    announce(`${r.icon} Held — ${r.pct}%/spine · ${r.spines} 🦴 left`, 'bad');
+    announce(`${r.icon} Held — ${r.pct}% per 🗝️ · ${r.lockpicks} left`, 'bad');
     updateHUD();
     return;
   }
   audio.unlock();
-  rewardPops.pop(ev.x, ev.y + ev.cyst.h*1.4, ev.z, r.coins > 90 ? 10 : 6);
+  rewardPops.pop(ev.x, ev.y + ev.chest.h*1.4, ev.z, r.coins > 90 ? 10 : 6);
   game.shake(0.35);
   announce(`${r.icon} ${r.name} open! +${r.coins} 🪙` + (r.myco ? ` +${r.myco} 🌿` : '') +
-    ` · ${r.tries} 🦴`, 'cool');
-  if(ev.gear) rollCystGear(ev);
+    ` · ${r.tries} 🗝️ spent`, 'cool');
+  if(ev.gear) rollChestGear(ev);
+  payQuests(progress.advanceQuests('chest'), ev.x, ev.y + ev.chest.h*1.6, ev.z);
   updateHUD();
 }
 /* econ's item 15: `gear:true` is a request for exactly ONE roll from main.js's own drop table.
-   It stays here rather than in progress.js so a cyst pays from the same table as a kill — and it
+   It stays here rather than in progress.js so a chest pays from the same table as a kill — and it
    drops as a physical pickup, which is how every other reward in this game arrives. */
-function rollCystGear(ev){
+function rollChestGear(ev){
   const pos = new THREE.Vector3(ev.x + 1.7, ev.y, ev.z);
-  const rarity = 2 + ((Math.random()*3)|0);   // rare+ : a cyst is a small boss, not a mob
+  const rarity = 2 + ((Math.random()*3)|0);   // rare+ : a chest is a small boss, not a mob
   const roll = Math.random();
-  if(roll < 0.40) dropWeapon(pos, rarity, true);
-  else if(roll < 0.72) dropArmor(pos, rarity, true);
-  else if(roll < 0.88) dropPotion(pos, rarity, true);
+  if(roll < 0.36) dropWeapon(pos, rarity, true);
+  else if(roll < 0.66) dropArmor(pos, rarity, true);
+  else if(roll < 0.80) dropPotion(pos, rarity, true);
   else dropPowerup(pos, rarity);
+  // item 01. On TOP of the roll above, not as one of its branches: a chest costs a lockpick you
+  // earned, so it should never be the reason you walked away from one still bleeding. 45% is high
+  // enough that chests read as the reliable place to restock health, which is what makes spending
+  // a lockpick before a boss a real decision.
+  if(Math.random() < 0.45) dropHealthPotion(new THREE.Vector3(pos.x - 1.4, pos.y, pos.z + 0.9), rarity, true);
 }
 /* item 13. Fade, move, then AIM: arriving faced at whatever you happened to be looking at wastes
    the trip. props.js reports the destination's nearest interest anchor, so the yaw lands on
@@ -542,6 +597,10 @@ function doTravel(ev){
       camPos.set(camPivot.x + dx*camDist, camPivot.y + dy*camDist, camPivot.z + dz*camDist);
       camTarget.copy(camPivot);
       announce('🌀 Surfaced — new ground ahead', 'cool');
+      // counted here rather than at the entrance: the quest says "ride a vent", and a ride that
+      // never arrived is not one. Also the only place that knows the trip succeeded.
+      payQuests(progress.advanceQuests('vent'), ev.x, ev.y + 2.0, ev.z);
+      updateHUD();
     }
     warpEl.style.transition = 'opacity .3s ease-out';
     warpEl.style.opacity = '0';
@@ -554,11 +613,11 @@ function tryInteract(){
   if(game.state !== 'play' || !props) return;
   const t = interactTarget;
   if(!t) return;
-  if(t.type === 'cyst') props.pry(t);          // pry() emits; payoutCyst() pays
+  if(t.type === 'chest') props.pry(t);          // pry() emits; payoutChest() pays
   else if(t.type === 'vent') props.travel(t);
 }
 /* item 12. A stomp pays coins and its species' own resource, and the CHAIN is the skill: fauna.js
-   banks coins + the spine roll through progress.stompCritter() and reports the rest for crediting
+   banks coins + the lockpick roll through progress.stompCritter() and reports the rest for crediting
    here, so the escalating copy and the escalating cue come out of the same number. */
 function payoutStomp(s){
   const r = s.reward, c = s.critter;
@@ -569,13 +628,12 @@ function payoutStomp(s){
   if(r.essence){ game.runEssences[0] += r.essence; progress.collect(0, r.essence); audio.essence(0); }
   if(r.myco){ progress.myco += r.myco; progress.saveMyco(); }
   if(r.harvest){
-    // credited exactly the way picking that species credits a contract — same door, same payout
-    let paid = 0;
-    for(let i=0;i<r.harvest.n;i++)
-      for(const done of progress.harvestFor(r.harvest.id).completed) paid += done.reward;
-    updateContracts();
-    if(paid){ audio.contract(); announce('Contract paid +' + paid + ' 🌿', 'good'); }
+    // credited exactly the way picking that species credits a contract — same door, same payout.
+    // advanceQuests takes the count directly, so a chain that pays 3 spores is one call, not three.
+    payQuests(progress.advanceQuests('harvest', r.harvest.n, r.harvest.id), c.x, y, c.z);
   }
+  // item 08: and the stomp itself is a quest verb, independently of what the critter dropped
+  payQuests(progress.advanceQuests('stomp'), c.x, y, c.z);
   // SHORT. The chain multiplier is the part that has to read at a glance, because seeing ×2 turn
   // into ×3 is the only thing that teaches a player the chain exists at all.
   const gain = ['+' + r.coins + ' 🪙'];
@@ -584,14 +642,150 @@ function payoutStomp(s){
   if(r.harvest) gain.push('+' + r.harvest.n + ' 🍄');
   let txt = r.label + ' ' + gain.join(' ');
   if(r.chain === 0) txt += ' · chain it!';
-  if(r.spine) txt += ' · 🦴!';
-  announce(txt, r.chain >= 2 || r.spine ? 'cool' : 'good');
+  if(r.lockpick) txt += ' · 🗝️ +1 lockpick';
+  announce(txt, r.chain >= 2 || r.lockpick ? 'cool' : 'good');
   // the floating number at the critter: the payout comes out of the thing you landed on
   pickupText(critterPop.set(c.x, c.y + 1.6, c.z), gain.join(' '), r.chain > 0 ? '#ffe98a' : '#b8f0a0');
+  /* item 05 — WHERE ELEMENTAL RINGS COME FROM. Stomping is the only source, which is the point:
+     the rings are what makes the jump economy pay into COMBAT, so a player who never leaves the
+     ground never gets one and a player who chains gets them faster.
+     The pity clause is not generosity, it is a teaching guarantee. A 14% drop can go 0-for-12,
+     and a mechanic with a hotkey, a HUD chip and a whole file behind it cannot be allowed to stay
+     invisible for a whole hunt because the dice said so — that is the exact failure this list
+     opened with ("i dont see any equippable rings"). First ring: by the 5th stomp, always. */
+  game.stompCount = (game.stompCount|0) + 1;
+  const ringChance = Math.min(0.36, 0.14 + r.chain*0.07 + effDropBonus()*0.25);
+  const ringPity = game.ringsFound === 0 && game.stompCount >= 5;
+  if(ringPity || Math.random() < ringChance){
+    game.ringsFound = (game.ringsFound|0) + 1;
+    // alternate which element the world hands you first, so nobody learns the mechanic on one
+    // ring and never meets the other
+    dropRing(c.group.position, RINGS[game.ringsFound % RINGS.length].id);
+  }
   if(r.chain > 0) audio.gearUp(Math.min(6, r.chain + 1)); else audio.powerup();
   game.shake(0.12 + Math.min(0.28, r.chain*0.08));
   game.hitStop(0.03);
   updateHUD();
+}
+
+/* ================= elemental rings (rings.js) =================
+   ONE CHOKEPOINT for the whole mechanic: the drain, the cone, the particles and the status
+   application all happen in this function, so "what does holding Z do" has exactly one answer.
+
+   THE CONE IS A DOT PRODUCT, NOT A RAYCAST. A raycast per enemy per frame would be the obvious
+   build and it would be wrong twice: it costs a BVH walk against every enemy every frame, and it
+   makes the effect depend on where a creature's collider happens to be rather than on whether it
+   is in front of you — which is the thing the player is actually aiming. Facing dot direction,
+   compared against cos(angle), is two multiplies and reads exactly the way the visual does.
+
+   Charge is spent in SECONDS OF HOLDING and nothing else: no per-cast cost, no cooldown. That is
+   what makes the resource legible — the bar empties at the rate the effect is on screen. */
+const RING_AIM = new THREE.Vector3();
+function updateRing(dt){
+  const p = game.player;
+  if(!p) return;
+  const ring = p.elemRing;
+  const held = ring && p.ringCharge > 0 && keys[RING_KEY] && game.state === 'play';
+  if(!held){
+    if(p.ringFiring){ p.ringFiring = false; updateRingHud(); }
+    return;
+  }
+  if(!p.ringFiring){ p.ringFiring = true; audio.hiss(0.12, 0.2, ring.id === 'fire' ? 320 : 900, 1400); }
+  p.ringCharge = Math.max(0, p.ringCharge - dt);
+
+  // facing: the character's own yaw, so what you see the hunter point at is what burns
+  const yaw = p.group.rotation.y;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  const pp = p.group.position;
+  const cosHalf = Math.cos(ring.angle);
+
+  // the spray. Emitted along the axis with spread, so the cone is visible BEFORE anything is in it
+  // — an area effect you cannot see the edges of is an area effect the player cannot aim.
+  const q = ring.particles;
+  for(let k=0;k<q.n;k++){
+    const t = 0.25 + Math.random()*0.75;                  // along the cone, biased away from the feet
+    const off = (Math.random()-0.5)*2*ring.angle*t*0.9;   // widening with distance, like the cone
+    const ax = Math.sin(yaw+off), az = Math.cos(yaw+off);
+    game.particles.puff(pp.x + ax*ring.reach*t, pp.y + 1.1 + (Math.random()-0.5)*0.5, pp.z + az*ring.reach*t,
+      { color: ring.color, n:1, size:q.size, life:q.life, rise:q.rise, spread:q.spread,
+        grav:q.grav, alpha:q.alpha, vx: ax*3.2, vz: az*3.2 });
+  }
+
+  // and the payload
+  let touched = 0;
+  for(const m of game.enemies){
+    if(m.dead) continue;
+    RING_AIM.copy(m.group.position).sub(pp); RING_AIM.y = 0;
+    const d = RING_AIM.length();
+    if(d < 0.001 || d > ring.reach + m.R.scale) continue;
+    if((RING_AIM.x*fx + RING_AIM.z*fz)/d < cosHalf) continue;
+    // direct damage is dt-scaled so it is frame-rate independent; the STATUS refreshes rather than
+    // stacks for the same reason (see Mushroom.applyElement).
+    if(ring.dps){
+      RING_AIM.copy(pp);                                  // shove direction is away from the player
+      m.hit(ring.dps*dt, RING_AIM, game, 0);
+      if(m.dead) continue;
+    }
+    m.applyElement(ring.kind, ring);
+    touched++;
+  }
+  if(touched) game.shake(0.02);
+  if(p.ringCharge <= 0){
+    // spent. Clearing the slot rather than leaving an empty ring on screen: an inert HUD chip with
+    // a key label under it is a control that lies about being available.
+    const name = ring.name;
+    p.elemRing = null; p.ringFiring = false;
+    audio.click();
+    announce(ring.icon + ' ' + name + ' burned out', 'bad');
+  }
+  updateRingHud();
+}
+/* The pickup. ONE slot on purpose (see rings.js), so this is always a replace, and the copy says
+   so — silently overwriting a ring the player was saving is the kind of thing that reads as a bug. */
+function equipRing(id){
+  const ring = RINGS_BY_ID[id];
+  if(!ring) return;
+  const p = game.player;
+  const had = p.elemRing;
+  p.elemRing = ring;
+  p.ringCharge = ring.charge;
+  p.ringFiring = false;
+  audio.unlock();
+  announce(had && had.id !== id
+    ? `${ring.icon} ${ring.name} — replaced your ${had.name} · hold [${RING_KEY_LABEL}]`
+    : `${ring.icon} ${ring.name} — hold [${RING_KEY_LABEL}] to ${ring.id === 'fire' ? 'burn' : 'freeze'} them`, 'cool');
+  updateRingHud();
+  updateBackpack();
+}
+function dropRing(pos, id){
+  const ring = RINGS_BY_ID[id] || RINGS[(Math.random()*RINGS.length)|0];
+  const def = { id:'ring_'+ring.id, icon:ring.icon, name:ring.name, color:ring.color,
+    shape:'ring', isRing:true, ringId:ring.id };
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x, pos.z)+1.15), def));
+}
+/* Diff-based like every other HUD write: the chip only touches the DOM when the ring, the key or
+   the tenth-of-a-second on the bar actually changes. Called from the ring update (which only runs
+   while held) and from equip/reset — never once per frame. */
+let ringHudKey = '';
+function updateRingHud(){
+  const el = document.getElementById('ringslot');
+  if(!el) return;
+  const p = game.player;
+  const ring = p && p.elemRing;
+  const pct = ring ? Math.max(0, Math.min(1, p.ringCharge/ring.charge)) : 0;
+  const key = ring ? ring.id + '|' + Math.round(pct*40) + '|' + (p.ringFiring ? 1 : 0) : 'none';
+  if(key === ringHudKey) return;
+  ringHudKey = key;
+  if(!ring){ el.classList.add('empty'); el.classList.remove('firing'); return; }
+  el.classList.remove('empty');
+  el.classList.toggle('firing', !!p.ringFiring);
+  setText(document.getElementById('ringicon'), ring.icon);
+  setText(document.getElementById('ringname'), ring.name.replace(' Ring',''));
+  setText(document.getElementById('ringsecs'), Math.ceil(p.ringCharge) + 's');
+  setWidth(document.getElementById('ringfill'), pct*100);
+  const fill = document.getElementById('ringfill');
+  const css = '#' + new THREE.Color(ring.color).getHexString();
+  if(fill && fill.dataset.hue !== css){ fill.style.background = css; fill.dataset.hue = css; }
 }
 
 /* THE TEACHING LAYER. The mechanic worked and still read as decoration, because a harmless animal
@@ -630,18 +824,18 @@ function updateHarvestPrompt(){
     if(d < bestD){ bestD = d; best = h; }
   }
   game.nearestHarvest = best;
-  /* One prompt line, and the rarer interaction wins it: a sealed cyst or a vent underfoot outranks
-     a mushroom you can pick anywhere. The cyst's line comes from progress.cystPrompt(), so the
-     real per-spine probability is on screen BEFORE the spine is spent — that is item 14's point. */
+  /* One prompt line, and the rarer interaction wins it: a sealed chest or a vent underfoot outranks
+     a mushroom you can pick anywhere. The chest's line comes from progress.chestPrompt(), so the
+     real per-lockpick probability is on screen BEFORE the lockpick is spent — that is item 14's point. */
   const pp = p.group.position;
-  const cyst = props ? props.nearestCyst(pp.x, pp.z, pp.y) : null;
-  const vent = (!cyst && props) ? props.ventUnderfoot(pp.x, pp.z, pp.y, p.grounded) : null;
-  interactTarget = cyst || vent || null;
+  const chest = props ? props.nearestChest(pp.x, pp.z, pp.y) : null;
+  const vent = (!chest && props) ? props.ventUnderfoot(pp.x, pp.z, pp.y, p.grounded) : null;
+  interactTarget = chest || vent || null;
   if(props) props.setHovered(interactTarget);   // the thing [C] would act on is the thing that glows
   let txt = null, id = null;
-  if(cyst){
-    txt = '[' + INTERACT_LABEL + '] ' + props.promptFor(cyst);
-    id = 'c|' + cyst.x.toFixed(1) + '|' + cyst.state.tries + '|' + progress.spines;
+  if(chest){
+    txt = '[' + INTERACT_LABEL + '] ' + props.promptFor(chest);
+    id = 'c|' + chest.x.toFixed(1) + '|' + chest.state.tries + '|' + progress.lockpicks;
   } else if(vent){
     txt = '[' + INTERACT_LABEL + '] Ride the vent — it surfaces somewhere else on the map';
     id = 'v|' + vent.i;
@@ -667,15 +861,10 @@ function tryHarvest(){
   particles.burst(pos, 10, {r:1,g:1,b:1, spread:1.6, size:6, life:0.5});
   audio.pickup();
   pickupText(pos, '+1 '+sp.name, hexCss(sp.color));
-  const { completed } = progress.harvestFor(entry.species);
+  const res = progress.harvestFor(entry.species);
   updateContracts();
   updateHUD();
-  if(completed.length){
-    const paid = completed.reduce((a,c)=>a+c.reward,0);
-    audio.contract(); // its own cue — a contract payout is not an alchemy purchase
-    rewardPops.pop(pos.x, pos.y, pos.z, 6);
-    announce('Contract paid — +' + paid + ' 🌿 spend it in the Tome', 'good');
-  }
+  payQuests(res, pos.x, pos.y, pos.z);
 }
 
 /* ---------- spawning ---------- */
@@ -706,6 +895,7 @@ function addDrop(pw){
   const verb = d.isCoin ? `${d.amount} coin${d.amount === 1 ? '' : 's'} — walk over it to bank ${d.amount === 1 ? 'it' : 'them'}`
     : d.isEssence ? `${d.name} ×${d.amount} — walk over it, spend it on mutations in the Tome`
     : d.isWeapon ? `${d.name} — walk over it to slot it on 1-7`
+    : d.isRing ? `${d.name} — walk over it, then HOLD ${RING_KEY_LABEL} to use its charge`
     : d.isPotion ? `${d.name} — walk over it, then press ${POTIONS_BY_ID[d.potionId].key} to drink`
     : d.isArmor ? `${d.name} — walk over it to fill your ${d.slot} slot`
     : `${d.name} — walk over it for a timed boost`;
@@ -757,12 +947,29 @@ function dropWeapon(pos, rarity, force=false, forceId=null){
   const def = { id:'weapon_'+w.id, icon:w.icon, name:w.name, color:RARITY_COLORS[w.rarity], isWeapon:true, weaponId:w.id };
   addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.4), def));
 }
-function dropPotion(pos, rarity, force=false){
+function dropPotion(pos, rarity, force=false, forceId=null){
   const chance = 0.07 + rarity*0.02;
   if(!force && Math.random() > chance + effDropBonus()*0.2) return;
-  const def = POTIONS[(Math.random()*POTIONS.length)|0];
+  const def = forceId ? POTIONS_BY_ID[forceId] : POTIONS[(Math.random()*POTIONS.length)|0];
+  if(!def) return;
   const pdef = { id:'potion_'+def.id, icon:def.icon, name:def.name, color:def.color, isPotion:true, potionId:def.id };
   addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.1), pdef));
+}
+/* item 01 — HEALING IS ITS OWN DROP, on its own roll, and that separation is the whole point.
+   The generic potion table rolls one of five boosters, so the chance of the one you need when you
+   are at 20 HP was 1/5 of an already-thin 7-15% — healing was theoretically available and
+   practically absent. A dedicated roll makes "kill something, get a chance to heal" a rule the
+   player can feel, and pinning it to RARITY means the tougher fight that hurt you is also the
+   fight most likely to pay for it: 3% off a Common up to 12% off a Mythic.
+
+   Written as a base plus a per-rarity step rather than a table so the two ends of the published
+   band are visible in the source — if either number moves, the sentence above has to move with it. */
+const HEAL_DROP_MIN = 0.03, HEAL_DROP_STEP = 0.018;   // rarity 0..5 -> 3.0% .. 12.0%
+function dropHealthPotion(pos, rarity, force=false){
+  const chance = HEAL_DROP_MIN + rarity*HEAL_DROP_STEP;
+  // drop luck helps, at a quarter weight: a charm build should tilt healing, not trivialise it
+  if(!force && Math.random() > chance + effDropBonus()*0.25) return;
+  dropPotion(pos, rarity, true, 'vitality');
 }
 function dropArmor(pos, rarity, force=false){
   const chance = rarity>=3 ? 0.45 : rarity===2 ? 0.18 : rarity===1 ? 0.06 : 0.025;
@@ -797,6 +1004,7 @@ game.onKill = (m)=>{
   dropWeapon(m.group.position, m.rarity, m.isBoss, m.bossWeaponId);
   dropArmor(m.group.position, m.rarity, m.isBoss);
   dropPotion(m.group.position, m.rarity, m.isBoss);
+  dropHealthPotion(m.group.position, m.rarity, m.isBoss);
   if(m.isBoss){ victory(); return; }
   updateHUD();
   if(!game.bossSpawned && game.rareKills >= 8){
@@ -843,6 +1051,11 @@ game.applyPowerup = (def)=>{
       announce(def.icon + ' ' + def.name + ' unlocked — press ' + (p.weapons.indexOf(def.weaponId)+1) + ' to wield it', 'cool');
     }
     updateBackpack(); updateHUD();
+    return;
+  }
+  if(def.isRing){
+    equipRing(def.ringId);
+    updateHUD();
     return;
   }
   if(def.isPotion){
@@ -961,8 +1174,15 @@ function updateBackpack(){
     const count = p.potions[def.id] || 0;
     const timer = p.potionTimers[def.id] || 0;
     const d = document.createElement('div');
+    /* item 11 + item 01. A healing drop is only useful if the player NOTICES it at the moment it
+       matters, and the moment it matters is not the moment they picked it up. So a held heal
+       whose owner is under a third HP gets `urgent`, which pulses the slot. Deliberately gated on
+       BOTH conditions: a pulse with no potion is nagging, and a pulse at full health is noise —
+       either one trains the player to ignore the slot, which is worse than no cue at all. */
+    const urgent = def.kind === 'heal' && count > 0 && p.hp/p.maxHp < 0.34;
     // a count of 0 is information, so say it with .zero instead of leaving the slot ambiguous
-    d.className = 'potslot' + (count>0 ? ' has' : ' zero') + (timer>0 ? ' active sel' : '');
+    d.className = 'potslot' + (count>0 ? ' has' : ' zero') + (timer>0 ? ' active sel' : '')
+      + (urgent ? ' urgent' : '');
     d.style.setProperty('--pc', '#'+def.color.toString(16).padStart(6,'0'));
     d.dataset.potion = def.id;
     d.dataset.potionKey = def.key;
@@ -1065,10 +1285,10 @@ function tickCounters(dt){
 }
 counter('coins', document.getElementById('coinhud'), v=>'🪙 '+v, { zero:true });
 counter('myco',  document.getElementById('mycohud'), v=>'🌿 '+v, { zero:true });
-// The pry-spine wallet is index.html's #spinecell now: the plaque swaps its own label between
-// "PRY-SPINES" and "NONE — BURST A POD" off the .zero class, so main.js only supplies the number.
-counter('spines', document.getElementById('spineval'), v=>String(v),
-  { zero: document.getElementById('spinecell') });
+// The lockpick wallet is index.html's #lockpickcell now: the plaque swaps its own label between
+// "LOCKPICKS" and "NONE — BURST A POD" off the .zero class, so main.js only supplies the number.
+counter('lockpicks', document.getElementById('lockpickval'), v=>String(v),
+  { zero: document.getElementById('lockpickcell') });
 counter('ess', document.getElementById('esshud'), v=>'✦ '+v, { zero:true });
 // kills: six rows built once. This used to be an innerHTML rebuild every single frame.
 {
@@ -1113,9 +1333,16 @@ function updateHUD(){
   for(let i=0;i<game.kills.length;i++) setCounter('kill'+i, game.kills[i]);
   setCounter('coins', progress.coins);
   setCounter('myco', progress.myco);
-  setCounter('spines', progress.spines);
+  setCounter('lockpicks', progress.lockpicks);
   setCounter('ess', progress.bank.reduce((a,b)=>a+b, 0));
   updateWorldLine();
+  /* item 11: the heal slot's `urgent` state depends on HP, which changes constantly, but
+     updateBackpack() rebuilds DOM — so it is driven off a LATCH, not off the HP value. One rebuild
+     when the threshold is crossed in either direction, never one per frame. This is the same
+     diff-based rule the rest of the HUD follows; the only difference is that the thing being
+     diffed is a boolean derived from two values rather than a string. */
+  const wantUrgent = (p.potions.vitality|0) > 0 && p.hp/p.maxHp < 0.34;
+  if(wantUrgent !== healUrgent){ healUrgent = wantUrgent; updateBackpack(); }
   // zone
   const d = Math.hypot(p.group.position.x, p.group.position.z);
   const z = d<40?'MEADOW':d<90?'DEEPWOOD':d<140?'GLOAM':'HEART OF THE BLOOM';
@@ -1129,18 +1356,21 @@ function updateHUD(){
 /* index.html's #worldline asks the cheapest possible "what now": how much of this world is still
    worth the walk. Diff-based like every other HUD write — the string only reaches the DOM when one
    of the counts actually changes. */
+let healUrgent = false;   // latch for the urgent heal slot; see updateHUD
 function updateWorldLine(){
   const el = document.getElementById('worldline');
   if(!el) return;
   if(!props){ setText(el, 'Scouting the valley…'); return; }
-  let pods = 0, cysts = 0, gems = 0, crit = 0;
+  let pods = 0, chests = 0, gems = 0, crit = 0;
   for(const p of props.pods) if(!p.spent) pods++;
-  for(const c of props.cysts) if(!c.open) cysts++;
+  for(const c of props.chests) if(!c.open) chests++;
   for(const t of props.treasures) if(!t.collected) gems++;
   if(fauna) for(const c of fauna.critters) if(!c.dead && !c.dying) crit++;
   const parts = [];
-  if(pods) parts.push('🫧 ' + pods + ' pods');
-  if(cysts) parts.push('🥚 ' + cysts + ' cysts');
+  // 🌸, not 🫧: item 03 grew the pods a corolla, and the tracker glyph has to match the thing the
+  // player is looking for or the count names something they cannot find.
+  if(pods) parts.push('🌸 ' + pods + ' pods');
+  if(chests) parts.push('🧰 ' + chests + ' chests');
   if(crit) parts.push('🐛 ' + crit + ' critters');
   if(gems) parts.push('💎 ' + gems + ' gems');
   setText(el, parts.length ? parts.join(' · ') : 'Valley picked clean');
@@ -1168,8 +1398,8 @@ function renderTome(){
     `<div class="essrow"><div class="essdot" style="background:${ESS_COLORS[i]}"></div>${ESS_NAMES[i]}
      <span class="life">(lifetime ${progress.lifetime[i]})</span><span class="cnt">✦ ${progress.bank[i]}</span></div>`).join('');
   const contractRows = progress.contracts.map(c=>{
-    const sp = SPECIES_BY_ID[c.species];
-    return `<div class="essrow"><div class="essdot" style="background:${hexCss(sp.color)}"></div>${sp.name}
+    const f = contractFace(c);
+    return `<div class="essrow"><div class="essdot" style="background:${f.tint}"></div>${f.icon} ${f.label}
      <span class="cnt">${c.have}/${c.need} → +${c.reward} 🌿</span></div>`;
   }).join('');
   left.innerHTML = `
@@ -1486,7 +1716,7 @@ addEventListener('keydown', e=>{
   // jumps in one keystroke and holding Shift re-triggers the dash the instant it comes off cd.
   if(e.code === 'Space'){ e.preventDefault(); if(!e.repeat) tryJump(); }
   if(e.code === 'KeyH' && game.state === 'play') tryHarvest();
-  // e.repeat guard: holding the key must not spend a spine per frame
+  // e.repeat guard: holding the key must not spend a lockpick per frame
   if(e.code === INTERACT_KEY && !e.repeat && game.state === 'play') tryInteract();
 });
 addEventListener('keyup', e=>{ keys[e.code] = false; endHold(e.code); });
@@ -1561,15 +1791,15 @@ function startRun(){
   $('hud').classList.add('on');
   audio.startBGM();
   announce('Hunt the Bloom — rare caps lure its ruler out', 'good');
-  /* item 30 — the floor under the whole cyst loop. It only fires on a wallet with 0 spines AND
+  /* item 30 — the floor under the whole chest loop. It only fires on a wallet with 0 lockpicks AND
      too little Mycelium to buy one, so it cannot be farmed by restarting; it just means "no way
-     into any cyst" is not a state a returning player can start a hunt in. */
-  const floor = progress.ensureSpineFloor();
+     into any chest" is not a state a returning player can start a hunt in. */
+  const floor = progress.ensureLockpickFloor();
   if(floor.granted) setTimeout(()=>{ if(game.state === 'play')
-    announce('🦴 Spare pry-spine — one cyst is always in reach', 'good'); }, 2800);
+    announce('🗝️ Spare lockpick — one chest is always in reach', 'good'); }, 2800);
   grabPointer();
   spawnWave(7);
-  updateHUD(); updateBuffs(); updateBackpack(); updateContracts();
+  updateHUD(); updateBuffs(); updateBackpack(); updateContracts(); updateRingHud();
 }
 function pauseGame(){
   game.state = 'pause'; show('pause');
@@ -1592,6 +1822,11 @@ function resetRun(){
   game.enemies = []; game.powerups = []; game.boss = null;
   game.kills = [0,0,0,0,0,0]; game.totalKills = 0; game.rareKills = 0; game.bossSpawned = false;
   game.level = 1; game.xp = 0; game.runEssences = [0,0,0,0,0,0]; game.dropBonus = 0;
+  // rings.js pity counters. Per-run and deliberately NOT in progress.js: an elemental ring is
+  // spent within the hunt it was found in, so carrying its drop history across runs would make
+  // the first stomp of a fresh world feel arbitrary.
+  game.stompCount = 0; game.ringsFound = 0;
+  ringHudKey = '';   // the diff-based chip must not think it is still showing last run's ring
   // seeded spawn table: rarity weights jittered + zone density scaled per world
   const sRng = mulberry32(deriveSeed(game.seed, 77));
   game.rarityJitter = RARITIES.map(()=> 0.7 + sRng()*0.7);
@@ -1655,7 +1890,7 @@ function resetRun(){
     p.hp = p.maxHp; // full heal — a small reward for clearing the last world
   }
 
-  updateHUD(); updateBuffs(); updateBackpack(); updateContracts();
+  updateHUD(); updateBuffs(); updateBackpack(); updateContracts(); updateRingHud();
 }
 function runStats(){
   const t = ((performance.now()-game.startTime)/1000)|0;
@@ -1742,7 +1977,7 @@ const CAM_CLEAR = 0.75; // how far the lens stays off any surface it would other
        is blocked the pitch is raised instead of the distance shortened further — an over-the-
        shoulder look down is a view, a lens inside a hat is not;
      - only colliders wide enough to matter block the LENS. Since item 01, groundOnly() accounts for
-       every prop, which quietly made hovering spore pods and knee-high cysts camera obstacles.
+       every prop, which quietly made hovering spore pods and knee-high chests camera obstacles.
        They still block MOVEMENT; this filter is camera-only;
      - the boom is sampled twice as finely and as a ball rather than a point, so a ridge between two
        samples is met progressively instead of discovered all at once;
@@ -1750,7 +1985,7 @@ const CAM_CLEAR = 0.75; // how far the lens stays off any surface it would other
        a boundary cannot oscillate. */
 const CAM_RELEASE = 0.35;   // extra clearance required before the boom is allowed back out
 const CAM_BLOCK_R = 1.2;    // a collider narrower than this is something you clip, not something
-                            // worth yanking the camera for (tree trunks, pods, small cysts)
+                            // worth yanking the camera for (tree trunks, pods, small chests)
 const CAM_PULL_RATE = 26;   // m/s the boom may shorten. Fast, deliberately asymmetric, never instant
 const CAM_PUSH_RATE = 7;    // m/s it may lengthen again
 const CAM_PROBE_R = 0.35;   // the lens is a ball: sample its cross-section, not its centre
@@ -2116,6 +2351,7 @@ function tick(){
     } // end substep loop
     // animation + the 20 s respawn clock + the treasure pickup test: once per rendered frame, not
     // per substep — none of it is physics, and running it six times would just spin the clocks.
+    updateRing(dt);
     if(fauna) fauna.update(dt, elapsed, p.group.position, p.vy);
     if(props) props.update(dt, elapsed, camera, p.group.position);
     if(nearMissCd > 0) nearMissCd -= dt;

@@ -28,7 +28,7 @@ Then open `http://127.0.0.1:8000/index.html`.
 
 ## Controls
 
-`W/S` move · mouse steers · `A/D` turn · click to attack · `SPACE` jump · `SHIFT` dash · `1-7` switch weapon · `Q/E/R/F/G` potions · `H` harvest a nearby mushroom · `B` backpack · `TAB` Spore Tome · `M` mute · `ESC` pause
+`W/S` move · mouse steers · `A/D` turn · click to attack · `SPACE` jump · `SHIFT` dash · `1-7` switch weapon · `Q/E/R/F/G` potions · **hold `Z`** elemental ring · `C` interact (pry a chest, ride a vent) · `H` harvest a nearby mushroom · `B` backpack · `TAB` Spore Tome · `M` mute · `ESC` pause
 
 ---
 
@@ -57,9 +57,29 @@ The Spore Tome's **Equipment** tab is the full permanent collection (every item 
 
 A small, separate meta-progression track (Spore Tome → Alchemy): permanent player-wide buffs (damage, speed, HP, drop luck, pickup range, a free starting level) bought with **spore essence** collected per-kill, tiered 1→3.
 
-### Harvest contracts
+### The world's other verbs — pods, chests, vents, critters, crystals
 
-Small stationary glowing mushrooms scattered through the world (4 species, color-coded) can be harvested with `H` when nearby. You always have 3 active **contracts** asking for a quantity of one species; harvesting matching mushrooms fills every matching contract at once, and completing one pays out **Mycelium** (a currency earned only this way) and rolls in a replacement. A prompt shows what's nearby, and a persistent HUD panel tracks all 3 contracts live.
+Combat is not the only thing the world is for, and none of these compete with it for the attack button:
+
+- **Flower pods** hover just inside a standing jump (the reachability constraint is documented on `PROP_PARAMS.podBotMin`) and pay coins when your head hits them from underneath. Some carry several charges; some are worth ×10. Pods are also the main source of **lockpicks**.
+- **Sealed chests** publish their odds on the label before you spend anything: three tiers at 45% / 25% / 10% per lockpick, each with a `maxTries` ceiling that makes the published number a worst case. They pay coins, Mycelium and one roll from the same drop table a kill uses.
+- **Vents** are two-way shortcuts in colour-coded **pairs** — violet, ember, verdant — so the colour tells you where you come out. The vent you arrive at goes on a 15-second cooldown, which is what stops a pair of vents being an infinite loop.
+- **Critters** (3 species, gated by radius and slope band) don't fight back and can't be killed by the combo — they can only be **harvested by landing on them**. Chaining stomps escalates the payout, and each species pays a different currency. Stomps are also the only source of elemental rings.
+- **Spore crystals**: four per world, all at one hard-to-reach site, guaranteed to exist.
+
+### Elemental rings
+
+A **Fire Ring** or **Ice Ring** drops from stomping critters and equips into its own single slot (separate from the `ring` armour slot, which is permanent collection gear — see the note at the top of `rings.js` for why those must never be the same thing). Holding `Z` spends its charge, measured in *seconds of holding*, and sprays a cone in front of you: fire leaves a burn that keeps ticking after you let go, ice slows what it touches to a crawl. When the charge runs out the ring is gone. It is a resource you decide when to burn, not a second damage rotation.
+
+### Contracts
+
+You always have 3 active **contracts**, drawn from six kinds — harvest N of one mushroom species, burst N pods, pry N chests, ride N vents, land on N critters, recover N crystals. Completing one pays **Mycelium** and rolls in a replacement. Every kind's `need` is bounded by what a single world actually contains (the gem contract's ceiling of 2 against a world's 4 crystals is the tightest of these). Mycelium's only sink is buying lockpicks, which is what closes the loop: chest contracts pay for the lockpicks that open chests.
+
+Harvestable mushrooms are the small stationary glowing ones (4 species, colour-coded), picked with `H` when nearby. A prompt shows what's in reach, and a HUD panel tracks all 3 contracts live.
+
+### Healing
+
+A **Vitality Draught** rolls on its own, separately from the generic potion table, on every kill — 3% off a Common up to 12% off a Mythic — and again at 45% from every chest you open. It sits on `F` like the other potions, and its slot pulses when you're under a third HP and holding one.
 
 ### Bosses
 
@@ -94,7 +114,12 @@ No framework, no bundler — `index.html` loads `js/main.js` as a module via an 
 | `bossTraits.js` | The trait catalog rolled onto boss spawns |
 | `mushrooms.js` | Harvestable species catalog shared by world generation and the contract system |
 | `potions.js` | Potion catalog |
-| `fx.js` | Shared visual helpers: toon-shading material factory, outline-hull generator, procedural canvas textures, particle pool |
+| `props.js` | The interactive props — flower pods, sealed chests, vents, spore crystals. Computes payouts and **reports** them; main.js owns the credit, the audio and the copy |
+| `fauna.js` | Wandering critters: species/habitat table, the wander resolver, the stomp window and the chain |
+| `rings.js` | Pure data: the elemental ring catalog (Fire / Ice) and its hotkey |
+| `palette.js` | Generative world palettes — solves a coherent scheme per seed under explicit contrast floors. Zero imports, so it runs under plain `node` |
+| `rockgen.js` | Stepped rock/mesa formations: merged fill + a separate merged ink hull, colliders emitted from the same loop as the vertices |
+| `fx.js` | Shared visual helpers: toon-shading material factory, outline-hull generator, procedural canvas textures, particle pool, noise/fBm primitives |
 | `swordVisuals.js` | Per-weapon blade geometry construction |
 | `audio.js` | Fully synthesized WebAudio SFX + a small procedural BGM sequencer — no audio assets |
 | `rng.js` | `mulberry32` PRNG + seed-derivation helpers (`deriveSeed`) so independent subsystems get independent, still-deterministic streams from one world seed |
@@ -110,7 +135,8 @@ This codebase has been through a couple of perf-regression passes, so a few rule
 - **Batch repeated geometry into `InstancedMesh`.** Rocks, trees, grass, decorative mushrooms — all single-draw-call regardless of count. New per-world "pocket" content pushes into the *same* instance arrays rather than creating new draw calls.
 - **Never attach a real `THREE.PointLight` to anything that spawns/despawns in bursts** (pickups, projectiles) — adding/removing a light forces shader recompilation on other materials in the scene and causes hitches. Real lights are reserved for singular, rare landmarks.
 - **No per-frame allocations in hot paths.** `groundHeight()` runs for every enemy and the player every frame; helpers it calls (e.g. ravine-depth) are plain-number math, no `new Vector3()`.
-- **Diff-based DOM updates**, not rebuild-every-frame — HUD widgets that change rarely (buffs, contracts) only touch the DOM when their displayed state actually changes.
+- **Placement predicates query the finished world, not the noise.** Every spawn test reads height, slope, exclusion zones, the collider list — and `reachable()`, a reachability mask flooded once from the run's spawn point. Slope catches cliff *faces* and colliders catch "inside a rock"; only the flood catches a perfectly flat, perfectly legal shelf with no legal way onto it. Anything the player has to touch is gated on it.
+- **Diff-based DOM updates**, not rebuild-every-frame — HUD widgets that change rarely (buffs, contracts) only touch the DOM when their displayed state actually changes.s.
 
 ### Persistence
 

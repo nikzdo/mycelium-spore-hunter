@@ -507,6 +507,128 @@ export function slopeAt(x, z){
   return Math.sqrt(dx*dx + dz*dz) / (2*SLOPE_EPS);
 }
 
+/* ---------------- reachability: "can the player actually get there" ----------------
+   THE BUG THIS EXISTS TO PREVENT: a critter, a chest or a pod on a perfectly flat, perfectly
+   legal shelf on top of a mesa tier whose every neighbour is 3 m lower. Slope catches cliff
+   FACES and the collider list catches "inside a rock"; neither can see a legal surface with no
+   legal way onto it, because locally that shelf looks exactly like open meadow.
+
+   The only honest test for "can I get there" is to walk there, so this floods the walkable
+   surface once from the run's spawn point and then answers by lookup. Edges are directional and
+   that is the whole point: DOWN is free (you can always fall off something), UP costs a jump, so
+   the set this computes is specifically "reachable *from where the player starts*" rather than
+   the symmetric "connected to".
+
+   BUILT LAZILY, ON FIRST QUERY, AND THAT ORDERING IS NOT OPTIONAL. The flood walks COLLIDERS, so
+   it must not run until every prop that owns one has pushed it — props.js lands its rocks and
+   vents after buildWorld() returns. Querying early would flood straight through a boulder and
+   bless the ground behind it. resetReach() is called from every build and every dispose so a
+   stale mask can never outlive the world it described. */
+// One extra jump's worth of rise is what an "up" edge costs. Reading it off entities.js's real
+// numbers means a JUMP_VY retune can never silently strand content: PARAMS.reachClimb is derived,
+// not authored. Kept a hair under the true apex — landing on the exact pixel of your peak is not
+// a move a player can rely on, so the mask shouldn't rely on it either.
+const REACH_CLIMB = (11*11)/(2*30) - 0.15;      // JUMP_VY^2/2g, entities.js:29-30
+const REACH_STEP = 3;                           // metres per cell: under the narrowest mesa tier
+const REACH_R = 196;                            // just past the playable ring, so nothing legal is cropped
+const REACH_FLOOR = -3.0;                       // the ravine floor and pond beds are not standing room
+let REACH = null;                               // Uint8Array, lazily flooded
+let REACH_N = 0, REACH_ORIGIN = 0;
+let reachSeed = null;                           // {x,z} — set by buildWorld from the spawn point
+
+export function resetReach(){ REACH = null; }
+// buildWorld hands us the spawn point it already found, so the flood starts where the player does
+// instead of assuming the origin is standable (it usually is — but "usually" is how content goes
+// missing on one seed in twenty).
+export function setReachSeed(pt){ reachSeed = pt ? { x: pt.x, z: pt.z } : null; resetReach(); }
+
+const REACH_DX = [1,-1,0,0,1,1,-1,-1], REACH_DZ = [0,0,1,-1,1,-1,1,-1];
+function buildReach(){
+  // THE CELL COUNT MUST BE ODD. REACH_ORIGIN is (n-1)/2 and every index is computed as
+  // (gz + REACH_ORIGIN)*n + (gx + REACH_ORIGIN) from integer cell coords — an even n makes the
+  // origin a half-cell, every index fractional, and a typed-array write at a fractional index is
+  // SILENTLY DISCARDED. The flood then reports zero reachable cells and rejects the whole map
+  // without erroring anywhere. Derive the half-width first and double it; never round the total.
+  REACH_ORIGIN = Math.ceil(REACH_R/REACH_STEP);
+  REACH_N = REACH_ORIGIN*2 + 1;
+  REACH = new Uint8Array(REACH_N*REACH_N);
+  const hs = new Float32Array(REACH_N*REACH_N);
+  // BFS, not DFS: a flood over ~17k cells recursed would blow the stack on a wide-open seed.
+  // Two flat arrays for the queue rather than an array of pairs — this runs once, but it runs
+  // during the boot frame, and the boot frame is the one the player is watching.
+  const qi = new Int32Array(REACH_N*REACH_N);
+  let head = 0, tail = 0;
+  const sx = reachSeed ? reachSeed.x : 0, sz = reachSeed ? reachSeed.z : 0;
+  const si = idxOf(sx, sz);
+  if(si < 0) return;
+  REACH[si] = 1; hs[si] = groundHeight(sx, sz); qi[tail++] = si;
+  while(head < tail){
+    const i = qi[head++];
+    const cx = (i % REACH_N) - REACH_ORIGIN, cz = ((i / REACH_N)|0) - REACH_ORIGIN;
+    const h = hs[i];
+    for(let d=0;d<8;d++){
+      const gx = cx + REACH_DX[d], gz = cz + REACH_DZ[d];
+      if(gx < -REACH_ORIGIN || gx > REACH_ORIGIN || gz < -REACH_ORIGIN || gz > REACH_ORIGIN) continue;
+      const ni = (gz + REACH_ORIGIN)*REACH_N + (gx + REACH_ORIGIN);
+      if(REACH[ni]) continue;
+      const nx = gx*REACH_STEP, nz = gz*REACH_STEP;
+      if(nx*nx + nz*nz > REACH_R*REACH_R) continue;
+      /* THE MIDPOINT CHECK, and it is what stops the mask lying. Cells are REACH_STEP apart, so
+         testing only the endpoints lets the flood tunnel straight through anything narrower than
+         one cell — a 3 m-wide, 6 m-tall spine between two low cells reads as "both low, walk
+         across" and the mask blesses the far side. Sampling halfway costs one more surfaceAt per
+         edge and turns a grid walk into something that actually respects walls.
+         HAZARD: surfaceAt returns a SHARED object, so each call's fields go into locals on the
+         very next line — never hold the reference across the second call. */
+      const mid = surfaceAt((cx*REACH_STEP + nx)*0.5, (cz*REACH_STEP + nz)*0.5, h);
+      const mh = mid.h, mblocked = mid.blocked;
+      if(mblocked || mh - h > REACH_CLIMB) continue;
+      // the movement query itself decides the edge, so the mask and the collision agree by
+      // construction.
+      const surf = surfaceAt(nx, nz, mh);
+      const nh = surf.h, blocked = surf.blocked;
+      if(blocked) continue;                       // a wall from where we stand
+      if(nh < REACH_FLOOR) continue;              // stepping into the void
+      if(nh - mh > REACH_CLIMB) continue;         // too tall to jump; DOWN is deliberately free
+      REACH[ni] = 1; hs[ni] = nh; qi[tail++] = ni;
+    }
+  }
+}
+function idxOf(x, z){
+  const gx = Math.round(x/REACH_STEP), gz = Math.round(z/REACH_STEP);
+  if(gx < -REACH_ORIGIN || gx > REACH_ORIGIN || gz < -REACH_ORIGIN || gz > REACH_ORIGIN) return -1;
+  return (gz + REACH_ORIGIN)*REACH_N + (gx + REACH_ORIGIN);
+}
+/* The placement predicate. Samples the cell plus its four neighbours and passes if ANY is
+   reachable, because a 3 m grid quantises a spot near a cell boundary onto whichever side it
+   rounded to — demanding the exact cell would reject legal ground at every tier edge. Callers
+   that place a whole cluster (props.js's pod runs) should test each member, not just the head. */
+export function reachable(x, z){
+  if(!REACH) buildReach();
+  const i = idxOf(x, z);
+  if(i < 0) return false;
+  if(REACH[i]) return true;
+  const gx = Math.round(x/REACH_STEP), gz = Math.round(z/REACH_STEP);
+  for(let d=0;d<4;d++){
+    const ax = gx + REACH_DX[d], az = gz + REACH_DZ[d];
+    if(ax < -REACH_ORIGIN || ax > REACH_ORIGIN || az < -REACH_ORIGIN || az > REACH_ORIGIN) continue;
+    if(REACH[(az + REACH_ORIGIN)*REACH_N + (ax + REACH_ORIGIN)]) return true;
+  }
+  return false;
+}
+// diagnostics for ?probe and the verification pass: what fraction of the ring the player can hold
+export function reachStats(){
+  if(!REACH) buildReach();
+  let on = 0, total = 0;
+  for(let i=0;i<REACH.length;i++){
+    const gx = (i % REACH_N) - REACH_ORIGIN, gz = ((i / REACH_N)|0) - REACH_ORIGIN;
+    const x = gx*REACH_STEP, z = gz*REACH_STEP;
+    if(x*x + z*z > REACH_R*REACH_R) continue;
+    total++; if(REACH[i]) on++;
+  }
+  return { cells: total, reachable: on, frac: total ? on/total : 0, step: REACH_STEP };
+}
+
 // item 28. One cheap "keep out of here" query every placement predicate consults; the caller
 // picks its own clearance, because a mushroom and a 42m tower need different room.
 export function inExclusion(x, z, pad=2, skipTag=null){
@@ -639,6 +761,9 @@ export function buildWorld(scene, quality=1, seed=1){
   // so the spawn search runs once against the FINISHED collider list instead of per frame.
   world.colliders = COLLIDERS;
   world.spawnPoint = findSpawnPoint(seed);
+  // the flood has to start where the player does, and stay invalid until someone asks for it —
+  // props.js still has colliders to push after we return.
+  setReachSeed(world.spawnPoint);
   markOwnership(world);
   return world;
 }
@@ -2517,6 +2642,9 @@ function markOwnership(world){
     world.updaters.length = 0;
     world.update = ()=>{};
     RAVINE = null; POCKETS = {}; LANDMARKS = []; WORLD = null;
+    // the mask describes a collider list that no longer exists; a stale one would bless ground
+    // in the next world that is inside a rock in this one.
+    resetReach();
   };
 }
 

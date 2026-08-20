@@ -64,6 +64,16 @@ slope, exclusion zones *and the collider list* — so a prop can't spawn inside 
 already exists. This is the single habit that most separates a generator that produces places from
 one that produces scatter.
 
+And one test none of those can replace: **`reachable(x, z)` in `world.js`** — a reachability mask
+flood-filled once from the run's spawn point, with DOWN free and UP costing one jump. Slope catches
+cliff faces, colliders catch "inside a rock"; neither can see a flat, legal shelf with no legal way
+onto it, because locally that shelf looks exactly like meadow. Anything the player has to *touch* —
+critters, pods, chests, vents — is gated on it, always as the LAST predicate, because it is the only
+one that can trigger the flood. It is built lazily so that colliders exist first, and invalidated on
+every world build and teardown. Gating placement is only half of it: `fauna.js` also re-checks live
+critters against the mask on a slow tick, because a critter can *wander* somewhere it could not
+have spawned.
+
 **Comments state the invariant, not the code.** Not "loop over the tiers" but "the visual mesh and
 the collision volume come out of the same loop, so they can never drift apart." Not "30% chance"
 but "pods are where pry-spines come from, so cysts always stay reachable." Not "dispose geometry"
@@ -73,10 +83,16 @@ at architecture level; do it at line level too, because that's where it prevents
 ## Ownership boundaries worth preserving
 
 - **`progress.js` owns every `mycelium_*` `localStorage` key.** Essence bank, mutations, gear
-  collection, coins, Mycelium, contracts, World Depth. Nothing else reads or writes them. Per-run
-  state lives on `game` in `main.js` and on `Player`, and is discarded on every new hunt.
-- **`weapons.js` / `armor.js` / `potions.js` / `mushrooms.js` / `bossTraits.js` are pure data.**
-  No progression logic — that all lives in `progress.js`.
+  collection, coins, Mycelium, lockpicks, contracts, World Depth. Nothing else reads or writes them.
+  Per-run state lives on `game` in `main.js` and on `Player`, and is discarded on every new hunt —
+  the elemental ring slot is per-run for exactly this reason.
+  **Persisted shapes need a migration path, not a filter.** Contracts grew a `kind` field; the loader
+  defaults a missing one to `'harvest'` rather than dropping the entry, because silently voiding a
+  player's in-progress quests is the worst class of save bug. Same for the `mycelium_spines` key,
+  which keeps its old name after the rename to lockpicks so no wallet resets.
+- **`weapons.js` / `armor.js` / `potions.js` / `rings.js` / `mushrooms.js` / `bossTraits.js` are
+  pure data.** No progression logic — that all lives in `progress.js`. `palette.js` is pure too, and
+  deliberately imports nothing at all so it can be exercised under plain `node`.
 - **Geometry and collision are emitted together.** A prop that registers a collider does it in the
   same loop that builds its mesh, so the two cannot drift apart.
 - **Seeded determinism.** `mulberry32` streams, with `deriveSeed(seed, salt)` giving each

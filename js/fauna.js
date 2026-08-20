@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { toonMat, addOutline, anchorToBase } from './fx.js';
 import { mulberry32 } from './rng.js';
-import { surfaceAt, slopeAt, inExclusion, scatter, groundHeight, COLLIDERS, PARAMS } from './world.js';
+import { surfaceAt, slopeAt, inExclusion, scatter, groundHeight, reachable, COLLIDERS, PARAMS } from './world.js';
 import { SPECIES_BY_ID } from './mushrooms.js';
 
 /* ---------------- tuning ----------------
@@ -43,6 +43,11 @@ export const FAUNA = {
   stompCeil: 2.3,
   chainWindow: 1.6,      // seconds of un-broken chain; a landing also breaks it via resetChain()
   respawnEvery: 20,      // seconds between population top-ups
+  // How often a live critter is rechecked against the reachability mask. Slower than the respawn
+  // tick on purpose: a stranded critter is retired here and re-placed by the NEXT top-up, so the
+  // two timers being coprime-ish means the gap between "gone" and "back" is short but never zero
+  // (a creature that vanishes and reappears in the same frame reads as a flicker, not a wander).
+  strandEvery: 7,
   // Critters are short-legged: they step over less than the player's STEP (1.5). Passing a
   // smaller value to surfaceAt() is what stops one strolling up a boulder the player has to jump.
   step: 0.55,
@@ -102,7 +107,7 @@ export const CRITTER_SPECIES = [
     limb:'tendril', limbX:0.22, limbY:-0.42, stride:0.10, lift:0.03,
     frondN:5, frondY:-0.44, frondLen:0.44,
     top:1.00, reach:1.20, speed:2.6, gait:3.2, bob:0.06, torsoY:0.78, hover:0.34,
-    // Mycelium had one source (contracts) and one sink (pry-spines). A second source that costs
+    // Mycelium had one source (contracts) and one sink (lockpicks). A second source that costs
     // a trip to the rim is the point: it makes the outer ring worth crossing the map for.
     drop:{ essence:0, essencePer:0, essenceCap:0, myco:1, mycoPer:0.5, mycoCap:3, harvestN:0 },
   },
@@ -240,7 +245,13 @@ function placeOk(sp, x, z, slopeMax){
   const s = slopeAt(x, z);
   if(s < sp.slopeMin || s > slopeMax) return false;
   if(groundHeight(x, z) < FAUNA.minGroundH) return false;
-  return clearOfColliders(x, z, sp.clear);
+  if(!clearOfColliders(x, z, sp.clear)) return false;
+  // THE ONE TEST SLOPE AND COLLIDERS CANNOT REPLACE. Everything above says "this is legal
+  // ground"; only this says "the player can get to it". A critter on a mesa shelf 3 m above every
+  // neighbour passed every other check and was still unharvestable — and because the whole payout
+  // is "land on it", an unreachable critter is not a hard target, it is a broken one. Deliberately
+  // LAST: it is the only predicate here that can trigger a one-off flood fill.
+  return reachable(x, z);
 }
 
 /* ---------------- wander ----------------
@@ -345,7 +356,9 @@ export function buildFauna(scene, rng, world, opts={}){
     let pts = scatter(rng, need, sp.minDist, (x,z)=>placeOk(sp, x, z, sp.slopeMax), area);
     // A world can roll a seed with no ground in a species' slope band at all. Relaxing the band
     // once beats leaving the habitat empty: an absent species reads as a bug, a slightly
-    // off-habitat one does not.
+    // off-habitat one does not. Note what is relaxed and what is not: the SLOPE band widens,
+    // reachability never does. An off-habitat critter is a compromise; an unreachable one is the
+    // bug this fallback would otherwise reintroduce on exactly the awkward seeds that need it.
     if(pts.length < need){
       const more = scatter(rng, need-pts.length, sp.minDist,
         (x,z)=>placeOk(sp, x, z, sp.maxSlope), area);
@@ -376,13 +389,33 @@ export function buildFauna(scene, rng, world, opts={}){
     c.group.visible = true;
   }
 
-  let respawnT = 0, chain = 0, chainT = 0;
+  let respawnT = 0, chain = 0, chainT = 0, strandT = 0, stranded = 0;
   const handle = {
     critters,
     species: CRITTER_SPECIES,
     group,
 
     update(dt, t, playerPos, playerVy){
+      /* THE STRANDED SWEEP, and it exists because gating PLACEMENT is only half the fix.
+         placeOk() proves a critter is reachable where it spawns; nothing proves it stays there.
+         A critter walks DOWN any drop (tryDir only refuses to RISE more than FAUNA.step), so a
+         perfectly legal spawn can wander off a shelf into somewhere the player cannot follow —
+         and a critter you can see, that is alive, and that you cannot land on is exactly the
+         complaint this whole item came from, whichever half of the code put it there.
+         So: recheck live critters against the mask on a slow tick and retire any that have got
+         themselves stuck. Retiring rather than teleporting is deliberate — a creature that
+         vanishes reads as one that wandered off, whereas one that blinks across the valley reads
+         as a bug. The next top-up re-places it through placeOk, which is reachable by
+         construction. One array lookup per critter every FAUNA.strandEvery seconds. */
+      strandT += dt;
+      if(strandT >= FAUNA.strandEvery){
+        strandT = 0;
+        for(const c of critters){
+          if(c.dead || c.dying) continue;
+          if(reachable(c.x, c.z)) continue;
+          c.dead = true; c.group.visible = false; stranded++;
+        }
+      }
       respawnT += dt;
       if(respawnT >= FAUNA.respawnEvery){
         respawnT = 0;
@@ -502,6 +535,10 @@ export function buildFauna(scene, rng, world, opts={}){
     // The chainWindow timer is only the fallback for a chain that ends in mid-air.
     resetChain(){ chain = 0; chainT = 0; },
     get chain(){ return chain; },
+    // how many critters the sweep has had to retire this run. Should stay at or near zero; a
+    // number that climbs means either the mask or the wander resolver is wrong, and this is the
+    // only way to tell which without watching one for ten minutes.
+    get strandedCount(){ return stranded; },
 
     // stable for the whole run: a dead critter's group stays parented and turns invisible, so
     // main.js registers its hover tags ONCE and never has to re-register after a respawn.
@@ -544,11 +581,11 @@ export function buildFauna(scene, rng, world, opts={}){
     const sp = c.sp, d = sp.drop;
     const used = chain;                       // 0-based un-broken count, per progress.js's contract
     chain = used + 1; chainT = FAUNA.chainWindow;
-    // progress.js owns the coins and the 12% critter spine roll; fauna.js never touches
+    // progress.js owns the coins and the 12% critter lockpick roll; fauna.js never touches
     // localStorage and never rolls its own odds.
     const banked = progress ? progress.stompCritter(used) : null;
     const reward = banked ? Object.assign({ banked:true }, banked)
-      : { banked:false, coins:Math.min(12, 2 + used*2), spine:false, spines:0, coinsTotal:0 };
+      : { banked:false, coins:Math.min(12, 2 + used*2), lockpick:false, lockpicks:0, coinsTotal:0 };
     reward.species = sp.id; reward.name = sp.name; reward.icon = sp.icon;
     reward.chain = used;
     reward.essence = d.essence ? Math.min(d.essenceCap, Math.round(d.essence + used*d.essencePer)) : 0;
