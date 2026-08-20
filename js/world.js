@@ -1,6 +1,6 @@
 // world.js — terrain, sky, vegetation, atmosphere
 import * as THREE from 'three';
-import { fbm, noise2, paintTexture, toonMat, addOutline } from './fx.js';
+import { makeNoise, fbmOf, srgbTriple, paintTexture, toonMat, addOutline } from './fx.js';
 import { mulberry32, deriveSeed } from './rng.js';
 import { MUSHROOM_SPECIES, SPECIES_BY_ID } from './mushrooms.js';
 
@@ -24,8 +24,48 @@ const PLAYER_H = 2.55;
    Deliberately NOT here: terrain height coefficients (the shape of the land, owned by
    baseTerrainHeight) and geometry/appearance constants, which stay at their use site. */
 export const PARAMS = {
-  // noise offset range — decides which slice of the noise field a seed lands on
-  noiseOff: 180,
+  /* --- terrain shape (items 08, 22, 23, 24, 26, 27). Heights are METRES; see the amplitude
+     convention above baseTerrainHeight() before changing any of the *A coefficients. --- */
+  // mesh extent. Deliberately LARGER than WORLD_SIZE: the wobbled rim crest (edgeRMin+edgeRVar,
+  // up to 232) plus its outer skirt has to fit inside the mesh, or the boundary wall would be
+  // cut off in the axis directions and you would see sky where the ground should be.
+  terrainSpan: 500, terrainSegs: 172,
+  // item 22 — domain warp. warpR0/R1 ramp the warp in with radius: a constant warp at the origin
+  // makes every angle-derived boundary pinwheel around the spawn point.
+  warpFreq: 0.0055, warpAmp: 27, warpR0: 28, warpR1: 150,
+  // item 23 — world edge. edgeRMin is the PLAYABILITY FLOOR: entities.js clamps the player to
+  // radius 195, so the crest must never come inside that. The wobble is added, never subtracted.
+  edgeRMin: 200, edgeRVar: 32, edgeGain: 1.15, edgeLoopR: 2.5,
+  rimHMin: 18, rimHVar: 18,
+  edgeLock: 0.975,          // >= 195/edgeRMin, so the "rim wins" override cannot reach into play
+  edgeSkirt: 0.42, edgeSkirtMax: 11,
+  // item 24 — authored radial silhouette, in fractions of the crest radius. These are the RANGES
+  // the per-world curve is rolled from (see rollShape): the four-part profile is authored, but a
+  // world picks a tight basin under a tall rim or a broad shallow terrace under a low one. Without
+  // this the silhouette is identical in every world and swamps every per-seed difference in it.
+  silBasin: 0.16, silBasinVar: 0.09, silRamp: 0.48, silRampVar: 0.14,
+  silTerr: 0.68, silTerrVar: 0.12, terraceH: 6, terraceHVar: 8,
+  rimScaleMin: 0.80, rimScaleVar: 0.55, reliefMulMin: 0.70, reliefMulVar: 0.85,
+  regBiasVar: 0.24,
+  // item 27 — regions. regLo/regHi split one weight field into plains / broken / hills.
+  regFreq: 0.0042, regLo: -0.06, regHi: 0.10, regBand: 0.30,
+  regPlainF: 0.013, regPlainA: 4.5,
+  regHillF: 0.020,  regHillA: 20,
+  regBrokeF: 0.034, regBrokeA: 12,
+  // hills/mound mask + fine detail. Thresholds are on NORMALIZED fbm (range ~+/-0.45).
+  moundMF: 0.006, moundMLo: 0.03, moundMHi: 0.42, moundF: 0.023, moundA: 15,
+  detailF: 0.055, detailA: 2.2,
+  clearR0: 8, clearR1: 44, reliefFade: 0.80, reliefFadeAmt: 0.85,
+  // item 26 — authored sites: hand-placed bowl/rim/plinth set-pieces the noise carves around
+  siteChance2: 0.55, siteDMin: 58, siteDVar: 105,
+  siteRMin: 17, siteRVar: 8, siteCoreR: 0.16,
+  siteCoreMin: 1.8, siteCoreVar: 1.8, siteBowlMin: 2.2, siteBowlVar: 2.4,
+  siteRimMin: 4, siteRimVar: 4,
+  // canopy lightness, authored in sRGB (item 41b). Raised from 0.42/0.12 because the old values
+  // were being read as linear and rendering ~0.68 — the same look now comes out of honest numbers.
+  canLMin: 0.56, canLVar: 0.16,
+  // atmosphere + light rig (items 06, 43)
+  fogDensity: 0.0030, shadowMap: 2048, shadowBox: 120, shadowBias: -0.0007, shadowNormalBias: 0.4,
   // ravine: the bridge-crossing layout feature. not every world gets one.
   ravChance: 0.6, ravDMin: 45, ravDVar: 70, ravSegMin: 30, ravSegVar: 30,
   ravBend: 1.6, ravWMin: 5, ravWVar: 3, ravDepthMin: 5, ravDepthVar: 3,
@@ -36,8 +76,6 @@ export const PARAMS = {
   witherChance: 0.5,   witherPMin: 20,  witherPMax: 100,
   // big set-pieces: rolled per world, floor of 2 so no world is a bare field
   landmarkChance: 0.62, landmarkMin: 2,
-  // terrain mesh resolution (sampling density, not the height math)
-  terrainSegs: 160,
   // trees
   treeTries: 520, treeMax: 110, treeDMin: 16, treeDMax: 195, treeGrove: -0.05,
   treeSMin: 0.8, treeSVar: 0.9,
@@ -86,11 +124,70 @@ export const PARAMS = {
   spawnTries: 900, spawnR: 42, spawnSlope: 0.55, spawnClear: 2.4,
 };
 
-// seed-driven noise offsets, set by buildWorld before terrain is sampled
-let OFF = { x:0, z:0 };
+/* ---------------- per-world noise fields (item 07) ----------------
+   One INDEPENDENT field per subsystem, each built from its own derived stream. This replaced a
+   single fixed field with a per-seed offset slid over it, and the difference is the whole point:
+   an offset gives every world the SAME ridges in a new place — same character, different window.
+   A separate permutation is a different lattice, so seeds differ in kind, not just in framing.
+   It also decouples tuning: the warp and the coastline no longer read the same numbers, so
+   changing one cannot reshape the other.
+   Salts are arbitrary but must stay unique — reusing one silently re-couples two subsystems. */
+let F = buildFields(1);   // built at load so a stray sample before buildWorld() can't hit null
+function buildFields(seed){
+  return {
+    warp:   makeNoise(mulberry32(deriveSeed(seed, 0x0a11))),  // item 22 — domain warp
+    coast:  makeNoise(mulberry32(deriveSeed(seed, 0xc0a5))),  // item 23 — edge radius + rim height
+    region: makeNoise(mulberry32(deriveSeed(seed, 0x2e91))),  // item 27 — which region is where
+    relief: makeNoise(mulberry32(deriveSeed(seed, 0x8e11))),  // item 27 — per-region relief
+    mound:  makeNoise(mulberry32(deriveSeed(seed, 0x3707))),  // hill mask + broad mounds
+    detail: makeNoise(mulberry32(deriveSeed(seed, 0xd37a))),  // fine relief, colour blotches, prop jitter
+  };
+}
+
+/* ---------------- per-world layout, decided before the heightfield is sampled ----------------
+   buildTerrain() owns all of this because the terrain mesh has to be able to see it: the ravine
+   cuts the height, the authored sites carve it, and the pockets tint it. buildProps() then reads
+   the same state, which is why props land in the places the terrain was shaped for. */
+let THEME = null;                   // set by buildTerrain (THEMES is declared further down)
 // seeded ravine (gully) for this world — null if this world doesn't have one.
 // a 2-segment bent path {ax,az -> bx,bz -> cx,cz} with a width/depth.
 let RAVINE = null;
+let POCKETS = {};                   // themed clusters, may be empty
+let LANDMARKS = [];                 // which big set-pieces this world rolled
+let QUALITY = 1;                    // buildWorld's quality argument, needed by both halves
+// item 26 — authored sites, read by baseTerrainHeight(). Never reassigned: truncate in place.
+const SITES = [];
+/* items 24/27 — this world's pick from the shape RANGES in PARAMS. The curve is authored; which
+   curve you get is rolled. Keeping the pick here rather than writing into PARAMS matters: PARAMS
+   is the tuning surface item 10's panel edits, and a generator that mutated it would drift its own
+   ranges away every rebuild. */
+let SHAPE = rollShape(()=>0.5);   // midpoint defaults until buildTerrain rolls a real one
+function rollShape(rng){
+  const basin = PARAMS.silBasin + rng()*PARAMS.silBasinVar;
+  const ramp  = PARAMS.silRamp  + rng()*PARAMS.silRampVar;
+  const terr  = PARAMS.silTerr  + rng()*PARAMS.silTerrVar;
+  return {
+    basin, ramp: Math.max(basin+0.08, ramp), terr: Math.max(ramp+0.06, terr),
+    terrace: PARAMS.terraceH + rng()*PARAMS.terraceHVar,
+    rimScale: PARAMS.rimScaleMin + rng()*PARAMS.rimScaleVar,
+    reliefMul: PARAMS.reliefMulMin + rng()*PARAMS.reliefMulVar,
+    regBias: (rng()-0.5)*PARAMS.regBiasVar,
+  };
+}
+let WORLD = null;                   // the world object buildTerrain built, so buildProps can be
+                                    // called with the contract's 2-argument signature
+
+/* item 41(b) — HSL arithmetic belongs in sRGB. THREE.Color.offsetHSL()/setHSL() default to the
+   WORKING colour space, which is linear-sRGB on r160: an authored lightness of 0.42 ends up
+   displaying around 0.68 (washed out) and a hue offset rotates non-perceptually, bunching up in
+   the greens. Round-tripping through sRGB is the fix, and it has to happen at every call site —
+   a single missed one shows up as one prop that doesn't match the palette. */
+const _hsl = { h:0, s:0, l:0 };
+function offsetHSLsRGB(c, dh, ds, dl){
+  c.getHSL(_hsl, THREE.SRGBColorSpace);
+  return c.setHSL(_hsl.h + dh, THREE.MathUtils.clamp(_hsl.s + ds, 0, 1),
+    THREE.MathUtils.clamp(_hsl.l + dl, 0, 1), THREE.SRGBColorSpace);
+}
 
 // cheap 2D point-to-segment distance — no allocations, called from groundHeight (runs every frame per entity)
 function distToSeg(px, pz, ax, az, bx, bz){
@@ -133,20 +230,195 @@ export const THEMES = [
     terraHue:-0.06, terraSat:0.06, canopyHue:-0.19, canopySat:0.62, canopyBase:0xc8882e },
 ];
 
+/* ================= terrain shape (items 08, 22, 23, 24, 26, 27, 29) =================
+
+   AMPLITUDE CONVENTION (item 08). fbmOf() is NORMALIZED: it divides by the summed octave
+   amplitude, so its range is the underlying field's range (measured: ~-0.45..+0.49, sd 0.15)
+   whatever `oct` is. The legacy unnormalized fbm() shrank as you removed octaves, which is why
+   changing "detail" used to silently change the height of the world. Consequences:
+     - a coefficient written `* 20` is a term that peaks near +/-9 m, and 20 is the only number
+       you need to touch to change that;
+     - `oct` is now a pure detail control — raise it and the silhouette does not move;
+     - thresholds compared against fbmOf output (the hill mask, the region split) live on the
+       +/-0.45 scale, NOT the old +/-0.40 one. All of these are in PARAMS.
+
+   COMPOSITION ORDER (item 29). Read top to bottom. Each term knows whether it NEGOTIATES (adds
+   into the running height and can be overruled) or WINS (overwrites what came before). Anything
+   added later belongs in this list, at the position its authority demands — not on the end.
+     1. domain warp     (item 22)  displaces (x,z) BEFORE any distance or angle is taken, ramped
+                                   in with radius so the origin cannot pinwheel.
+     2. base silhouette (item 24)  an AUTHORED radial curve: basin, quadratic ramp, terrace,
+                                   quintic ease into the rim. The profile of the world.
+     3. region relief   (item 27)  one field at a per-region offset/frequency/amplitude, weighted
+                                   by that region's mask.                          NEGOTIATES
+     4. mounds + detail            broad masked hills and fine roughness.          NEGOTIATES
+     5. authored carve  (item 26)  hand-placed sites blend the terrain TOWARD their own profile,
+                                   so a site beats whatever the noise wanted.       WINS locally
+     6. edge falloff    (item 23)  the rim overwrites everything past edgeLock*crest, so no
+                                   amount of relief or carving can gap the boundary. WINS
+   Terms 3 and 4 are muted inside the spawn clearing, so spawn stays flat and readable no matter
+   what the noise rolled — that mask is on the negotiating terms only, deliberately: an authored
+   site or the rim would still win there, and neither is ever placed that close. */
+
+// item 22. Warped coordinates in a shared 2-slot object. groundHeight() runs for every entity
+// every frame, so returning a literal here would be hundreds of garbage objects a second —
+// read .x/.z immediately and never keep the reference.
+const W = { x:0, z:0 };
+function warpAt(x, z, d){
+  const amt = THREE.MathUtils.smoothstep(d, PARAMS.warpR0, PARAMS.warpR1) * PARAMS.warpAmp;
+  if(amt <= 0){ W.x = x; W.z = z; return W; }
+  const f = PARAMS.warpFreq;
+  W.x = x + fbmOf(F.warp, x*f + 3.1, z*f - 1.7, 2)*amt;
+  W.z = z + fbmOf(F.warp, x*f - 8.3, z*f + 5.9, 2)*amt;
+  return W;
+}
+
+// item 23. The world edge is a shaped curve, not a circle. Sampling the wobble along a CIRCLE in
+// noise space is the whole trick: the path is closed, so R(-pi) === R(+pi) and the boundary is
+// continuous where the angle wraps. Sampling fbm(angle) directly leaves a cliff there, which is
+// why a "wobbly coastline" usually can't be done at all.
+// PLAYABILITY INVARIANT: crest = edgeRMin + a strictly POSITIVE wobble. entities.js clamps the
+// player to radius 195 and the enemy spawner rejects past 190, so edgeRMin (200) is the floor
+// that keeps the boundary wall outside the playable disc in EVERY direction of EVERY world.
+// Do not make the wobble signed, and do not lower edgeRMin below 195.
+function edgeWob(ang, ox, oz){
+  const v = fbmOf(F.coast, Math.cos(ang)*PARAMS.edgeLoopR + ox, Math.sin(ang)*PARAMS.edgeLoopR + oz, 3);
+  return THREE.MathUtils.clamp(0.5 + PARAMS.edgeGain*v, 0, 1);
+}
+// Both the crest radius and the rim height are functions of ANGLE ALONE, so they are baked once
+// per world into a wrap-around table instead of running two 3-octave fBms inside every height
+// query. baseTerrainHeight() runs for every entity every frame; six noise samples that can only
+// depend on atan2(z,x) have no business in it (measured 0.43 -> 0.33 us per query). 512 bins is
+// 0.7 degrees, finer than the wobble's own wavelength, and slot [BINS] repeats slot [0] so the
+// interpolation needs no wrap test.
+const EDGE_BINS = 512, TAU = Math.PI*2;
+const EDGE_R = new Float32Array(EDGE_BINS+1), EDGE_H = new Float32Array(EDGE_BINS+1);
+const E = { r:0, h:0 };   // shared, like SURF and W: read immediately, never store
+function bakeEdge(){
+  for(let i=0;i<EDGE_BINS;i++){
+    const a = i/EDGE_BINS*TAU;
+    EDGE_R[i] = PARAMS.edgeRMin + PARAMS.edgeRVar*edgeWob(a, 0, 0);
+    EDGE_H[i] = (PARAMS.rimHMin + PARAMS.rimHVar*edgeWob(a, 17.3, -9.1))*SHAPE.rimScale;
+  }
+  EDGE_R[EDGE_BINS] = EDGE_R[0]; EDGE_H[EDGE_BINS] = EDGE_H[0];
+}
+function edgeAt(ang){
+  let t = (ang < 0 ? ang + TAU : ang)*(EDGE_BINS/TAU);
+  if(!(t >= 0)) t = 0; else if(t > EDGE_BINS) t = EDGE_BINS;   // atan2 returns exactly +pi
+  const i = t < EDGE_BINS ? t|0 : EDGE_BINS-1, f = t - i;
+  E.r = EDGE_R[i] + (EDGE_R[i+1]-EDGE_R[i])*f;
+  E.h = EDGE_H[i] + (EDGE_H[i+1]-EDGE_H[i])*f;
+  return E;
+}
+export function edgeCrest(ang){ return edgeAt(ang).r; }
+bakeEdge();   // default SHAPE, so a sample before buildTerrain still reads a sane edge
+
+// item 24. The authored radial profile — drawn, then roughened, never summed out of noise.
+// A quadratic ramp leaves the basin lip gentle and steepens outward; a quintic ease is flat at
+// BOTH ends, which is what makes the shelf read as a terrace and the rim as a shoulder instead
+// of the uniform bowl two multiplied smoothsteps give you. u = 0 at the centre, 1 at the crest.
+function silhouette(u, terrace, rim){
+  if(u <= SHAPE.basin) return 0;                           // basin: dead flat. spawn must READ.
+  if(u < SHAPE.ramp){
+    const t = (u - SHAPE.basin)/(SHAPE.ramp - SHAPE.basin);
+    return terrace*t*t;                                    // quadratic ramp out of the basin
+  }
+  if(u < SHAPE.terr) return terrace;                        // the terrace shelf
+  const t = Math.min(1, (u - SHAPE.terr)/(1 - SHAPE.terr));
+  return terrace + (rim - terrace)*(t*t*t*(t*(t*6-15)+10)); // quintic ease into the rim
+}
+
+// item 27. Three regions from one weight field, then the SAME relief field sampled at a different
+// offset, frequency and amplitude per region. Variety for the cost of the samples we already pay:
+// no extra fields, no extra tuning surface, and because the weights sum to 1 the regions
+// cross-fade into each other instead of stacking into one lumpy average.
+function regionRelief(wx, wz){
+  const rv = fbmOf(F.region, wx*PARAMS.regFreq + 11.4, wz*PARAMS.regFreq - 4.2, 2);
+  // regBias slides the whole split per world, so one world is mostly plains with a hill shoulder
+  // and the next is mostly hills with a broken spine — same three regions, different country.
+  const lo = PARAMS.regLo + SHAPE.regBias, hi = PARAMS.regHi + SHAPE.regBias;
+  const wPlain = 1 - THREE.MathUtils.smoothstep(rv, lo, lo + PARAMS.regBand);
+  const wHill  = THREE.MathUtils.smoothstep(rv, hi - PARAMS.regBand, hi);
+  const wBroke = Math.max(0, 1 - wPlain - wHill);
+  let h = 0;
+  if(wPlain > 0.002) h += wPlain*PARAMS.regPlainA*fbmOf(F.relief, wx*PARAMS.regPlainF + 61, wz*PARAMS.regPlainF + 23, 2);
+  if(wHill  > 0.002) h += wHill *PARAMS.regHillA *fbmOf(F.relief, wx*PARAMS.regHillF - 140, wz*PARAMS.regHillF + 88, 3);
+  if(wBroke > 0.002){
+    // ridged: folding |n| turns the same field into sharp crests, so the transition band reads as
+    // broken rock rather than a softer version of the dunes either side of it.
+    const n = fbmOf(F.relief, wx*PARAMS.regBrokeF + 300, wz*PARAMS.regBrokeF - 210, 3);
+    h += wBroke*PARAMS.regBrokeA*(0.45 - 2*Math.abs(n));
+  }
+  return h*SHAPE.reliefMul;
+}
+
+// item 26. One site's authored cross-section, relative to its own base elevation: a flat plinth
+// for the payoff to stand on, a dished basin around it, then a raised rim that falls back to
+// grade. Pure arithmetic — no noise — so the shape is identical in every world that rolls a site.
+function siteProfile(u, s){
+  if(u < PARAMS.siteCoreR) return s.coreH;                                     // plinth top, flat
+  // Widths here are level design, not styling: at 0.08 of the radius the plinth and rim faces came
+  // out near-vertical (measured gradient 5.9), and the player's vertical resolve snaps them up a
+  // wall like that, which reads as a collision bug. 0.20/0.28 keep both faces runnable.
+  if(u < PARAMS.siteCoreR + 0.20){
+    const t = (u - PARAMS.siteCoreR)/0.20;
+    return s.coreH + (-s.bowlD - s.coreH)*(t*t*(3-2*t));                       // plinth flank
+  }
+  if(u < 0.62) return -s.bowlD;                                                // basin floor
+  if(u < 0.90){
+    const t = (u - 0.62)/0.28;
+    return -s.bowlD + (s.rimH + s.bowlD)*(t*t*(3-2*t));                        // inner rim face
+  }
+  const t = Math.min(1, (u - 0.90)/0.22);
+  return s.rimH*(1-t)*(1-t);                                                   // rim back to grade
+}
+
 // terrain height *without* the ravine carve — this is "where the ground used to be" before the
 // gully cut through it, which is what a bridge deck should rest at (and what a ravine is measured
 // relative to). Exported so a bridge landmark can query it directly.
+// HOT PATH: plain-number math only, zero allocations. Every helper it calls obeys the same rule.
 export function baseTerrainHeight(x, z){
   const d = Math.sqrt(x*x + z*z);
-  let h = fbm(x*0.012+7.3+OFF.x, z*0.012+2.1+OFF.z, 4) * 10;
-  h += fbm(x*0.05+OFF.x*0.5, z*0.05+OFF.z*0.5, 2) * 1.2;
-  // rolling hills: broad, gentle, low-frequency bumps — masked so only some regions turn hilly,
-  // and the mask itself is seed-offset, so which regions are hilly differs every world
-  const hillMask = THREE.MathUtils.smoothstep(fbm(x*0.006+OFF.x*0.3+40, z*0.006+OFF.z*0.3+40, 2), 0.02, 0.32);
-  h += fbm(x*0.022+OFF.x*0.6+90, z*0.022+OFF.z*0.6+90, 3) * 15 * hillMask;
-  // flatten spawn clearing, raise edges into valley walls
-  h *= THREE.MathUtils.smoothstep(d, 8, 40);
-  h += THREE.MathUtils.smoothstep(d, 150, 210) * 26;
+  // 1. domain warp — everything below reads the warped position, so no boundary traces a circle
+  const w = warpAt(x, z, d);
+  const wx = w.x, wz = w.z;
+  // 2. base silhouette
+  const e = edgeAt(Math.atan2(wz, wx));
+  const crest = e.r, rim = e.h;
+  const u = d/crest;
+  let h = silhouette(u, SHAPE.terrace, rim);
+  // 3 + 4. negotiating terms, muted in the spawn clearing and faded out under the rim
+  const soft = THREE.MathUtils.smoothstep(d, PARAMS.clearR0, PARAMS.clearR1)
+    * (1 - PARAMS.reliefFadeAmt*THREE.MathUtils.smoothstep(u, PARAMS.reliefFade, 1));
+  if(soft > 0.002){
+    h += regionRelief(wx, wz)*soft;
+    const mask = THREE.MathUtils.smoothstep(fbmOf(F.mound, wx*PARAMS.moundMF, wz*PARAMS.moundMF, 2),
+      PARAMS.moundMLo, PARAMS.moundMHi);
+    if(mask > 0.002) h += fbmOf(F.mound, wx*PARAMS.moundF + 90, wz*PARAMS.moundF + 90, 3)*PARAMS.moundA*SHAPE.reliefMul*mask*soft;
+    h += fbmOf(F.detail, wx*PARAMS.detailF, wz*PARAMS.detailF, 2)*PARAMS.detailA*soft;
+  }
+  // 5. authored carve. INVARIANT (the bug this shape exists to avoid): gather every site's
+  // influence FIRST and apply it ONCE. Applying site by site lets a neighbour's rim bulge up
+  // through the middle of this site's basin, because the second blend starts from an already
+  // carved height. Taking the strongest single influence also means overlapping sites degrade
+  // into "the nearer one wins" instead of into mush.
+  let siteW = 0, siteH = 0;
+  for(let i=0;i<SITES.length;i++){
+    const s = SITES[i];
+    const dx = wx - s.x, dz = wz - s.z;
+    const sr = s.r*1.14;
+    if(dx*dx + dz*dz > sr*sr) continue;
+    const su = Math.sqrt(dx*dx + dz*dz)/s.r;
+    const sw = 1 - THREE.MathUtils.smoothstep(su, 0.88, 1.14);
+    if(sw <= siteW) continue;
+    siteW = sw; siteH = s.base + siteProfile(su, s);
+  }
+  if(siteW > 0) h = h*(1-siteW) + siteH*siteW;
+  // 6. edge falloff — WINS. Gated at edgeLock*crest, which is >= 195 by construction, so this
+  // override can never reach into the disc the player is allowed to walk.
+  const lock = THREE.MathUtils.smoothstep(d, crest*PARAMS.edgeLock, crest);
+  if(lock > 0) h = h*(1-lock) + rim*lock;
+  if(d > crest) h += Math.min(PARAMS.edgeSkirtMax, (d-crest)*PARAMS.edgeSkirt);
   return h;
 }
 export function groundHeight(x, z){
@@ -281,14 +553,83 @@ export function findSpawnPoint(seed){
   return { x: 0, z: 0, h: groundHeight(0, 0) };
 }
 
+/* ---------------- shared layout helpers ----------------
+   These read the module-level layout, so both build halves (item 31) see the same world. They
+   used to be closures inside one 1300-line buildWorld; splitting the build is what forced them
+   out, and the split is what makes a live rebuild possible at all. */
+
+// corruption used to be a perfect ring around the origin — same every world. now a
+// witheredHollow pocket can push a patch of it much closer to spawn, unpredictably, and both the
+// ring and the pocket edge are read at WARPED coordinates (item 22) so neither traces a circle.
+function corruptionAt(x, z){
+  const d = Math.hypot(x, z);
+  const w = warpAt(x, z, d);
+  const wx = w.x, wz = w.z;
+  let c = THREE.MathUtils.smoothstep(Math.hypot(wx, wz), 65, 195);
+  const wh = POCKETS.witheredHollow;
+  if(wh){
+    const pd = Math.hypot(wx-wh.x, wz-wh.z);
+    c = Math.max(c, (1 - THREE.MathUtils.smoothstep(pd, wh.r*0.4, wh.r)) * 0.85);
+  }
+  return c;
+}
+function hasLandmark(id){ return LANDMARKS.indexOf(id) >= 0; }
+
+// item 09: every authored site picks its spot through the same rejection sampler, so a
+// landmark can no longer land in the ravine, on a cliff face, or on top of an earlier
+// landmark. Sites are placed in file order, so each one sees everything built before it.
+function siteTest(pad, tag){
+  return (x,z)=> slopeAt(x,z) < PARAMS.siteSlope && !inExclusion(x,z,pad,tag) && clearOf(x,z,PARAMS.siteClear);
+}
+function spot(rng, r0, r1, pad=PARAMS.sitePad, tag=null){
+  const p = scatter(rng, 1, 0, siteTest(pad, tag), { x:0, z:0, r0, r1 })[0];
+  if(p) return p;
+  // a world missing its set-piece is worse than a set-piece on an awkward site
+  const a = rng()*Math.PI*2, d = r0 + rng()*(r1-r0);
+  return { x: Math.cos(a)*d, z: Math.sin(a)*d };
+}
+
+/* ---------------- item 42: everything this module put in the scene ----------------
+   Every addTo(scene, ) in this file goes through addTo(), so dispose() can remove exactly what
+   world.js owns and nothing else. Counting from scene.children.length instead would sweep away
+   the player, the particle pool and anything else main.js added after the build. */
+const OWNED = [];
+function addTo(sc, ...objs){ for(const o of objs){ sc.add(o); OWNED.push(o); } }
+
+/* ---------------- item 31: staged build ----------------
+   buildWorld keeps its exact signature (main.js calls it and is owned by someone else) and is
+   now just the two halves plus the queries that need the FINISHED world. Splitting them is what
+   lets item 10's dev panel re-run terrain at a new resolution without rebuilding 20 instanced
+   prop batches — generation you can re-run in a frame is generation you can tune. */
 export function buildWorld(scene, quality=1, seed=1){
-  const rng = mulberry32(deriveSeed(seed, 0x51ed));
-  // buildWorld owns these arrays' lifetime. Truncate in place, never reassign: other modules
+  const world = buildTerrain(scene, seed, PARAMS.terrainSegs, quality);
+  buildProps(scene, seed, world);
+  world.update = (dt, t)=>{ for(const u of world.updaters) u(dt,t); };
+  // items 01 / 09: handed to main.js so it never has to reach for the module-level arrays, and
+  // so the spawn search runs once against the FINISHED collider list instead of per frame.
+  world.colliders = COLLIDERS;
+  world.spawnPoint = findSpawnPoint(seed);
+  markOwnership(world);
+  return world;
+}
+
+// item 31. Heightfield + mesh + the atmosphere the terrain is lit and faded by. It also rolls the
+// LAYOUT (theme, ravine, pockets, landmark set, authored sites) because the heightfield has to be
+// able to see it — the ravine cuts the height and the sites carve it, so they cannot be decided
+// after the mesh exists. `res` is the segment count: lower it for a fast preview rebuild.
+export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
+  // this half owns the arrays' lifetime. Truncate in place, never reassign: other modules
   // already hold the exported COLLIDERS reference.
-  COLLIDERS.length = 0; EXCLUSIONS.length = 0;
-  OFF = { x: (rng()*2-1)*PARAMS.noiseOff, z: (rng()*2-1)*PARAMS.noiseOff };
-  const theme = THEMES[(rng()*THEMES.length)|0];
-  const world = { updaters: [], seed, theme };
+  COLLIDERS.length = 0; EXCLUSIONS.length = 0; SITES.length = 0; OWNED.length = 0;
+  QUALITY = quality;
+  // item 07: every field this world will ever sample, built once from the world seed.
+  F = buildFields(seed);
+  // rolled from its own stream, so adding a knob to the layout below cannot reshape the terrain
+  SHAPE = rollShape(mulberry32(deriveSeed(seed, 0x54a9e)));
+  bakeEdge();   // depends on both F.coast and SHAPE.rimScale, so it re-bakes after both are set
+  const rng = mulberry32(deriveSeed(seed, 0x51ed));
+  const theme = THEME = THEMES[(rng()*THEMES.length)|0];
+  const world = WORLD = { updaters: [], seed, theme, terrainRes: res };
   // seeded ravine: ~60% of worlds get one, giving a bridge-crossing layout feature; the rest don't
   RAVINE = null;
   if(rng() < PARAMS.ravChance){
@@ -304,7 +645,7 @@ export function buildWorld(scene, quality=1, seed=1){
   // ---- seeded regional "pockets": optional themed clusters so each world's zones read
   // as distinct places worth remembering, not just a uniform prop scatter with a palette
   // swap. each is independently rolled — a world can have none, some, or all of them. ----
-  const POCKETS = {};
+  POCKETS = {};
   const rollPocket = (minD, maxD)=>{
     const a = rng()*Math.PI*2, d = minD + rng()*(maxD-minD);
     return { x: Math.cos(a)*d, z: Math.sin(a)*d, r: PARAMS.pockRMin + rng()*PARAMS.pockRVar };
@@ -312,56 +653,72 @@ export function buildWorld(scene, quality=1, seed=1){
   if(rng() < PARAMS.crystalChance) POCKETS.crystalHollow = rollPocket(PARAMS.crystalPMin, PARAMS.crystalPMax);
   if(rng() < PARAMS.warrenChance) POCKETS.fungalWarren = { ...rollPocket(PARAMS.warrenPMin, PARAMS.warrenPMax), species: MUSHROOM_SPECIES[(rng()*MUSHROOM_SPECIES.length)|0].id };
   if(rng() < PARAMS.witherChance) POCKETS.witheredHollow = rollPocket(PARAMS.witherPMin, PARAMS.witherPMax);
-  // corruption used to be a perfect ring around the origin — same every world. now a
-  // witheredHollow pocket can push a patch of it much closer to spawn, unpredictably.
-  function corruptionAt(x, z){
-    let c = THREE.MathUtils.smoothstep(Math.hypot(x, z), 65, 195);
-    const wh = POCKETS.witheredHollow;
-    if(wh){
-      const pd = Math.hypot(x-wh.x, z-wh.z);
-      c = Math.max(c, (1 - THREE.MathUtils.smoothstep(pd, wh.r*0.4, wh.r)) * 0.85);
-    }
-    return c;
-  }
   // which "big" set-piece landmarks this world gets — not all of them every time, so the
   // landmark *set itself* reads as different between worlds, not just repositioned.
   // guaranteed >=2 so no world ends up feeling like a bare field.
   const BIG_LANDMARKS = ['tower','stones','geysers','pond'];
-  let landmarkRoll = BIG_LANDMARKS.filter(()=> rng() < PARAMS.landmarkChance);
-  if(landmarkRoll.length < PARAMS.landmarkMin){
-    const missing = BIG_LANDMARKS.filter(id=>!landmarkRoll.includes(id));
-    while(landmarkRoll.length < PARAMS.landmarkMin && missing.length) landmarkRoll.push(missing.splice((rng()*missing.length)|0, 1)[0]);
+  LANDMARKS = BIG_LANDMARKS.filter(()=> rng() < PARAMS.landmarkChance);
+  if(LANDMARKS.length < PARAMS.landmarkMin){
+    const missing = BIG_LANDMARKS.filter(id=>LANDMARKS.indexOf(id) < 0);
+    while(LANDMARKS.length < PARAMS.landmarkMin && missing.length) LANDMARKS.push(missing.splice((rng()*missing.length)|0, 1)[0]);
   }
-  const hasLandmark = id => landmarkRoll.includes(id);
   // item 28: a themed pocket is a *place*, so ambient scatter stays out of it. Its own props
   // ask for their zone back by passing their tag to inExclusion().
   for(const tag of Object.keys(POCKETS)) EXCLUSIONS.push({ x:POCKETS[tag].x, z:POCKETS[tag].z, r:POCKETS[tag].r, tag });
 
-  // item 09: every authored site picks its spot through the same rejection sampler, so a
-  // landmark can no longer land in the ravine, on a cliff face, or on top of an earlier
-  // landmark. Sites are placed in file order, so each one sees everything built before it.
-  const siteTest = (pad, tag)=> (x,z)=>
-    slopeAt(x,z) < PARAMS.siteSlope && !inExclusion(x,z,pad,tag) && clearOf(x,z,PARAMS.siteClear);
-  const spot = (r0, r1, pad=PARAMS.sitePad, tag=null)=>{
-    const p = scatter(rng, 1, 0, siteTest(pad, tag), { x:0, z:0, r0, r1 })[0];
-    if(p) return p;
-    // a world missing its set-piece is worse than a set-piece on an awkward site
-    const a = rng()*Math.PI*2, d = r0 + rng()*(r1-r0);
-    return { x: Math.cos(a)*d, z: Math.sin(a)*d };
-  };
-
-  // seeded 2D-noise helpers (offset so terrain + groves vary per seed)
-  const n2 = (x,y)=>noise2(x+OFF.x, y+OFF.z);
-  const fb = (x,y,o)=>fbm(x+OFF.x, y+OFF.z, o);
+  /* ----- item 26: authored sites — the hand-placed payoff the noise carves around -----
+     Rolled through the SAME rejection sampler as every other set-piece, which is how a site is
+     kept out of the ravine, off the bridge and out of the spawn clearing (siteDMin is beyond the
+     basin, and inExclusion covers the rest). Caves are rolled later against these exclusions.
+     `base` is the natural ground height at the centre, captured BEFORE the site is pushed into
+     SITES, so a site sits on the land instead of floating at an authored altitude. */
+  const siteCount = 1 + (rng() < PARAMS.siteChance2 ? 1 : 0);
+  for(let i=0;i<siteCount;i++){
+    const r = PARAMS.siteRMin + rng()*PARAMS.siteRVar;
+    const p = spot(rng, PARAMS.siteDMin, PARAMS.siteDMin + PARAMS.siteDVar, r + 6, 'site');
+    const s = { x:p.x, z:p.z, r, base: groundHeight(p.x, p.z),
+      coreH: PARAMS.siteCoreMin + rng()*PARAMS.siteCoreVar,
+      bowlD: PARAMS.siteBowlMin + rng()*PARAMS.siteBowlVar,
+      rimH:  PARAMS.siteRimMin  + rng()*PARAMS.siteRimVar };
+    SITES.push(s);
+    EXCLUSIONS.push({ x:s.x, z:s.z, r:s.r, tag:'site' });
+  }
+  // item 18's guaranteed reward needs to find these: {x, z, r, base, coreH, bowlD, rimH}. The
+  // plinth top is at base + coreH and is flat out to r*siteCoreR, so that is where it goes.
+  world.sites = SITES;
+  world.shape = SHAPE;   // item 10's panel wants to see the roll it is overriding
 
   /* ----- fog + lighting ----- */
-  scene.fog = new THREE.FogExp2(theme.fog, 0.0030);
-  scene.background = new THREE.Color(theme.fog);
+  // item 43: ONE horizon colour, not three that can disagree. There used to be a per-theme fog
+  // colour, a separate scene background, and a sky dome whose horizon band was authored on its
+  // own — so distant terrain could fade to a colour the sky never drew, leaving a seam. Now the
+  // fog Color is the single source: the background is cloned from it and the dome's lowest band
+  // is mixed INTO it (uFog below), so terrain dissolves into exactly the pixel behind it.
+  const fogCol = new THREE.Color(theme.fog);
+  scene.fog = new THREE.FogExp2(fogCol, PARAMS.fogDensity);
+  scene.background = fogCol.clone();
+  world.fogColor = fogCol;   // hook: main.js sets a placeholder background before buildWorld runs
+  // item 06: THE shadow-casting sun. main.js retargets sun.target at the player every frame, so
+  // the ortho box only has to cover what is near the player — hence +/-shadowBox, not the world.
   const sun = new THREE.DirectionalLight(theme.sun, 2.9);
   sun.position.set(60, 90, 30);
-  scene.add(sun);
+  sun.castShadow = true;
+  // quality scales the map, not the box: halving the box would tighten the shadowed area, which
+  // is a visible content change, where halving the map is only softer edges.
+  const smap = Math.max(512, Math.round(PARAMS.shadowMap*Math.min(1, Math.max(0.25, quality))));
+  sun.shadow.mapSize.set(smap, smap);
+  const sc = sun.shadow.camera;
+  sc.left = -PARAMS.shadowBox; sc.right = PARAMS.shadowBox;
+  sc.top = PARAMS.shadowBox; sc.bottom = -PARAMS.shadowBox;
+  sc.near = 1; sc.far = 420; sc.updateProjectionMatrix();
+  sun.shadow.bias = PARAMS.shadowBias;
+  sun.shadow.normalBias = PARAMS.shadowNormalBias;
+  // the target must be IN the scene or its world matrix never updates and the shadow camera
+  // silently keeps aiming at the origin.
+  addTo(scene, sun, sun.target);
+  world.sun = sun;
   const hemi = new THREE.HemisphereLight(theme.hemiSky, theme.hemiGround, 0.85);
-  scene.add(hemi);
+  addTo(scene, hemi);
 
   /* ----- sky dome ----- */
   const skyGeo = new THREE.SphereGeometry(900, 32, 20);
@@ -372,10 +729,11 @@ export function buildWorld(scene, quality=1, seed=1){
       uTop:{value:new THREE.Color(theme.skyTop)},
       uMid:{value:new THREE.Color(theme.skyMid)},
       uBot:{value:new THREE.Color(theme.skyBot)},
-      uSunDir:{value:sunBaseDir.clone()} },
+      uSunDir:{value:sunBaseDir.clone()},
+      uFog:{value:fogCol} },
     vertexShader:`varying vec3 vP; void main(){ vP=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
     fragmentShader:`varying vec3 vP; uniform float uTime;
-      uniform vec3 uTop; uniform vec3 uMid; uniform vec3 uBot; uniform vec3 uSunDir;
+      uniform vec3 uTop; uniform vec3 uMid; uniform vec3 uBot; uniform vec3 uSunDir; uniform vec3 uFog;
       void main(){
         float h = normalize(vP).y;
         vec3 top = uTop;
@@ -383,6 +741,9 @@ export function buildWorld(scene, quality=1, seed=1){
         vec3 bot = uBot;
         vec3 col = mix(bot, mid, smoothstep(-0.05,0.22,h));
         col = mix(col, top, smoothstep(0.16,0.7,h));
+        // item 43: the band the horizon actually sits in IS the fog colour, so terrain fading out
+        // at distance and the sky behind it converge on the same pixel — no seam to hide.
+        col = mix(uFog, col, smoothstep(-0.03, 0.13, h));
         // BIG stylized sun with halo — direction slowly sweeps (set from JS via uSunDir)
         vec3 sunDir = normalize(uSunDir);
         float s = dot(normalize(vP), sunDir);
@@ -393,7 +754,7 @@ export function buildWorld(scene, quality=1, seed=1){
         gl_FragColor = vec4(col,1.0);
       }`
   });
-  scene.add(new THREE.Mesh(skyGeo, skyMat));
+  addTo(scene, new THREE.Mesh(skyGeo, skyMat));
   // slow day-cycle sweep: rotate the sun direction + light together, dip warmth at low sun angle
   const sunDist = Math.hypot(60,90,30);
   const sunAxisZ = new THREE.Vector3(0,0,1), sunAxisY = new THREE.Vector3(0,1,0);
@@ -402,22 +763,31 @@ export function buildWorld(scene, quality=1, seed=1){
     const cycle = t*0.05; // ~126s per full sweep
     sunDir.copy(sunBaseDir).applyAxisAngle(sunAxisZ, Math.sin(cycle)*0.5).applyAxisAngle(sunAxisY, cycle*0.6);
     skyMat.uniforms.uSunDir.value.copy(sunDir);
-    sun.position.copy(sunDir).multiplyScalar(sunDist);
+    // item 06: the light is placed RELATIVE to its target, not to the origin. main.js moves
+    // sun.target onto the player, and a sun parked at the origin would drag the ortho shadow box
+    // off the player the moment they walked away from spawn.
+    sun.position.copy(sun.target.position).addScaledVector(sunDir, sunDist);
     const elevation = sunDir.y;
     sun.intensity = 2.2 + Math.max(0, elevation)*1.2;
     hemi.intensity = 0.7 + Math.max(0, elevation)*0.25;
   });
 
-  /* ----- terrain ----- */
-  const segs = PARAMS.terrainSegs;
-  const tg = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, segs, segs);
+  /* ----- terrain -----
+     terrainSpan, not WORLD_SIZE: the mesh has to extend past the wobbled rim crest (item 23) far
+     enough for the outer skirt to hide the mesh boundary behind it. WORLD_SIZE stays the playable
+     box every prop scatter is expressed in. */
+  const segs = Math.max(24, Math.round(res));
+  const tg = new THREE.PlaneGeometry(PARAMS.terrainSpan, PARAMS.terrainSpan, segs, segs);
   tg.rotateX(-Math.PI/2);
   const tp = tg.attributes.position;
   const colors = new Float32Array(tp.count*3);
-  const tint = (hex)=>{ const c = new THREE.Color(hex); c.offsetHSL(theme.terraHue, theme.terraSat, 0); return c; };
+  // item 41(b): the HSL tint is applied in sRGB and only then handed to the (linear) Color.
+  // offsetHSL() works in the WORKING space on r160, where an authored lightness is ~1.6x too
+  // bright once it is displayed and a hue step is not perceptually even.
+  const tint = (hex)=> offsetHSLsRGB(new THREE.Color(hex), theme.terraHue, theme.terraSat, 0);
   const cGrass = tint(0x5fa838), cEmerald = tint(0x2e7d33);
   const cDry = tint(0xb99b41), cMoss = tint(0x27572a);
-  const cDirt = tint(0x9c6b3d), cRock = tint(0x7d7488);
+  const cRock = tint(0x7d7488);
   const cClear = tint(0xc9a35c), cPath = tint(0xc98f52);
   const cCorruptGround = tint(0x3a2a48);
   const tmpC = new THREE.Color();
@@ -427,15 +797,25 @@ export function buildWorld(scene, quality=1, seed=1){
     const t = a + pathRot;
     return new THREE.Vector2(Math.cos(t), Math.sin(t));
   });
+  // PASS 1 — heights only. Keeping them means the colour pass reads the slope off its own
+  // neighbours instead of calling groundHeight() twice more per vertex; on a grid the neighbour
+  // IS the sample you would have taken, so this is two thirds of the height math for free, which
+  // is what pays for the higher-resolution mesh the new edge needs.
+  const heights = new Float32Array(tp.count);
+  for(let i=0;i<tp.count;i++){
+    const h = groundHeight(tp.getX(i), tp.getZ(i));
+    heights[i] = h;
+    tp.setY(i, h);
+  }
+  const stride = segs+1, quad = PARAMS.terrainSpan/segs;
   for(let i=0;i<tp.count;i++){
     const x=tp.getX(i), z=tp.getZ(i);
-    const h = groundHeight(x,z);
-    tp.setY(i,h);
+    const h = heights[i];
     const d = Math.sqrt(x*x+z*z);
-    // multi-scale painterly blotches
-    const b1 = fb(x*0.018+99, z*0.018, 3);
-    const b2 = fb(x*0.07+31, z*0.07+11, 2);
-    const grove = THREE.MathUtils.smoothstep(n2(x*0.05, z*0.05), 0.02, 0.4);
+    // multi-scale painterly blotches, now on this world's own detail field (item 07)
+    const b1 = fbmOf(F.detail, x*0.018+99, z*0.018, 3);
+    const b2 = fbmOf(F.detail, x*0.07+31, z*0.07+11, 2);
+    const grove = THREE.MathUtils.smoothstep(F.mound(x*0.05, z*0.05), 0.02, 0.4);
     tmpC.copy(cGrass);
     tmpC.lerp(cEmerald, THREE.MathUtils.smoothstep(b1, 0.05, 0.45));       // deep emerald patches
     tmpC.lerp(cDry, THREE.MathUtils.smoothstep(-b1, 0.18, 0.5)*0.85);      // warm dry-grass patches
@@ -444,25 +824,44 @@ export function buildWorld(scene, quality=1, seed=1){
     // worn dirt paths from spawn
     let pathW = 0;
     for(const pd of pathDirs){
-      const perp = Math.abs(x*(-pd.y) - z*pd.x) + fb(x*0.1, z*0.1, 2)*2.2;
+      const perp = Math.abs(x*(-pd.y) - z*pd.x) + fbmOf(F.detail, x*0.1, z*0.1, 2)*2.2;
       pathW = Math.max(pathW, (1 - THREE.MathUtils.smoothstep(perp, 1.8, 4.2)) * THREE.MathUtils.smoothstep(d, 6, 14));
     }
     tmpC.lerp(cPath, Math.min(0.85, pathW));
-    if(h > 9) tmpC.lerp(cRock, THREE.MathUtils.smoothstep(h,9,20));
+    if(h > 14) tmpC.lerp(cRock, THREE.MathUtils.smoothstep(h,14,30));      // rock band tracks the new terrace/rim scale
     // steep hillsides read as bare rock rather than grass, like a real slope would
-    const slope = (Math.abs(groundHeight(x+1.4,z)-h) + Math.abs(groundHeight(x,z+1.4)-h)) / 1.4;
+    const ix = i%stride, iz = (i/stride)|0;
+    const hx = heights[ix+1 < stride ? i+1 : i-1], hz = heights[iz+1 < stride ? i+stride : i-stride];
+    const slope = (Math.abs(hx-h) + Math.abs(hz-h)) / quad;
     tmpC.lerp(cRock, Math.min(0.6, THREE.MathUtils.smoothstep(slope, 0.4, 1.15)*0.6));
     tmpC.lerp(cCorruptGround, corruptionAt(x,z)*0.5); // ground itself sickens along with the trees/rocks
     if(d < 9) tmpC.lerp(cClear, (1-d/9)*0.6);
-    // painterly variation
-    tmpC.offsetHSL(n2(x*0.15,z*0.15)*0.015, 0.05, n2(x*0.3,z*0.3)*0.045);
+    // painterly variation — offset in sRGB (item 41b), otherwise the lightness jitter is
+    // non-linear in the wrong direction and the saturation bump lands somewhere else entirely
+    offsetHSLsRGB(tmpC, F.detail(x*0.15,z*0.15)*0.015, 0.05, F.detail(x*0.3,z*0.3)*0.045);
     colors[i*3]=tmpC.r; colors[i*3+1]=tmpC.g; colors[i*3+2]=tmpC.b;
   }
   tg.setAttribute('color', new THREE.BufferAttribute(colors,3));
   tg.computeVertexNormals();
   const terrain = new THREE.Mesh(tg, toonMat({ color:0xffffff, rim:0.12, coolTint:0xa8c8a0, warmTint:0xfff0c0 }));
   terrain.material.vertexColors = true;
-  scene.add(terrain);
+  // item 06: the ground receives but never casts. A heightfield casting onto itself is what
+  // acne and peter-panning come from, and every silhouette worth seeing is a prop on top of it.
+  terrain.receiveShadow = true;
+  addTo(scene, terrain);
+  world.terrain = terrain;
+  return world;
+}
+
+/* ---------------- item 31: props, landmarks and colliders ----------------
+   Requires buildTerrain() to have run: it reads the layout (theme, ravine, pockets, sites) and
+   places against the FINISHED heightfield, which is the whole reason the two are ordered. Its rng
+   stream is derived separately from the terrain's, so re-running terrain at a different
+   resolution cannot shuffle the props. */
+export function buildProps(scene, seed, world = WORLD){
+  const rng = mulberry32(deriveSeed(seed, 0x9209));
+  const theme = THEME;
+  const quality = QUALITY;
 
   /* ----- distant mountains (3 hazy purple-blue layers) ----- */
   const mGeo = new THREE.ConeGeometry(1,1,5);
@@ -474,13 +873,16 @@ export function buildWorld(scene, quality=1, seed=1){
   for(let ring=0; ring<3; ring++){
     const R = mRings[ring];
     for(let i=0;i<PARAMS.mtnPerRing;i++){
-      const a = (i/PARAMS.mtnPerRing)*Math.PI*2 + ring*0.35 + n2(i,3+ring)*0.4;
-      const dist = R.dist + n2(i,9)*50;
+      // FIXED with the migration to per-world fields: these used to be noise2(i, k) with INTEGER
+      // arguments, and a lattice-based field is exactly 0 at integer coordinates — so every
+      // "jitter" here evaluated to 0 and the peaks sat on a perfect ring. Fractional now.
+      const a = (i/PARAMS.mtnPerRing)*Math.PI*2 + ring*0.35 + F.detail(i*0.37+3.1, ring*1.7+0.6)*0.9;
+      const dist = R.dist + F.detail(i*0.51+9.4, 1.3)*90;
       const m = new THREE.Mesh(mGeo, new THREE.MeshBasicMaterial({ color:R.col, fog:false, transparent:true, opacity:R.op }));
-      m.material.color.offsetHSL(n2(i,7)*0.02 + theme.terraHue*0.5, 0, n2(i,5)*0.05);
+      offsetHSLsRGB(m.material.color, F.detail(i*0.63+7.2, 2.7)*0.04 + theme.terraHue*0.5, 0, F.detail(i*0.29+5.5, 4.1)*0.10);
       m.position.set(Math.cos(a)*dist, 8, Math.sin(a)*dist);
       m.scale.set(150+rng()*110, R.h*(0.7+rng()*0.6), 150);
-      scene.add(m);
+      addTo(scene, m);
     }
   }
 
@@ -492,7 +894,7 @@ export function buildWorld(scene, quality=1, seed=1){
     const s = new THREE.Sprite(sm);
     s.position.set((rng()-0.5)*800, 70+rng()*90, (rng()-0.5)*800);
     const sc = 80+rng()*120; s.scale.set(sc, sc*0.5, 1);
-    scene.add(s); clouds.push(s);
+    addTo(scene, s); clouds.push(s);
   }
   world.updaters.push((dt)=>{
     for(const c of clouds){ c.position.x += dt*1.5; if(c.position.x>400) c.position.x=-400; }
@@ -504,7 +906,7 @@ export function buildWorld(scene, quality=1, seed=1){
     const x=(rng()-0.5)*WORLD_SIZE*0.92, z=(rng()-0.5)*WORLD_SIZE*0.92;
     const d=Math.hypot(x,z);
     if(d<PARAMS.treeDMin || d>PARAMS.treeDMax) continue;
-    if(n2(x*0.05, z*0.05) < PARAMS.treeGrove) continue; // groves
+    if(F.mound(x*0.05, z*0.05) < PARAMS.treeGrove) continue; // groves — same field as the terrain's grove tint, so dark forest floor and trees agree
     treePos.push([x, groundHeight(x,z), z]);
   }
   const trunkGeo = new THREE.CylinderGeometry(0.35, 0.7, 6, 6);
@@ -517,10 +919,10 @@ export function buildWorld(scene, quality=1, seed=1){
   { const p=canGeo.attributes.position;
     for(let i=0;i<p.count;i++){
       const v=new THREE.Vector3(p.getX(i),p.getY(i),p.getZ(i));
-      const n = 1 + noise2(v.x*0.8+v.y, v.z*0.8)*0.25;
+      const n = 1 + F.detail(v.x*0.8+v.y, v.z*0.8)*0.25;
       p.setXYZ(i, v.x*n, v.y*n*0.8, v.z*n); } }
   const canBase = new THREE.Color(theme.canopyBase);
-  const canDark = canBase.clone().offsetHSL(0, 0.05, -0.10);
+  const canDark = offsetHSLsRGB(canBase.clone(), 0, 0.05, -0.10);
   const canMat = toonMat({ color:theme.canopyBase,
     map:paintTexture('#'+canBase.getHexString(),[{c:'#'+canDark.getHexString(),n:60,r:14,a:0.25}],{dabs:300}), rim:0.6, rimColor:0xe8ffb0 });
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treePos.length);
@@ -539,7 +941,11 @@ export function buildWorld(scene, quality=1, seed=1){
     cans.setMatrixAt(i,M);
     // corruption gradient: healthy near spawn, twisted/dark deep in the Heart of the Bloom
     const corrupt = corruptionAt(x,z);
-    canColor.setHSL(((0.26+rng()*0.08+theme.canopyHue)%1+1)%1, theme.canopySat, 0.42+rng()*0.12);
+    // item 41(b): the 4th argument is the fix — without it this authored 0.42 lightness was
+    // interpreted as LINEAR and displayed near 0.68, which is why canopies read washed out.
+    // canLMin/canLVar are re-tuned upward to compensate: same look on screen, correct maths.
+    canColor.setHSL(((0.26+rng()*0.08+theme.canopyHue)%1+1)%1, theme.canopySat,
+      PARAMS.canLMin+rng()*PARAMS.canLVar, THREE.SRGBColorSpace);
     canColor.lerp(corruptCol, corrupt*0.85);
     cans.setColorAt(i, canColor);
     trunkColor.setRGB(1,1,1).lerp(trunkCorrupt, corrupt*0.7);
@@ -548,7 +954,11 @@ export function buildWorld(scene, quality=1, seed=1){
     // top its visual height. Canopies stay walk-through — you duck under branches, not around.
     COLLIDERS.push({ x, z, r: 0.7*s, bot: y-0.3, top: y-0.3 + 6*s });
   });
-  scene.add(trunks, cans);
+  // item 06: the sweep the island never had to do. Casters are the props with a readable
+  // silhouette; the ink-outline hulls deliberately do NOT cast (a BackSide shell casts a shadow
+  // ~8% too big around its own owner) and neither does the 22k-blade grass batch.
+  trunks.castShadow = true; cans.castShadow = true; cans.receiveShadow = true;
+  addTo(scene, trunks, cans);
   // ink outline hulls for canopies (instanced BackSide)
   const hullMat = new THREE.MeshBasicMaterial({ color:0x241a12, side:THREE.BackSide });
   const canHull = new THREE.InstancedMesh(canGeo, hullMat, treePos.length);
@@ -559,7 +969,7 @@ export function buildWorld(scene, quality=1, seed=1){
     M.decompose(P2, Q2, S2);
     canHull.setMatrixAt(i, M.compose(P2, Q2, S2.multiplyScalar(1.08)));
   }
-  scene.add(canHull);
+  addTo(scene, canHull);
   world.treePos = treePos;
 
   /* ----- rocks (dry grey + mossy variants) ----- */
@@ -567,7 +977,7 @@ export function buildWorld(scene, quality=1, seed=1){
   { const p = rockGeo.attributes.position; // knock off the perfect-solid look
     for(let i=0;i<p.count;i++){
       const x=p.getX(i), y=p.getY(i), z=p.getZ(i);
-      const j = 1 + noise2(x*1.6+y, z*1.6)*0.16;
+      const j = 1 + F.detail(x*1.6+y, z*1.6)*0.16;
       p.setXYZ(i, x*j, y*j, z*j);
     }
     rockGeo.computeVertexNormals(); }
@@ -617,8 +1027,10 @@ export function buildWorld(scene, quality=1, seed=1){
   const caveSpots = [];
   const caveCount = 1 + (rng()<PARAMS.caveSecondChance ? 1 : 0);
   for(let c=0;c<caveCount;c++){
-    const ca=rng()*Math.PI*2, cd=PARAMS.caveDMin+rng()*PARAMS.caveDVar;
-    const cx=Math.cos(ca)*cd, cz=Math.sin(ca)*cd, cy=groundHeight(cx,cz);
+    // item 26: through the shared sampler, so a cave mouth can't open into an authored site's
+    // basin (or into the ravine) — the alternative was raw polar coordinates and a prayer.
+    const cSite = spot(rng, PARAMS.caveDMin, PARAMS.caveDMin+PARAMS.caveDVar, PARAMS.exclCave);
+    const cx=cSite.x, cz=cSite.z, cy=groundHeight(cx,cz);
     const mouthDir = rng()*Math.PI*2;
     caveSpots.push({ cx, cz, cy, mouthDir });
     // the wall rocks get their colliders from the shared rock loop below; the mouth itself
@@ -651,7 +1063,8 @@ export function buildWorld(scene, quality=1, seed=1){
     const corrupt = corruptionAt(rp.x,rp.z);
     rocks.setColorAt(i, rockDry.clone().lerp(rockMoss, mossAmt).lerp(rockCorrupt, corrupt*0.75));
   });
-  scene.add(rocks);
+  rocks.castShadow = true; rocks.receiveShadow = true;
+  addTo(scene, rocks);
   const rockHull = new THREE.InstancedMesh(rockGeo, hullMat, rockCount);
   { const P3 = new THREE.Vector3(), Q3 = new THREE.Quaternion(), S3 = new THREE.Vector3();
     for(let i=0;i<rockCount;i++){
@@ -659,11 +1072,11 @@ export function buildWorld(scene, quality=1, seed=1){
       M.decompose(P3, Q3, S3);
       rockHull.setMatrixAt(i, M.compose(P3, Q3, S3.multiplyScalar(1.09)));
     } }
-  scene.add(rockHull);
+  addTo(scene, rockHull);
 
   /* ----- LANDMARK: rune boulder ----- */
   {
-    const bSite = spot(PARAMS.boulderDMin, PARAMS.boulderDMin + PARAMS.boulderDVar);
+    const bSite = spot(rng, PARAMS.boulderDMin, PARAMS.boulderDMin + PARAMS.boulderDVar);
     const ba = Math.atan2(bSite.z, bSite.x);
     const bx = bSite.x, bz = bSite.z, by = groundHeight(bx, bz);
     const boulder = new THREE.Mesh(rockGeo, rockMat.clone());
@@ -673,16 +1086,17 @@ export function buildWorld(scene, quality=1, seed=1){
     boulder.rotation.set(rng(), rng()*7, rng()*0.3);
     boulder.position.set(bx, by+bs*0.35, bz);
     COLLIDERS.push({ x:bx, z:bz, r:bs*0.8, bot:by, top:by+bs*0.35+bs*0.8 });
+    boulder.castShadow = true; boulder.receiveShadow = true;
     addOutline(boulder, 0.03);
-    scene.add(boulder);
+    addTo(scene, boulder);
     const runeMat2 = new THREE.MeshBasicMaterial({ color:0x7de8ff, transparent:true, opacity:0.85,
       blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide });
     const rune2 = new THREE.Mesh(new THREE.RingGeometry(0.5, 0.9, 3), runeMat2);
     rune2.position.set(bx + Math.cos(ba+1.6)*bs*0.75, by+bs*0.55, bz + Math.sin(ba+1.6)*bs*0.75);
     rune2.lookAt(bx, by+bs*0.55, bz); rune2.rotateY(Math.PI);
-    scene.add(rune2);
+    addTo(scene, rune2);
     const pl3 = new THREE.PointLight(0x7de8ff, 8, 14); pl3.position.set(bx, by+bs*0.6, bz);
-    scene.add(pl3);
+    addTo(scene, pl3);
     world.updaters.push((dt,t)=>{ runeMat2.opacity = 0.6+Math.sin(t*1.5)*0.25; rune2.rotation.z = t*0.3; });
   }
 
@@ -694,13 +1108,21 @@ export function buildWorld(scene, quality=1, seed=1){
     const t2x=RAVINE.cx-RAVINE.bx, t2z=RAVINE.cz-RAVINE.bz, t2l=Math.hypot(t2x,t2z)||1;
     let dirX=t1x/t1l+t2x/t2l, dirZ=t1z/t1l+t2z/t2l;
     const dirLen=Math.hypot(dirX,dirZ)||1; dirX/=dirLen; dirZ/=dirLen;
-    const baseY = baseTerrainHeight(bx, bz); // deck sits at the pre-ravine ground level
     const spanLen = RAVINE.width*2.4;
+    /* The deck is PITCHED to meet both banks, not levelled at the midpoint. A movement constant is
+       a level-design constraint: STEP is 1.5, so a deck end sitting more than 1.5 m above its bank
+       is a bridge you cannot get onto — and with the new relief (item 27) the pre-carve grade
+       across a crossing can differ by 4+ m between the two banks. Sampling BOTH ends and tilting
+       between them is what keeps the crossing usable in every world instead of most of them. */
+    const yA = baseTerrainHeight(bx - dirX*spanLen*0.5, bz - dirZ*spanLen*0.5);
+    const yB = baseTerrainHeight(bx + dirX*spanLen*0.5, bz + dirZ*spanLen*0.5);
+    const baseY = (yA + yB)*0.5, pitch = -Math.atan2(yB - yA, spanLen);
     const deckMat = toonMat({ color:0x8a5a35,
       map: paintTexture('#6a4525', [{c:'#4a3018', n:24, r:5, a:0.45}], {dabs:220}), rim:0.25 });
     const railMat = toonMat({ color:0x5a3a1f, rim:0.3 });
     const group = new THREE.Group();
     const deck = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.22, spanLen), deckMat);
+    deck.castShadow = true; deck.receiveShadow = true;
     addOutline(deck, 0.04);
     group.add(deck);
     for(const side of [-1,1]){
@@ -716,16 +1138,22 @@ export function buildWorld(scene, quality=1, seed=1){
       }
     }
     group.position.set(bx, baseY-0.22, bz);
+    // YXZ: yaw the span onto the ravine first, THEN pitch about the deck's own long axis. With the
+    // default XYZ order the pitch would happen about the world X and twist the deck sideways.
+    group.rotation.order = 'YXZ';
     group.rotation.y = Math.atan2(dirX, dirZ);
-    scene.add(group);
+    group.rotation.x = pitch;
+    addTo(scene, group);
     // the deck is a STANDABLE collider, not a wall: top sits at the deck surface so surfaceAt
     // carries you over the gully instead of dropping you in. One short cylinder per metre of
     // span — a single disc wide enough to cover the deck would wall off the ravine beside it,
     // and `bot` stays just under the deck so you can still walk through underneath.
-    const deckTop = baseY - 0.11;
     const deckSegs = Math.max(3, Math.round(spanLen));
     for(let i=0;i<deckSegs;i++){
-      const t = (i/(deckSegs-1) - 0.5)*spanLen;
+      const f = i/(deckSegs-1), t = (f - 0.5)*spanLen;
+      // each collider's top is the deck surface AT THAT POINT along the pitch, out of the same
+      // loop that walks the span — so the standable height can't drift from the plank you see.
+      const deckTop = yA + (yB - yA)*f - 0.11;
       COLLIDERS.push({ x: bx + dirX*t, z: bz + dirZ*t, r: 0.95, bot: deckTop-0.6, top: deckTop });
     }
     EXCLUSIONS.push({ x:bx, z:bz, r:PARAMS.exclBridge, tag:'bridge' });
@@ -736,10 +1164,10 @@ export function buildWorld(scene, quality=1, seed=1){
   { const p = bushGeo.attributes.position;
     for(let i=0;i<p.count;i++){
       const v = new THREE.Vector3(p.getX(i), p.getY(i), p.getZ(i));
-      const n = 1 + noise2(v.x*0.9+v.y, v.z*0.9)*0.22;
+      const n = 1 + F.detail(v.x*0.9+v.y, v.z*0.9)*0.22;
       p.setXYZ(i, v.x*n, v.y*n*0.72, v.z*n);
     } }
-  const bushBase = new THREE.Color(0x4a7a2e).offsetHSL(theme.canopyHue*0.6, 0, 0);
+  const bushBase = offsetHSLsRGB(new THREE.Color(0x4a7a2e), theme.canopyHue*0.6, 0, 0);
   const bushMat = toonMat({ color:0xffffff,
     map: paintTexture('#'+bushBase.getHexString(), [{c:'#2f5a1c', n:40, r:12, a:0.3}], {dabs:220}),
     rim:0.45, rimColor:0xc8ffb0 });
@@ -753,7 +1181,8 @@ export function buildWorld(scene, quality=1, seed=1){
     M.compose(V.set(x, groundHeight(x,z)+0.3*s, z), Q, S.set(s, s*0.85, s));
     bushes.setMatrixAt(i, M);
   }
-  scene.add(bushes);
+  bushes.castShadow = true;
+  addTo(scene, bushes);
   const bushHull = new THREE.InstancedMesh(bushGeo, hullMat, bushCount);
   { const Pb=new THREE.Vector3(), Qb=new THREE.Quaternion(), Sb=new THREE.Vector3();
     for(let i=0;i<bushCount;i++){
@@ -761,7 +1190,7 @@ export function buildWorld(scene, quality=1, seed=1){
       M.decompose(Pb, Qb, Sb);
       bushHull.setMatrixAt(i, M.compose(Pb, Qb, Sb.multiplyScalar(1.08)));
     } }
-  scene.add(bushHull);
+  addTo(scene, bushHull);
 
   /* ----- fallen logs (knotted, moss-grown forest-floor debris) ----- */
   function makeRingTexture(){
@@ -783,7 +1212,7 @@ export function buildWorld(scene, quality=1, seed=1){
   { const p = logGeo.attributes.position; // knock the perfect-tube look into something knotted/irregular
     for(let i=0;i<p.count;i++){
       const x=p.getX(i), y=p.getY(i), z=p.getZ(i);
-      const bulge = 1 + noise2(y*1.3, Math.atan2(z,x)*1.4)*0.16 + Math.sin(y*2.1)*0.04;
+      const bulge = 1 + F.detail(y*1.3, Math.atan2(z,x)*1.4)*0.16 + Math.sin(y*2.1)*0.04;
       p.setXYZ(i, x*bulge, y, z*bulge);
     }
     logGeo.computeVertexNormals(); }
@@ -813,7 +1242,8 @@ export function buildWorld(scene, quality=1, seed=1){
       logCaps.setMatrixAt(logData.length*2 - (dir===-1?2:1), M);
     }
   }
-  scene.add(logs, logCaps);
+  logs.castShadow = true; logs.receiveShadow = true;
+  addTo(scene, logs, logCaps);
   const logHull = new THREE.InstancedMesh(logGeo, hullMat, logCount);
   { const Pl=new THREE.Vector3(), Ql=new THREE.Quaternion(), Sl=new THREE.Vector3();
     for(let i=0;i<logCount;i++){
@@ -821,7 +1251,7 @@ export function buildWorld(scene, quality=1, seed=1){
       M.decompose(Pl, Ql, Sl);
       logHull.setMatrixAt(i, M.compose(Pl, Ql, Sl.multiplyScalar(1.07)));
     } }
-  scene.add(logHull);
+  addTo(scene, logHull);
   // moss patches + tiny mushroom sprouts on ~half the logs — batched into at most
   // 3 InstancedMesh draws total (was 1 individual mesh/group per patch)
   const mossBlobGeo = new THREE.IcosahedronGeometry(0.22, 0);
@@ -852,7 +1282,7 @@ export function buildWorld(scene, quality=1, seed=1){
       M.compose(b.pos, Q, S.set(b.scale,b.scale,b.scale));
       mossBlobs.setMatrixAt(i, M);
     });
-    scene.add(mossBlobs);
+    addTo(scene, mossBlobs);
   }
   if(sproutBits.length){
     const sproutStems = new THREE.InstancedMesh(sproutStemGeo, sproutStemMat, sproutBits.length);
@@ -865,7 +1295,7 @@ export function buildWorld(scene, quality=1, seed=1){
       M.compose(V.copy(b.pos).addScaledVector(upY, 0.16*b.scale), Q, S.set(b.scale,b.scale,b.scale));
       sproutCaps.setMatrixAt(i, M);
     });
-    scene.add(sproutStems, sproutCaps);
+    addTo(scene, sproutStems, sproutCaps);
   }
 
   /* ----- instanced grass with wind sway ----- */
@@ -877,10 +1307,13 @@ export function buildWorld(scene, quality=1, seed=1){
   const grassMat = new THREE.ShaderMaterial({
     side: THREE.DoubleSide, fog:false,
     uniforms:{ uTime:{value:0}, uFog:{value:new THREE.Color(theme.fog)},
-      uGB1:{value:new THREE.Vector3(...theme.grassBase.slice(0,3))},
-      uGB2:{value:new THREE.Vector3(...theme.grassBase.slice(3,6))},
-      uGT1:{value:new THREE.Vector3(...theme.grassTip.slice(0,3))},
-      uGT2:{value:new THREE.Vector3(...theme.grassTip.slice(3,6))} },
+      // item 41(a): these are authored as sRGB 0-1 triples and used to be pushed at the shader
+      // raw, so the base->tip gradient was interpolated between sRGB-encoded numbers under ACES —
+      // the textbook muddy blend. srgbTriple() converts once, here, and the mix stays linear.
+      uGB1:{value:srgbTriple(...theme.grassBase.slice(0,3))},
+      uGB2:{value:srgbTriple(...theme.grassBase.slice(3,6))},
+      uGT1:{value:srgbTriple(...theme.grassTip.slice(0,3))},
+      uGT2:{value:srgbTriple(...theme.grassTip.slice(3,6))} },
     vertexShader:`
       uniform float uTime; varying float vY; varying float vFog; varying float vTint;
       void main(){
@@ -919,7 +1352,7 @@ export function buildWorld(scene, quality=1, seed=1){
     M.compose(V.set(x, groundHeight(x,z), z), Q, S.set(s,s,s));
     grass.setMatrixAt(i,M);
   }
-  scene.add(grass);
+  addTo(scene, grass);
   world.updaters.push((dt,t)=>{ grassMat.uniforms.uTime.value = t; });
 
   /* ----- flowers ----- */
@@ -934,7 +1367,7 @@ export function buildWorld(scene, quality=1, seed=1){
     flowers.setMatrixAt(i,M);
     flowers.setColorAt(i, new THREE.Color(fCols[(rng()*fCols.length)|0]));
   }
-  scene.add(flowers);
+  addTo(scene, flowers);
 
   /* ----- decorative glowing mushrooms (harvestable — see world.harvestMushroom) -----
      item 35: instanced. One stem draw plus one cap draw per species covers every mushroom on
@@ -954,11 +1387,11 @@ export function buildWorld(scene, quality=1, seed=1){
   // a batch that spans the whole map is never off screen, so frustum culling would only pay
   // for a bounding-sphere rebuild every time a mushroom sways
   decoStems.frustumCulled = false;
-  scene.add(decoStems);
+  addTo(scene, decoStems);
   for(const sp of MUSHROOM_SPECIES){
     const m = new THREE.InstancedMesh(capGeo, capMats[sp.id], PARAMS.decoCap);
     m.count = 0; m.frustumCulled = false;
-    decoCaps[sp.id] = m; scene.add(m);
+    decoCaps[sp.id] = m; addTo(scene, m);
   }
   const decoM = new THREE.Matrix4(), decoQ = new THREE.Quaternion(), decoV = new THREE.Vector3();
   const decoS = new THREE.Vector3(), decoE = new THREE.Euler();
@@ -1038,19 +1471,19 @@ export function buildWorld(scene, quality=1, seed=1){
       const cavity = new THREE.Mesh(new THREE.SphereGeometry(3.4, 12, 8), voidMat);
       cavity.scale.set(1, 0.7, 0.85);
       cavity.position.set(cx - mouthX*1.6, cy+1.7, cz - mouthZ*1.6);
-      scene.add(cavity);
+      addTo(scene, cavity);
       // hanging stalactites over the mouth
       for(let k=0;k<PARAMS.caveSpikes;k++){
         const along = (k-1.5)*0.7;
         const spike = new THREE.Mesh(new THREE.ConeGeometry(0.25+rng()*0.15, 0.9+rng()*0.6, 6), rockMat);
         spike.rotation.x = Math.PI;
         spike.position.set(cx - mouthX*0.8 + mouthZ*along, cy+3.2+rng()*0.4, cz - mouthZ*0.8 - mouthX*along);
-        scene.add(spike);
+        addTo(scene, spike);
       }
       // warm light spilling from inside, out through the mouth
       const pl = new THREE.PointLight(0xffa855, 7, 13);
       pl.position.set(cx - mouthX*1.1, cy+1.6, cz - mouthZ*1.1);
-      scene.add(pl);
+      addTo(scene, pl);
       // a few glowing mushrooms just inside for atmosphere — pushed into the same instance
       // arrays as every other mushroom, so zero extra draw calls. These are the one authored
       // exception to the clearance test: they are *meant* to sit inside the cave keep-out.
@@ -1080,14 +1513,15 @@ export function buildWorld(scene, quality=1, seed=1){
       const spike = new THREE.Mesh(new THREE.ConeGeometry(sr, h, 6), witherMat);
       spike.position.set(sx, sy+h*0.5, sz);
       spike.rotation.set((rng()-0.5)*0.3, rng()*7, (rng()-0.5)*0.3);
+      spike.castShadow = true;
       COLLIDERS.push({ x:sx, z:sz, r:sr*1.3, bot:sy, top:sy+h });
       addOutline(spike, 0.03);
-      scene.add(spike);
+      addTo(scene, spike);
     }
     const whY = groundHeight(wh.x, wh.z);
     const pl4 = new THREE.PointLight(0x8a5ac8, 6, 16);
     pl4.position.set(wh.x, whY+3, wh.z);
-    scene.add(pl4);
+    addTo(scene, pl4);
   }
 
   // exposed for main.js: proximity checks read world.harvestables directly,
@@ -1109,8 +1543,8 @@ export function buildWorld(scene, quality=1, seed=1){
     const p = geo.attributes.position;
     for(let i=0;i<p.count;i++){
       const x=p.getX(i), y=p.getY(i), z=p.getZ(i);
-      const j = 1 + noise2(x*2.6+seed, z*2.6-seed)*0.22;
-      p.setXYZ(i, x*j, y*(2.3+noise2(y*1.5+seed, x*1.5)*0.5), z*j);
+      const j = 1 + F.detail(x*2.6+seed, z*2.6-seed)*0.22;
+      p.setXYZ(i, x*j, y*(2.3+F.detail(y*1.5+seed, x*1.5)*0.5), z*j);
     }
     geo.computeVertexNormals();
     return geo;
@@ -1178,12 +1612,13 @@ export function buildWorld(scene, quality=1, seed=1){
       const placements = shardPlacements[variant*2+colorIdx];
       if(!placements.length) continue;
       const mesh = new THREE.InstancedMesh(shardGeoVariants[variant], crystalMats[colorIdx], placements.length);
+      mesh.castShadow = true;
       placements.forEach((p,i)=>{
         Q.setFromEuler(new THREE.Euler(p.rx,p.ry,p.rz));
         M.compose(V.set(p.x,p.y,p.z), Q, S.set(p.sx,p.sy,p.sz));
         mesh.setMatrixAt(i, M);
       });
-      scene.add(mesh);
+      addTo(scene, mesh);
     }
   }
   // inner glow cores — one lightweight sprite per cluster (sprites are cheap: always-billboarded, no outline)
@@ -1191,7 +1626,7 @@ export function buildWorld(scene, quality=1, seed=1){
     const core = new THREE.Sprite(new THREE.SpriteMaterial({ color:c.pal.color, transparent:true, opacity:0.5,
       blending:THREE.AdditiveBlending, depthWrite:false }));
     core.scale.setScalar(0.9); core.position.set(c.cx, c.cy-0.1, c.cz);
-    scene.add(core);
+    addTo(scene, core);
     return core;
   });
   world.updaters.push((dt,t)=>{
@@ -1238,7 +1673,7 @@ export function buildWorld(scene, quality=1, seed=1){
   });
   const crystalMotes = new THREE.Points(moteGeo, moteMat);
   crystalMotes.frustumCulled = false;
-  scene.add(crystalMotes);
+  addTo(scene, crystalMotes);
   world.updaters.push((dt,t)=>{ moteMat.uniforms.uTime.value = t; });
 
   /* ----- god-ray shafts in groves ----- */
@@ -1251,7 +1686,7 @@ export function buildWorld(scene, quality=1, seed=1){
     const ray = new THREE.Mesh(geo, rayMat);
     ray.position.set(tx+3, ty+14, tz+2);
     ray.rotation.z = 0.35; ray.rotation.y = rng()*3;
-    scene.add(ray);
+    addTo(scene, ray);
   }
 
   /* ----- fireflies / ambient spores ----- */
@@ -1284,7 +1719,7 @@ export function buildWorld(scene, quality=1, seed=1){
   });
   const fireflies = new THREE.Points(fGeo, fMat);
   fireflies.frustumCulled = false;
-  scene.add(fireflies);
+  addTo(scene, fireflies);
   world.updaters.push((dt,t)=>{ fMat.uniforms.uTime.value = t; });
 
   /* ----- ground pollen (dense, slow, low-altitude drift distinct from the fireflies) ----- */
@@ -1318,7 +1753,7 @@ export function buildWorld(scene, quality=1, seed=1){
     });
     const pollen = new THREE.Points(pGeo, pMat);
     pollen.frustumCulled = false;
-    scene.add(pollen);
+    addTo(scene, pollen);
     world.updaters.push((dt,t)=>{ pMat.uniforms.uTime.value = t; });
   }
 
@@ -1337,7 +1772,7 @@ export function buildWorld(scene, quality=1, seed=1){
       const m = new THREE.Mesh(petGeo, mat);
       const a=rng()*Math.PI*2, r=rng()*130;
       m.userData = { x:Math.cos(a)*r, z:Math.sin(a)*r, y0:4+rng()*10, ph:rng()*7, spd:0.3+rng()*0.3, spin:(rng()-0.5)*2 };
-      scene.add(m); petals.push(m);
+      addTo(scene, m); petals.push(m);
     }
     world.updaters.push((dt,t)=>{
       for(const m of petals){
@@ -1353,7 +1788,7 @@ export function buildWorld(scene, quality=1, seed=1){
   if(hasLandmark('tower')){
     const lm = new THREE.Group();
     // seeded: always a far, visible landmark (130–175 from spawn)
-    const lSite = spot(PARAMS.towerDMin, PARAMS.towerDMin + PARAMS.towerDVar, 6);
+    const lSite = spot(rng, PARAMS.towerDMin, PARAMS.towerDMin + PARAMS.towerDVar, 6);
     const lx = lSite.x, lz = lSite.z, ly = groundHeight(lx, lz);
     const stemMat2 = toonMat({ color:0xe8d8b8, map:paintTexture('#e8d8b8',[{c:'#c9b58f',n:14,r:8,a:0.4}],{dabs:300}), rim:0.4 });
     const capMat2 = toonMat({ color:0x3fa8cc, map:paintTexture('#3fa8cc',[{c:'#bfefff',n:16,r:12,a:0.9},{c:'#bfefff',n:8,r:6,a:0.8}],{dabs:260}),
@@ -1361,16 +1796,16 @@ export function buildWorld(scene, quality=1, seed=1){
     const stem2 = new THREE.Mesh(new THREE.CylinderGeometry(4.5, 8, 42, 10), stemMat2);
     { const p = stem2.geometry.attributes.position;
       for(let i=0;i<p.count;i++){ const y=p.getY(i); p.setX(i, p.getX(i)+Math.sin(y*0.08)*4); } }
-    stem2.position.y = 21; addOutline(stem2, 0.02);
+    stem2.position.y = 21; stem2.castShadow = true; addOutline(stem2, 0.02);
     const cap2 = new THREE.Mesh(new THREE.SphereGeometry(17, 18, 12, 0, Math.PI*2, 0, Math.PI*0.52), capMat2);
-    cap2.position.y = 42; cap2.scale.set(1.25, 0.85, 1.25); addOutline(cap2, 0.015);
+    cap2.position.y = 42; cap2.scale.set(1.25, 0.85, 1.25); cap2.castShadow = true; addOutline(cap2, 0.015);
     const halo2 = new THREE.Mesh(new THREE.SphereGeometry(24, 16, 12),
       new THREE.MeshBasicMaterial({ color:0x66d8ff, transparent:true, opacity:0.12, blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.BackSide }));
     halo2.position.y = 44;
     const pl = new THREE.PointLight(0x66d8ff, 60, 90); pl.position.y = 40;
     lm.add(stem2, cap2, halo2, pl);
     lm.position.set(lx, ly, lz);
-    scene.add(lm);
+    addTo(scene, lm);
     world.motherShroom = lm;
     // the stem is the wall; the 17m cap deliberately isn't, so you can walk in under it.
     // r sits between the stem's base (8) and top (4.5) radius — the trunk tapers, the collider
@@ -1381,7 +1816,7 @@ export function buildWorld(scene, quality=1, seed=1){
 
   /* ----- LANDMARK: standing stones (not every world gets one — see hasLandmark) ----- */
   if(hasLandmark('stones')){
-    const sSite = spot(PARAMS.stoneDMin, PARAMS.stoneDMin + PARAMS.stoneDVar, PARAMS.stoneRing + 3);
+    const sSite = spot(rng, PARAMS.stoneDMin, PARAMS.stoneDMin + PARAMS.stoneDVar, PARAMS.stoneRing + 3);
     const sx = sSite.x, sz = sSite.z, sy = groundHeight(sx, sz);
     const stoneMat = toonMat({ color:0x8d86a0, map:paintTexture('#8d86a0',[{c:'#6d6580',n:10,r:10,a:0.5}],{dabs:200}), rim:0.4 });
     const runeMat = new THREE.MeshBasicMaterial({ color:0x7de8ff, transparent:true, opacity:0.9, blending:THREE.AdditiveBlending, depthWrite:false });
@@ -1393,15 +1828,16 @@ export function buildWorld(scene, quality=1, seed=1){
       st.rotation.set((rng()-0.5)*0.15, a, (rng()-0.5)*0.15);
       // collider from the same loop as the stone: r covers the 2.2x1.4 slab at any yaw, so the
       // circle you walk into always matches the stone you can see.
+      st.castShadow = true; st.receiveShadow = true;
       COLLIDERS.push({ x:st.position.x, z:st.position.z, r:1.25, bot:sy, top:sy+3+sh*0.5 });
       addOutline(st, 0.04);
       const rune = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 3), runeMat);
       rune.position.set(st.position.x*1.001, sy+3.5, st.position.z*1.001);
       rune.lookAt(sx, sy+3.5, sz); rune.rotateY(Math.PI);
-      scene.add(st, rune);
+      addTo(scene, st, rune);
     }
     const pl2 = new THREE.PointLight(0x7de8ff, 20, 30); pl2.position.set(sx, sy+4, sz);
-    scene.add(pl2);
+    addTo(scene, pl2);
   }
 
   /* ----- LANDMARK: spore geysers (not every world gets one — see hasLandmark) ----- */
@@ -1419,7 +1855,7 @@ export function buildWorld(scene, quality=1, seed=1){
       const col = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2.6, 26, 8, 1, true),
         new THREE.MeshBasicMaterial({ color:0xaef2c8, transparent:true, opacity:0.10, blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide, fog:false }));
       col.position.set(gx, gy+13, gz);
-      scene.add(col);
+      addTo(scene, col);
       // rising spore points
       const N = 26;
       const geo = new THREE.BufferGeometry();
@@ -1429,7 +1865,7 @@ export function buildWorld(scene, quality=1, seed=1){
       const mat = new THREE.PointsMaterial({ color:0xc8ffd8, size:1.6, transparent:true, opacity:0.8,
         blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true });
       const pts = new THREE.Points(geo, mat); pts.frustumCulled = false;
-      scene.add(pts);
+      addTo(scene, pts);
       world.geysers.push({gx, gy, gz, geo, seed, N});
     }
     world.updaters.push((dt,t)=>{
@@ -1448,7 +1884,7 @@ export function buildWorld(scene, quality=1, seed=1){
 
   /* ----- LANDMARK: watering hole (animated water + waterfall; not every world gets one — see hasLandmark) ----- */
   if(hasLandmark('pond')){
-    const wSite = spot(PARAMS.pondDMin, PARAMS.pondDMin + PARAMS.pondDVar, PARAMS.exclPond);
+    const wSite = spot(rng, PARAMS.pondDMin, PARAMS.pondDMin + PARAMS.pondDVar, PARAMS.exclPond);
     const wx = wSite.x, wz = wSite.z, wy = groundHeight(wx, wz);
     world.pondPos = { x:wx, y:wy, z:wz };
     // the water itself stays walkable; nothing else should grow in it
@@ -1486,7 +1922,7 @@ export function buildWorld(scene, quality=1, seed=1){
     pondMat.uniforms.uCircle = { value: 1 };
     const pond = new THREE.Mesh(new THREE.PlaneGeometry(18, 18, 40, 40), pondMat);
     pond.rotation.x = -Math.PI/2; pond.position.set(wx, wy+0.1, wz);
-    scene.add(pond);
+    addTo(scene, pond);
     // lily pads + reeds around the rim
     const padMat = toonMat({ color:0x3f8a3a, rim:0.4, rimColor:0xc8ffb0 });
     const padGeo = new THREE.CircleGeometry(0.6, 10);
@@ -1499,12 +1935,12 @@ export function buildWorld(scene, quality=1, seed=1){
         const pad = new THREE.Mesh(padGeo, padMat);
         pad.rotation.x = -Math.PI/2; pad.rotation.z = rng()*7;
         pad.position.set(px, wy+0.16, pz);
-        scene.add(pad);
+        addTo(scene, pad);
       } else {
         const reed = new THREE.Mesh(reedGeo, reedMat);
         reed.position.set(wx+Math.cos(a)*9.4, wy+0.7, wz+Math.sin(a)*9.4);
         reed.rotation.z = (rng()-0.5)*0.2;
-        scene.add(reed);
+        addTo(scene, reed);
       }
     }
     // little waterfall feeding the pool from a rock ledge
@@ -1515,15 +1951,16 @@ export function buildWorld(scene, quality=1, seed=1){
     ledge.scale.set(3.4, ledgeH*0.5, 2.6);
     ledge.position.set(ledgeX, wy+ledgeH*0.5, ledgeZ);
     ledge.lookAt(wx, wy, wz);
+    ledge.castShadow = true;
     COLLIDERS.push({ x:ledgeX, z:ledgeZ, r:3.0, bot:wy, top:wy+ledgeH });
     addOutline(ledge, 0.03);
-    scene.add(ledge);
+    addTo(scene, ledge);
     const fallMat = makeWaterMat();
     fallMat.uniforms.uShallow.value = waterFoam;
     const fall = new THREE.Mesh(new THREE.PlaneGeometry(2.2, ledgeH, 6, 14), fallMat);
     fall.position.set(ledgeX + (wx-ledgeX)*0.06, wy+ledgeH*0.5, ledgeZ + (wz-ledgeZ)*0.06);
     fall.lookAt(wx, fall.position.y, wz);
-    scene.add(fall);
+    addTo(scene, fall);
     // mist at the base of the falls
     const mistN = 22;
     const mistGeo = new THREE.BufferGeometry();
@@ -1547,7 +1984,7 @@ export function buildWorld(scene, quality=1, seed=1){
         float a=smoothstep(0.5,0.1,r)*vA; gl_FragColor=vec4(0.85,0.97,1.0,a); if(a<0.02) discard; }`
     });
     const mist = new THREE.Points(mistGeo, mistMat); mist.frustumCulled = false;
-    scene.add(mist);
+    addTo(scene, mist);
     world.updaters.push((dt,t)=>{
       pondMat.uniforms.uTime.value = t;
       fallMat.uniforms.uTime.value = t*2.2;
@@ -1566,7 +2003,7 @@ export function buildWorld(scene, quality=1, seed=1){
       w1.position.x = -1.1; w2.position.x = 1.1;
       b.add(w1, w2);
       b.userData = { a: rng()*7, r: 90+rng()*120, h: 55+rng()*40, sp: 0.05+rng()*0.06, w1, w2 };
-      scene.add(b); birds.push(b);
+      addTo(scene, b); birds.push(b);
     }
     world.updaters.push((dt,t)=>{
       for(const b of birds){
@@ -1602,9 +2039,9 @@ export function buildWorld(scene, quality=1, seed=1){
       const g = c.getContext('2d');
       const base = new THREE.Color(hex);
       const gr = g.createRadialGradient(14,50,2,44,10,60);
-      gr.addColorStop(0, '#'+base.clone().offsetHSL(0,0,0.22).getHexString());
+      gr.addColorStop(0, '#'+offsetHSLsRGB(base.clone(),0,0,0.22).getHexString());
       gr.addColorStop(0.6, '#'+base.getHexString());
-      gr.addColorStop(1, '#'+base.clone().offsetHSL(0,0,-0.18).getHexString());
+      gr.addColorStop(1, '#'+offsetHSLsRGB(base.clone(),0,0,-0.18).getHexString());
       g.fillStyle = gr; g.fillRect(0,0,64,64);
       g.strokeStyle = 'rgba(30,20,15,0.35)'; g.lineWidth = 1.4;
       g.beginPath(); g.moveTo(6,58); g.quadraticCurveTo(30,40,50,8); g.stroke();
@@ -1627,7 +2064,7 @@ export function buildWorld(scene, quality=1, seed=1){
       b.add(wPivotL, wPivotR);
       const a0=rng()*Math.PI*2, r=6+rng()*150;
       b.userData = { cx:Math.cos(a0)*r, cz:Math.sin(a0)*r, ph:rng()*7, spd:0.5+rng()*0.5, rad:1.5+rng()*2.5, h:1.2+rng()*1.6, wPivotL, wPivotR };
-      scene.add(b); flies.push(b);
+      addTo(scene, b); flies.push(b);
     }
     world.updaters.push((dt,t)=>{
       for(const b of flies){
@@ -1665,7 +2102,7 @@ export function buildWorld(scene, quality=1, seed=1){
         const px = world.pondPos.x+Math.cos(a)*r, pz = world.pondPos.z+Math.sin(a)*r;
         g.position.set(px, groundHeight(px,pz)+0.15, pz);
         g.userData = { baseX:px, baseZ:pz, ph:rng()*7, dir:rng()*Math.PI*2 };
-        scene.add(g); frogs.push(g);
+        addTo(scene, g); frogs.push(g);
       }
       world.updaters.push((dt,t)=>{
         for(const f of frogs){
@@ -1703,7 +2140,7 @@ export function buildWorld(scene, quality=1, seed=1){
       const px = Math.cos(a)*r, pz = Math.sin(a)*r;
       g.userData = { baseX:px, baseZ:pz, ph:rng()*7, dir:rng()*Math.PI*2 };
       g.position.set(px, groundHeight(px,pz)+0.1, pz);
-      scene.add(g); rabbits.push(g);
+      addTo(scene, g); rabbits.push(g);
     }
     world.updaters.push((dt,t)=>{
       for(const r of rabbits){
@@ -1721,12 +2158,54 @@ export function buildWorld(scene, quality=1, seed=1){
     });
   }
 
-  world.update = (dt, t)=>{ for(const u of world.updaters) u(dt,t); };
-  // items 01 / 09: handed to main.js so it never has to reach for the module-level arrays, and
-  // so the spawn search runs once against the FINISHED collider list instead of per frame.
-  world.colliders = COLLIDERS;
-  world.spawnPoint = findSpawnPoint(seed);
   return world;
+}
+
+/* ---------------- item 42: owned-vs-shared disposal ----------------
+   NOTE ON WHY THIS EXISTS TODAY: nothing calls it yet. main.js's rerollWorld() sets
+   location.search, i.e. a full page reload, so buildWorld() runs exactly once per load. It is
+   here because item 31's build split makes in-session rebuilds possible and item 10's dev panel
+   will do one every time a slider moves — dozens per session — and a teardown bolted on later,
+   after the props wave has added another twenty batches, is a teardown that misses things.
+
+   Ownership is decided by USE COUNT, in one pass, instead of by hand at ~90 construction sites.
+   A geometry or material used by exactly one of our meshes is that mesh's to drop; anything used
+   by two or more is shared (rockGeo alone backs the rock batch, its hull, the rune boulder, the
+   cave spikes and the waterfall ledge) and is left alone. Disposing a shared geometry is the bug
+   the flags exist to prevent: it empties every OTHER prop that references it, and every prop
+   built afterwards from the same source. Hand-marking is how you get that wrong. */
+function markOwnership(world){
+  const geoUse = new Map(), matUse = new Map();
+  const bump = (map, k)=>{ if(k) map.set(k, (map.get(k)||0) + 1); };
+  for(const root of OWNED) root.traverse(n=>{
+    bump(geoUse, n.geometry);
+    if(Array.isArray(n.material)) for(const m of n.material) bump(matUse, m);
+    else bump(matUse, n.material);
+  });
+  let own = 0, shared = 0;
+  for(const root of OWNED) root.traverse(n=>{
+    n.userData.ownGeo = !!(n.geometry && geoUse.get(n.geometry) === 1);
+    n.userData.ownMat = !Array.isArray(n.material) && !!(n.material && matUse.get(n.material) === 1);
+    if(n.userData.ownGeo || n.userData.ownMat) own++;
+  });
+  for(const [, c] of geoUse) if(c > 1) shared++;
+  for(const [, c] of matUse) if(c > 1) shared++;
+  world.disposeStats = { roots: OWNED.length, owned: own, shared };
+  world.dispose = ()=>{
+    for(const root of OWNED){
+      root.traverse(n=>{
+        if(n.userData.ownGeo) n.geometry.dispose();
+        if(n.userData.ownMat) n.material.dispose();
+      });
+      if(root.parent) root.parent.remove(root);
+    }
+    // truncate in place: entities.js and main.js hold the exported COLLIDERS reference, and an
+    // updater list swapped for a new array would leave the old closures running off a stale world.
+    OWNED.length = 0; COLLIDERS.length = 0; EXCLUSIONS.length = 0; SITES.length = 0;
+    world.updaters.length = 0;
+    world.update = ()=>{};
+    RAVINE = null; POCKETS = {}; LANDMARKS = []; WORLD = null;
+  };
 }
 
 function makeCloudTexture(){
