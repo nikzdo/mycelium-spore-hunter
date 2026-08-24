@@ -35,3 +35,11 @@ export function rollBossTrait(archetype, rng){
   const pool = BOSS_TRAITS[archetype];
   return pool[(rng()*pool.length)|0];
 }
+
+// The Bloom Ascendant — never rolled by rollBossTrait(), so it can only ever appear through
+// main.js's own gate (progress.eldersBeaten + progress.gluttonsBeaten, see resetRun). Boss's
+// isTrait() treats this id as matching every elder trait check at once (entities.js), so the
+// fight is deliberately every elder mechanic layered together rather than one bespoke kit —
+// beating both archetypes enough times earns the sum of everything either one can do.
+export const ASCENDANT_TRAIT = { id:'ascendant', name:'Convergence', tint:0xffe066, glow:0xffffff,
+  desc:'Every trait an Elder can carry, all at once — regrowth, echoing rings, a swelling brood, and a wrath that only sharpens as it falls.' };

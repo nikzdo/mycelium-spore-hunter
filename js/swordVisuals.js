@@ -129,6 +129,77 @@ const BLADE_DIMS = [
   { w:0.13, l:1.05, d:0.20, jagged:false }, // legendary — bright polished
 ];
 
+// builds the Windsong Bow: a curved stave + taut string + a grip, built from its own geometry
+// rather than the shared tapered-blade mesh every sword-family weapon reuses — a bow does not
+// read as a bow if it's just a re-scaled sword blade with a different tint.
+export function buildBow(){
+  const group = new THREE.Group();
+  const staveMat = toonMat({ color:0x6b4a2a, rim:0.5, rimColor:0xc8ffb0 });
+  // a quadratic bezier from tip to tip, bowed out on -X, is a robust way to get a believable
+  // bow curve without hand-tuning torus-arc trig
+  const curve = new THREE.QuadraticBezierCurve3(
+    new THREE.Vector3(0, 0.42, 0),
+    new THREE.Vector3(-0.15, 0, 0),
+    new THREE.Vector3(0, -0.42, 0));
+  const stave = new THREE.Mesh(new THREE.TubeGeometry(curve, 20, 0.026, 6, false), staveMat);
+  addOutline(stave, 0.22);
+  group.add(stave);
+
+  // string: straight, tip to tip, sitting on the open (+X) side of the stave's curve for tension
+  const string = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.84, 5),
+    new THREE.MeshBasicMaterial({ color:0xf2e4c8 }));
+  string.position.x = 0.015;
+  group.add(string);
+
+  // grip, sitting at the curve's actual midpoint (a quadratic bezier's t=0.5 point is NOT the
+  // origin — it's pulled toward the control point) so it doesn't float off the stave
+  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.17, 7),
+    toonMat({ color:0x4a3420, rim:0.3 }));
+  grip.position.set(-0.065, 0, 0);
+  addOutline(grip, 0.15);
+  group.add(grip);
+
+  return { group, stave, string, grip };
+}
+
+// builds the spear: a long shaft + steel point, its own model rather than a stretched sword
+// blade — the whole point of a spear is reach read at a glance, and a re-scaled sword blade
+// doesn't sell "long shaft held out in front" the way a real taper-to-a-point silhouette does.
+export function buildSpear(){
+  const group = new THREE.Group();
+  const shaftMat = toonMat({ color:0x6b4a2a, rim:0.4, rimColor:0xd8c8a0 });
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.036, 1.5, 7), shaftMat);
+  shaft.position.y = -0.75;                 // grip at y=0, shaft runs down toward the point
+  addOutline(shaft, 0.12);
+  group.add(shaft);
+
+  // a wrapped grip band, so the hand-height on the shaft reads even at a glance
+  const wrap = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.042, 0.16, 7),
+    toonMat({ color:0x3a2a18, rim:0.3 }));
+  wrap.position.y = -0.14;
+  addOutline(wrap, 0.1);
+  group.add(wrap);
+
+  // steel point, tinted per-weapon like the sword blade / bow stave
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.078, 0.44, 6),
+    toonMat({ color:0xd8d8d8, emissive:0x6a7a88, emissiveIntensity:0.5, rim:0.75, rimColor:0xffffff }));
+  tip.position.y = -1.5 - 0.20;
+  addOutline(tip, 0.12);
+  group.add(tip);
+
+  // two small side barbs at the point's base — without them the silhouette reads as "sharpened
+  // stick", not "spear"
+  const barbMat = toonMat({ color:0xb8b8b8, rim:0.55, rimColor:0xffffff });
+  for(const s of [-1,1]){
+    const barb = new THREE.Mesh(new THREE.ConeGeometry(0.036, 0.17, 4), barbMat);
+    barb.position.set(0.052*s, -1.5-0.02, 0);
+    barb.rotation.z = 1.15*s; barb.rotation.x = 0.22;
+    addOutline(barb, 0.1);
+    group.add(barb);
+  }
+  return { group, shaft, tip };
+}
+
 // builds one full sword: { group (add under the hand), blade (mesh to tint per-weapon) }
 export function buildSwordVariant(rarity){
   const group = new THREE.Group();

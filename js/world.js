@@ -83,6 +83,17 @@ export const PARAMS = {
   crystalChance: 0.55, crystalPMin: 30, crystalPMax: 165,
   warrenChance: 0.55,  warrenPMin: 20,  warrenPMax: 150,
   witherChance: 0.5,   witherPMin: 20,  witherPMax: 100,
+  // fen hollow: a boggy patch — reeds + lily pads, and the one pocket that touches player
+  // speed (fenBogAt, read by entities.js) rather than being scenery-only like the other three
+  fenChance: 0.45,     fenPMin: 20,     fenPMax: 145,
+  fenReedMin: 16, fenReedVar: 14, fenReedHMin: 0.6, fenReedHVar: 0.9,
+  fenPadMin: 4,   fenPadVar: 5,  fenWisps: 46,
+  // scorched hollow: ash and embers — atmosphere-only, like crystal/withered, no gameplay hook
+  scorchChance: 0.5, scorchPMin: 20, scorchPMax: 130,
+  scorchRockMin: 8, scorchRockVar: 8, scorchEmbers: 34,
+  // per-pocket ambient signature for the two that didn't have one yet (crystal hollow already
+  // has its orbiting motes, fen hollow its rising wisps)
+  warrenSpores: 30, witherMotes: 26,
   // big set-pieces: rolled per world, floor of 2 so no world is a bare field
   landmarkChance: 0.62, landmarkMin: 2,
   // trees
@@ -128,6 +139,13 @@ export const PARAMS = {
   stepDMin: 26, stepDMax: 168, stepEdgeBand: 16, stepSiteApron: 26,
   caveSecondChance: 0.5, caveDMin: 50, caveDVar: 110, caveSpikes: 4,
   caveWalls: 8, caveWallRMin: 2.6, caveWallRVar: 2.4, caveWallSMin: 2.2, caveWallSVar: 1.8,
+  // underground chamber a cave mouth actually leads to: a flat disc far outside the playable
+  // disc (terrainSpan is 500, so anything past ~300 is empty space to build a sealed room in),
+  // walled by the same rockPlacements/InstancedMesh the surface uses so it costs zero extra
+  // draw calls. Spaced by the golden angle per cave index so two chambers can never overlap.
+  caveChamberDist: 420, caveChamberSpacing: 260, caveChamberR: 30, caveChamberWallR: 25,
+  caveChamberWalls: 18, caveChamberWallSMin: 2.6, caveChamberWallSVar: 2.0,
+  caveChamberFloorY: -6, caveChamberCrystals: 6, caveChamberShrooms: 7,
   boulderDMin: 30, boulderDVar: 140, boulderSMin: 3.2, boulderSVar: 1.2,
   // bushes / fallen logs
   bushCount: 70, bushRMin: 9, bushRVar: 160, bushSMin: 0.5, bushSVar: 0.7,
@@ -140,9 +158,8 @@ export const PARAMS = {
   decoCount: 90, decoRMin: 8, decoRVar: 170, decoSMin: 0.6, decoSMax: 2.2,
   warrenMin: 24, warrenVar: 14, warrenDom: 0.7,
   caveShrooms: 4, respawnMin: 45, respawnVar: 35,
-  // crystals
-  crystalCount: 8, crystalRMin: 12, crystalRVar: 168,
-  shardMin: 3, shardVar: 2, shardSMin: 0.28, shardSVar: 0.42,
+  // crystals — Crystal Hollow pocket + cave chambers only, no ambient map-wide scatter (removed
+  // on purpose: a crystal seam is what Crystal Hollow IS, not background dressing)
   hollowMin: 5, hollowVar: 3, hollowShardMin: 3, hollowShardVar: 3,
   hollowSMin: 0.3, hollowSVar: 0.5,
   // withered hollow spikes
@@ -152,6 +169,9 @@ export const PARAMS = {
   stoneCount: 7, stoneDMin: 85, stoneDVar: 55, stoneRing: 10, stoneHMin: 7, stoneHVar: 3,
   geyserCount: 4, geyserDMin: 45, geyserDVar: 115,
   pondDMin: 55, pondDVar: 90, pondPads: 9,
+  ruinsDMin: 60, ruinsDVar: 110, ruinsWalls: 6, ruinsRubble: 14,
+  summitDMin: 90, summitDVar: 70, summitTiers: 6, summitTierH: 1.7, summitR0: 7.5,
+  shrineCount: 2, // plus one more, guaranteed, at the summit's peak if that landmark rolled
   // ambient life + sky dressing
   cloudCount: 20, mtnPerRing: 8, rayCount: 8,
   fireflies: 240, pollen: 200, petals: 24, birds: 6, butterflies: 8,
@@ -200,6 +220,10 @@ let LANDMARKS = [];                 // which big set-pieces this world rolled
 let QUALITY = 1;                    // buildWorld's quality argument, needed by both halves
 // item 26 — authored sites, read by baseTerrainHeight(). Never reassigned: truncate in place.
 const SITES = [];
+// underground cave chambers — sealed rooms far outside the playable disc, one per cave mouth.
+// groundHeight() checks this before the noise pipeline, so a chamber's flat floor overrides
+// whatever the skirt/rim math would otherwise put out there. Never reassigned: truncate in place.
+const CAVE_CHAMBERS = [];
 /* items 24/27 — this world's pick from the shape RANGES in PARAMS. The curve is authored; which
    curve you get is rolled. Keeping the pick here rather than writing into PARAMS matters: PARAMS
    is the tuning surface item 10's panel edits, and a generator that mutated it would drift its own
@@ -457,7 +481,21 @@ export function baseTerrainHeight(x, z){
   if(d > crest) h += Math.min(PARAMS.edgeSkirtMax, (d-crest)*PARAMS.edgeSkirt);
   return h;
 }
+// item: cave chambers sit far outside the playable disc, on the same infinite terrain function
+// everything else uses — so groundHeight overrides to a flat floor for them instead of the skirt
+// value baseTerrainHeight would otherwise return out there. HOT PATH, but CAVE_CHAMBERS never
+// holds more than 2 entries, so the scan costs nothing next to the noise pipeline it replaces.
+export function caveFloorAt(x, z){
+  for(let i=0;i<CAVE_CHAMBERS.length;i++){
+    const c = CAVE_CHAMBERS[i];
+    const dx = x-c.x, dz = z-c.z;
+    if(dx*dx + dz*dz < c.r*c.r) return c.floorY;
+  }
+  return null;
+}
 export function groundHeight(x, z){
+  const cave = caveFloorAt(x, z);
+  if(cave !== null) return cave;
   return baseTerrainHeight(x, z) - ravineDepth(x, z);
 }
 
@@ -608,7 +646,7 @@ function idxOf(x, z){
 /* The placement predicate. Samples the cell plus its four neighbours and passes if ANY is
    reachable, because a 3 m grid quantises a spot near a cell boundary onto whichever side it
    rounded to — demanding the exact cell would reject legal ground at every tier edge. Callers
-   that place a whole cluster (props.js's pod runs) should test each member, not just the head. */
+   that place a whole cluster of points should test each member, not just the first. */
 export function reachable(x, z){
   if(!REACH) buildReach();
   const i = idxOf(x, z);
@@ -733,6 +771,16 @@ function corruptionAt(x, z){
 }
 function hasLandmark(id){ return LANDMARKS.indexOf(id) >= 0; }
 
+// Fen Hollow's bog: 0 outside the pocket, ramping to 1 toward its center. Exported — this is the
+// one pocket that reaches past decoration into the player's own move speed (see entities.js),
+// so unlike corruptionAt it has to be readable from outside this module.
+export function fenBogAt(x, z){
+  const fh = POCKETS.fenHollow;
+  if(!fh) return 0;
+  const d = Math.hypot(x-fh.x, z-fh.z);
+  return 1 - THREE.MathUtils.smoothstep(d, fh.r*0.3, fh.r);
+}
+
 // item 09: every authored site picks its spot through the same rejection sampler, so a
 // landmark can no longer land in the ravine, on a cliff face, or on top of an earlier
 // landmark. Sites are placed in file order, so each one sees everything built before it.
@@ -781,7 +829,7 @@ export function buildWorld(scene, quality=1, seed=1){
 export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
   // this half owns the arrays' lifetime. Truncate in place, never reassign: other modules
   // already hold the exported COLLIDERS reference.
-  COLLIDERS.length = 0; EXCLUSIONS.length = 0; SITES.length = 0; OWNED.length = 0;
+  COLLIDERS.length = 0; EXCLUSIONS.length = 0; SITES.length = 0; OWNED.length = 0; CAVE_CHAMBERS.length = 0;
   QUALITY = quality;
   // item 07: every field this world will ever sample, built once from the world seed.
   F = buildFields(seed);
@@ -820,10 +868,12 @@ export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
   if(rng() < PARAMS.crystalChance) POCKETS.crystalHollow = rollPocket(PARAMS.crystalPMin, PARAMS.crystalPMax);
   if(rng() < PARAMS.warrenChance) POCKETS.fungalWarren = { ...rollPocket(PARAMS.warrenPMin, PARAMS.warrenPMax), species: MUSHROOM_SPECIES[(rng()*MUSHROOM_SPECIES.length)|0].id };
   if(rng() < PARAMS.witherChance) POCKETS.witheredHollow = rollPocket(PARAMS.witherPMin, PARAMS.witherPMax);
+  if(rng() < PARAMS.fenChance) POCKETS.fenHollow = rollPocket(PARAMS.fenPMin, PARAMS.fenPMax);
+  if(rng() < PARAMS.scorchChance) POCKETS.scorchedHollow = rollPocket(PARAMS.scorchPMin, PARAMS.scorchPMax);
   // which "big" set-piece landmarks this world gets — not all of them every time, so the
   // landmark *set itself* reads as different between worlds, not just repositioned.
   // guaranteed >=2 so no world ends up feeling like a bare field.
-  const BIG_LANDMARKS = ['tower','stones','geysers','pond'];
+  const BIG_LANDMARKS = ['tower','stones','geysers','pond','ruins','summit'];
   LANDMARKS = BIG_LANDMARKS.filter(()=> rng() < PARAMS.landmarkChance);
   if(LANDMARKS.length < PARAMS.landmarkMin){
     const missing = BIG_LANDMARKS.filter(id=>LANDMARKS.indexOf(id) < 0);
@@ -1262,8 +1312,31 @@ export function buildProps(scene, seed, world = WORLD){
       const s = PARAMS.caveWallSMin+rng()*PARAMS.caveWallSVar;
       rockPlacements.push({ x, z, s, sy:s*(0.9+rng()*0.4), rx:rng()*0.3, ry:rng()*7, rz:rng()*0.3 });
     }
+    // ---- the chamber this mouth actually leads to: a sealed disc far outside the playable
+    // ring (2.4 rad ~= the golden angle, so a second chamber can never land near the first).
+    // groundHeight() already returns caveChamberFloorY for anything inside its radius (the
+    // override lives above ravineDepth in the pipeline), so every placement below — the wall
+    // ring, the floor mesh, the crystal scatter — reads a flat floor for free.
+    const mouthX = Math.cos(mouthDir), mouthZ = Math.sin(mouthDir);
+    const chAngle = rng()*Math.PI*2 + c*2.4, chDist = PARAMS.caveChamberDist + c*PARAMS.caveChamberSpacing;
+    const chX = Math.cos(chAngle)*chDist, chZ = Math.sin(chAngle)*chDist;
+    const floorY = PARAMS.caveChamberFloorY;
+    const chamber = { index:c, x:chX, z:chZ, r:PARAMS.caveChamberR, floorY,
+      entryTrigger: { x: cx - mouthX*1.6, z: cz - mouthZ*1.6 },     // matches the void's position below
+      exitWorld: { x: cx + mouthX*2.4, y: cy, z: cz + mouthZ*2.4 }, // just outside the mouth, so exiting can't re-trigger it
+      cleared: false };
+    CAVE_CHAMBERS.push(chamber);
+    EXCLUSIONS.push({ x:chX, z:chZ, r:PARAMS.caveChamberR, tag:'caveChamber' });
+    for(let k=0;k<PARAMS.caveChamberWalls;k++){
+      const ang = (k/PARAMS.caveChamberWalls)*Math.PI*2 + (rng()-0.5)*0.3; // full ring: a sealed room, no gap
+      const rad = PARAMS.caveChamberWallR + (rng()-0.5)*1.6;
+      const x = chX+Math.cos(ang)*rad, z = chZ+Math.sin(ang)*rad;
+      const s = PARAMS.caveChamberWallSMin+rng()*PARAMS.caveChamberWallSVar;
+      rockPlacements.push({ x, z, s, sy:s*(1.1+rng()*0.5), rx:rng()*0.3, ry:rng()*7, rz:rng()*0.3 });
+    }
   }
   world.caveSpots = caveSpots;
+  world.caveChambers = CAVE_CHAMBERS;
   const rockCount = rockPlacements.length;
   const rocks = new THREE.InstancedMesh(rockGeo, rockMat, rockCount);
   // theme.moss for the mossy variant, per-instance jitterFor('rock') for the dry one: rock is a
@@ -1810,7 +1883,11 @@ export function buildProps(scene, seed, world = WORLD){
     const a=rng()*Math.PI*2, r=PARAMS.grassRMin+Math.pow(rng(),0.8)*PARAMS.grassRVar;
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
     Q.setFromEuler(EU.set(0, rng()*7, (rng()-0.5)*0.3));
-    const s=0.6+rng()*0.9;
+    // the fen's reeds and lily pads read as a bog only if ordinary meadow grass doesn't grow
+    // straight through them — thinned by the same bog strength that slows the player, not a hard
+    // cutoff, so the edge of the pocket still looks grown-in rather than mowed to a circle.
+    const bog = fenBogAt(x,z);
+    const s = (bog > 0.3 && rng() < bog) ? 0 : 0.6+rng()*0.9;
     M.compose(V.set(x, groundHeight(x,z), z), Q, S.set(s,s,s));
     grass.setMatrixAt(i,M);
   }
@@ -1925,6 +2002,41 @@ export function buildProps(scene, seed, world = WORLD){
       const sp = rng() < PARAMS.warrenDom ? dom : MUSHROOM_SPECIES[(rng()*MUSHROOM_SPECIES.length)|0];
       placeMushroom(pt.x, pt.z, sp);
     }
+    // ambient signature: drifting spores tinted to the dominant species — crystal hollow has its
+    // orbiting motes, fen hollow its rising wisps; this is the warren's own, so every pocket
+    // reads as a distinct place rather than three of the four being "just decoration".
+    const wsCount = PARAMS.warrenSpores;
+    const wsGeo = new THREE.BufferGeometry();
+    const wsPos = new Float32Array(wsCount*3), wsSeed = new Float32Array(wsCount);
+    for(let i=0;i<wsCount;i++){
+      const a = rng()*Math.PI*2, r = Math.sqrt(rng())*fw.r*0.85;
+      wsPos[i*3] = fw.x+Math.cos(a)*r; wsPos[i*3+1] = groundHeight(fw.x+Math.cos(a)*r, fw.z+Math.sin(a)*r);
+      wsPos[i*3+2] = fw.z+Math.sin(a)*r;
+      wsSeed[i] = rng()*100;
+    }
+    wsGeo.setAttribute('position', new THREE.BufferAttribute(wsPos,3));
+    wsGeo.setAttribute('aSeed', new THREE.BufferAttribute(wsSeed,1));
+    const domCol = new THREE.Color(dom.color);
+    const warrenSporeMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+      uniforms:{ uTime:{value:0}, uColor:{value:domCol} },
+      vertexShader:`uniform float uTime; attribute float aSeed; varying float vA;
+        void main(){
+          vec3 p = position;
+          p.x += sin(uTime*0.4+aSeed*2.0)*1.4; p.z += cos(uTime*0.35+aSeed*1.6)*1.4;
+          p.y += 1.0+sin(uTime*0.6+aSeed*3.0)*1.0;
+          vA = 0.35+0.35*sin(uTime*1.5+aSeed*4.0);
+          vec4 mv = modelViewMatrix*vec4(p,1.0);
+          gl_PointSize = 34.0/-mv.z; gl_Position = projectionMatrix*mv;
+        }`,
+      fragmentShader:`uniform vec3 uColor; varying float vA;
+        void main(){ float r=length(gl_PointCoord-0.5);
+          float a=smoothstep(0.5,0.05,r)*vA; gl_FragColor=vec4(uColor,a); if(a<0.02) discard; }`
+    });
+    const warrenSpores = new THREE.Points(wsGeo, warrenSporeMat);
+    warrenSpores.frustumCulled = false;
+    addTo(scene, warrenSpores);
+    world.updaters.push((dt,t)=>{ warrenSporeMat.uniforms.uTime.value = t; });
   }
   world.updaters.push((dt,t)=>{
     for(const d of deco){
@@ -1936,7 +2048,11 @@ export function buildProps(scene, seed, world = WORLD){
   /* ----- LANDMARK: cave mouths — dark alcoves in the rock walls built earlier ----- */
   if(world.caveSpots && world.caveSpots.length){
     const voidMat = new THREE.MeshBasicMaterial({ color:0x0a0810, side:THREE.BackSide, fog:false });
-    for(const spot of world.caveSpots){
+    // the chamber's roof — same unlit BackSide trick as the mouth's void, just big enough to
+    // enclose the whole walled room, so nothing outside (sky dome, sun-lit haze) reads through
+    const domeMat = new THREE.MeshBasicMaterial({ color:0x0c0a14, side:THREE.BackSide, fog:false });
+    for(let i=0;i<world.caveSpots.length;i++){
+      const spot = world.caveSpots[i];
       const { cx, cz, cy, mouthDir } = spot;
       const mouthX = Math.cos(mouthDir), mouthZ = Math.sin(mouthDir);
       // dark cavity, recessed behind the entrance so it never coincides with the wall rocks' surfaces
@@ -1956,6 +2072,22 @@ export function buildProps(scene, seed, world = WORLD){
       const pl = new THREE.PointLight(0xffa855, 7, 13);
       pl.position.set(cx - mouthX*1.1, cy+1.6, cz - mouthZ*1.1);
       addTo(scene, pl);
+      // beacon shaft: a point light only reaches ~13 m, nowhere near enough to spot a cave mouth
+      // from across the valley. Reuses the grove god-ray technique (a fog:false additive plane)
+      // tinted to the mouth's own warm colour, tall enough to read as a landmark from far off the
+      // same way a crystal cluster or a landmark tower already does.
+      const beaconMat = new THREE.MeshBasicMaterial({ map:makeRayTexture(), color:0xffa855,
+        transparent:true, opacity:0.5, blending:THREE.AdditiveBlending, depthWrite:false,
+        side:THREE.DoubleSide, fog:false });
+      const beaconX = cx - mouthX*1.1, beaconZ = cz - mouthZ*1.1;
+      for(let k=0;k<2;k++){
+        const beam = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 46), beaconMat);
+        beam.position.set(beaconX, cy+23, beaconZ);
+        beam.rotation.y = k*Math.PI/2;      // two crossed planes read from every approach angle
+        addTo(scene, beam);
+      }
+      const beaconPh = rng()*7;
+      world.updaters.push((dt,t)=>{ beaconMat.opacity = 0.36 + Math.sin(t*0.8+beaconPh)*0.14; });
       // a few glowing mushrooms just inside for atmosphere — pushed into the same instance
       // arrays as every other mushroom, so zero extra draw calls. These are the one authored
       // exception to the clearance test: they are *meant* to sit inside the cave keep-out.
@@ -1965,6 +2097,61 @@ export function buildProps(scene, seed, world = WORLD){
         const sp = MUSHROOM_SPECIES[(rng()*MUSHROOM_SPECIES.length)|0];
         placeMushroom(gx, gz, sp, 0.5, 1.0);
       }
+
+      /* ----- the chamber this mouth actually leads to (main.js teleports the player here) ----- */
+      const chamber = world.caveChambers[i];
+      const floor = new THREE.Mesh(new THREE.CircleGeometry(chamber.r, 40), rockMat);
+      floor.rotation.x = -Math.PI/2;
+      floor.position.set(chamber.x, chamber.floorY, chamber.z);
+      floor.receiveShadow = true;
+      addTo(scene, floor);
+      const dome = new THREE.Mesh(new THREE.SphereGeometry(chamber.r+18, 16, 10), domeMat);
+      dome.scale.set(1, 0.6, 1);
+      dome.position.set(chamber.x, chamber.floorY+8, chamber.z);
+      addTo(scene, dome);
+      // stalactites hanging through the room, same silhouette as the mouth's
+      for(let k=0;k<9;k++){
+        const a = rng()*Math.PI*2, r = rng()*chamber.r*0.85;
+        const spike = new THREE.Mesh(new THREE.ConeGeometry(0.3+rng()*0.2, 1.1+rng()*0.9, 6), rockMat);
+        spike.rotation.x = Math.PI;
+        spike.position.set(chamber.x+Math.cos(a)*r, chamber.floorY+9.5+rng()*2.5, chamber.z+Math.sin(a)*r);
+        addTo(scene, spike);
+      }
+      // even warm fill around the room — static landmark lights, never spawned/despawned in bursts
+      for(let k=0;k<3;k++){
+        const a = (k/3)*Math.PI*2 + rng();
+        const pl2 = new THREE.PointLight(0xffb877, 6, chamber.r*1.1);
+        pl2.position.set(chamber.x+Math.cos(a)*chamber.r*0.4, chamber.floorY+3.5, chamber.z+Math.sin(a)*chamber.r*0.4);
+        addTo(scene, pl2);
+      }
+      // exit alcove — a cool blue light distinct from the warm cave glow, so "the way back" reads
+      // at a glance once the fight is over. main.js checks proximity to exitTrigger to warp out.
+      // 0.6r, same radius as the arrival point on the opposite side: the wall ring sits at
+      // caveChamberWallR (25) with rocks up to 3.68 in collider radius, so anything past ~0.68r
+      // risks landing inside a wall rock's own column — same failure moveHoriz's escape valve
+      // hits for any spawn-inside-a-collider case (see the arrival/loot/crystal keep-out above).
+      const exitLocal = { x: chamber.x, z: chamber.z - chamber.r*0.6 };
+      chamber.exitTrigger = exitLocal;
+      const exitLight = new THREE.PointLight(0x8fd6ff, 9, 11);
+      exitLight.position.set(exitLocal.x, chamber.floorY+1.9, exitLocal.z);
+      addTo(scene, exitLight);
+      for(let k=0;k<3;k++){
+        const a = rng()*Math.PI*2, r = 0.9+rng()*1.6;
+        const gx = exitLocal.x+Math.cos(a)*r, gz = exitLocal.z+Math.sin(a)*r;
+        const sp = MUSHROOM_SPECIES[(rng()*MUSHROOM_SPECIES.length)|0];
+        placeMushroom(gx, gz, sp, 0.5, 1.0);
+      }
+      // ambient decorative mushrooms scattered through the rest of the room
+      for(let k=0;k<PARAMS.caveChamberShrooms;k++){
+        const a = rng()*Math.PI*2, r = rng()*chamber.r*0.7;
+        const gx = chamber.x+Math.cos(a)*r, gz = chamber.z+Math.sin(a)*r;
+        if(Math.hypot(gx-exitLocal.x, gz-exitLocal.z) < 3) continue; // keep the exit readable
+        const sp = MUSHROOM_SPECIES[(rng()*MUSHROOM_SPECIES.length)|0];
+        placeMushroom(gx, gz, sp, 0.5, 1.2);
+      }
+      // where main.js lands the player on entry, and where it drops the clear reward
+      chamber.arrival = { x: chamber.x, z: chamber.z + chamber.r*0.6 };
+      chamber.lootSpot = { x: chamber.x, z: chamber.z + chamber.r*0.15 };
     }
   }
 
@@ -1994,6 +2181,209 @@ export function buildProps(scene, seed, world = WORLD){
     const pl4 = new THREE.PointLight(0x8a5ac8, 6, 16);
     pl4.position.set(wh.x, whY+3, wh.z);
     addTo(scene, pl4);
+    // ambient signature: falling ash, not rising — the one pocket whose motes sink instead of
+    // drift up, so it reads as a distinct kind of wrong rather than the fen's bog or the warren's
+    // spores with a different tint.
+    const amCount = PARAMS.witherMotes;
+    const amGeo = new THREE.BufferGeometry();
+    const amPos = new Float32Array(amCount*3), amSeed = new Float32Array(amCount);
+    for(let i=0;i<amCount;i++){
+      const a = rng()*Math.PI*2, r = Math.sqrt(rng())*wh.r*0.85;
+      amPos[i*3] = wh.x+Math.cos(a)*r; amPos[i*3+1] = groundHeight(wh.x+Math.cos(a)*r, wh.z+Math.sin(a)*r)+4+rng()*3;
+      amPos[i*3+2] = wh.z+Math.sin(a)*r;
+      amSeed[i] = rng()*100;
+    }
+    amGeo.setAttribute('position', new THREE.BufferAttribute(amPos,3));
+    amGeo.setAttribute('aSeed', new THREE.BufferAttribute(amSeed,1));
+    const witherAshMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+      uniforms:{ uTime:{value:0} },
+      vertexShader:`uniform float uTime; attribute float aSeed; varying float vA;
+        void main(){
+          vec3 p = position;
+          float fall = mod(uTime*0.5+aSeed, 5.0);
+          p.y -= fall;
+          p.x += sin(uTime*0.3+aSeed*2.2)*0.6; p.z += cos(uTime*0.28+aSeed*1.9)*0.6;
+          vA = smoothstep(0.0,0.4,fall)*smoothstep(5.0,4.0,fall);
+          vec4 mv = modelViewMatrix*vec4(p,1.0);
+          gl_PointSize = 24.0/-mv.z; gl_Position = projectionMatrix*mv;
+        }`,
+      fragmentShader:`varying float vA;
+        void main(){ float r=length(gl_PointCoord-0.5);
+          float a=smoothstep(0.5,0.05,r)*vA*0.7; gl_FragColor=vec4(0.54,0.35,0.78,a); if(a<0.02) discard; }`
+    });
+    const witherAsh = new THREE.Points(amGeo, witherAshMat);
+    witherAsh.frustumCulled = false;
+    addTo(scene, witherAsh);
+    world.updaters.push((dt,t)=>{ witherAshMat.uniforms.uTime.value = t; });
+  }
+
+  /* ----- LANDMARK: fen hollow — a boggy patch with its own props (reeds, lily pads), the
+     game's fourth pocket and the only one that touches player speed. Reeds are passable —
+     unlike the withered hollow's spikes they are NOT pushed into COLLIDERS, the same way
+     ordinary grass is walked through, not around. */
+  if(POCKETS.fenHollow){
+    const fh = POCKETS.fenHollow;
+    const reedMat = toonMat({ color:0x4a6a3a, emissive:0x1a2a12, emissiveIntensity:0.25, rim:0.4, rimColor:0xb8d888 });
+    const padMat = toonMat({ color:0x2f5a3a, emissive:0x0f200f, emissiveIntensity:0.3, rim:0.35, rimColor:0x9fe0a0 });
+    // reeds and lily pads used to be one THREE.Mesh per blade/pad — up to a hundred extra draw
+    // calls for one pocket. Same instancing rule as every other batch of repeated geometry
+    // (item: perf discipline): one unit cone / unit disc, per-instance transform in the matrix.
+    const reedGeo = new THREE.ConeGeometry(1, 1, 5);
+    const reedPlacements = [];
+    const reedCount = PARAMS.fenReedMin + ((rng()*PARAMS.fenReedVar)|0);
+    const reedTest = (x,z)=> slopeAt(x,z) < PARAMS.siteSlope && clearOf(x,z,0.4);
+    for(const pt of scatter(rng, reedCount, 0.5, reedTest, { x:fh.x, z:fh.z, r0:0, r1:fh.r })){
+      const rx = pt.x, rz = pt.z, ry = groundHeight(rx,rz);
+      const h = PARAMS.fenReedHMin + rng()*PARAMS.fenReedHVar;
+      // a loose cluster of 2-3 thin blades per spot reads as a reed clump, not one lone cone
+      const blades = 2 + ((rng()*2)|0);
+      for(let b=0; b<blades; b++){
+        const bx = rx + (rng()-0.5)*0.35, bz = rz + (rng()-0.5)*0.35;
+        reedPlacements.push({ x:bx, y:ry+h*0.5, z:bz, r:0.035, h,
+          rx:(rng()-0.5)*0.15, ry2:rng()*7, rz:(rng()-0.5)*0.15 });
+      }
+    }
+    if(reedPlacements.length){
+      // thin as these are, they still clear STEP once a clump's jitter stacks blades near the
+      // edge of a footstep — walked over like grass, per the shadow policy's "ground cover never
+      // casts" rule, so no collider and no castShadow, same treatment as flowers and moss.
+      const reeds = new THREE.InstancedMesh(reedGeo, reedMat, reedPlacements.length);
+      reedPlacements.forEach((rp,i)=>{
+        Q.setFromEuler(EU.set(rp.rx, rp.ry2, rp.rz));
+        M.compose(V.set(rp.x, rp.y, rp.z), Q, S.set(rp.r, rp.h, rp.r));
+        reeds.setMatrixAt(i, M);
+      });
+      addTo(scene, reeds);
+    }
+    // lily pads: flat discs, denser toward the pocket's own center — the "open water" read
+    const padGeo = new THREE.CircleGeometry(1, 9);
+    padGeo.rotateX(-Math.PI/2);
+    const padPlacements = [];
+    const padCount = PARAMS.fenPadMin + ((rng()*PARAMS.fenPadVar)|0);
+    const padTest = (x,z)=> slopeAt(x,z) < PARAMS.siteSlope && clearOf(x,z,0.5);
+    for(const pt of scatter(rng, padCount, 0.9, padTest, { x:fh.x, z:fh.z, r0:0, r1:fh.r*0.55 })){
+      const py = groundHeight(pt.x, pt.z);
+      padPlacements.push({ x:pt.x, y:py+0.03, z:pt.z, r:0.35+rng()*0.3, ry:(rng()-0.5)*0.06 });
+    }
+    if(padPlacements.length){
+      const pads = new THREE.InstancedMesh(padGeo, padMat, padPlacements.length);
+      pads.receiveShadow = true;
+      padPlacements.forEach((pp,i)=>{
+        Q.setFromEuler(EU.set(0, 0, pp.ry));
+        M.compose(V.set(pp.x, pp.y, pp.z), Q, S.set(pp.r, 1, pp.r));
+        pads.setMatrixAt(i, M);
+      });
+      addTo(scene, pads);
+    }
+    const fhY = groundHeight(fh.x, fh.z);
+    const pl5 = new THREE.PointLight(0x6ab88a, 4.5, 15);
+    pl5.position.set(fh.x, fhY+2.5, fh.z);
+    addTo(scene, pl5);
+
+    /* ----- marsh wisps: rising bog-gas motes, the fen's own signature the way the crystal
+       clusters' orbiting spores are Crystal Hollow's — same GPU point-sprite technique as the
+       fireflies above (one draw call, per-vertex shader animation), tuned into a slow bubble
+       that rises out of the bog and pops rather than a firefly's drift, and confined to the
+       pocket's own radius so it reads as THIS place's weather, not ambient dressing repeated
+       from a different pocket. */
+    const wCount = PARAMS.fenWisps;
+    const wGeo = new THREE.BufferGeometry();
+    const wPos = new Float32Array(wCount*3), wSeed = new Float32Array(wCount);
+    for(let i=0;i<wCount;i++){
+      const a = rng()*Math.PI*2, r = Math.sqrt(rng())*fh.r*0.85; // sqrt(rng) = uniform over the disc, not clumped at the center
+      wPos[i*3] = fh.x+Math.cos(a)*r; wPos[i*3+1] = groundHeight(fh.x+Math.cos(a)*r, fh.z+Math.sin(a)*r);
+      wPos[i*3+2] = fh.z+Math.sin(a)*r;
+      wSeed[i] = rng()*100;
+    }
+    wGeo.setAttribute('position', new THREE.BufferAttribute(wPos,3));
+    wGeo.setAttribute('aSeed', new THREE.BufferAttribute(wSeed,1));
+    const wMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+      uniforms:{ uTime:{value:0} },
+      vertexShader:`uniform float uTime; attribute float aSeed; varying float vA;
+        void main(){
+          // each mote loops its own 7-11s rise independently (aSeed staggers phase AND period),
+          // so the bog reads as continuously bubbling rather than one synchronised pulse
+          float period = 7.0+mod(aSeed,4.0);
+          float cyc = mod(uTime+aSeed*3.7, period)/period;
+          vec3 p = position;
+          p.y += cyc*3.2;
+          p.x += sin(uTime*0.35+aSeed*2.1)*0.35; p.z += cos(uTime*0.3+aSeed*1.6)*0.35;
+          vA = smoothstep(0.0,0.12,cyc)*smoothstep(1.0,0.72,cyc);
+          vec4 mv = modelViewMatrix*vec4(p,1.0);
+          gl_PointSize = 46.0/-mv.z; gl_Position = projectionMatrix*mv;
+        }`,
+      fragmentShader:`varying float vA;
+        void main(){ float r=length(gl_PointCoord-0.5);
+          float a=smoothstep(0.5,0.05,r)*vA*0.8;
+          gl_FragColor=vec4(0.56,0.92,0.68,a); if(a<0.02) discard; }`
+    });
+    const wisps = new THREE.Points(wGeo, wMat);
+    wisps.frustumCulled = false;
+    addTo(scene, wisps);
+    world.updaters.push((dt,t)=>{ wMat.uniforms.uTime.value = t; });
+  }
+
+  /* ----- LANDMARK: scorched hollow — ash and embers, the fifth pocket. Atmosphere only, like
+     crystal/withered: no gameplay hook, just a place that reads as burned. ----- */
+  if(POCKETS.scorchedHollow){
+    const sch = POCKETS.scorchedHollow;
+    const ashMat = toonMat({ color:0x2a2622, emissive:0x1a0f08, emissiveIntensity:0.3, rim:0.3, rimColor:0xff8a3a });
+    const scorchRockCount = PARAMS.scorchRockMin + ((rng()*PARAMS.scorchRockVar)|0);
+    const scorchTest = (x,z)=> slopeAt(x,z) < PARAMS.siteSlope
+      && !inExclusion(x,z,1,'scorchedHollow') && clearOf(x,z,1.0);
+    for(const pt of scatter(rng, scorchRockCount, 2.0, scorchTest, { x:sch.x, z:sch.z, r0:0, r1:sch.r*0.8 })){
+      const bx=pt.x, bz=pt.z, by=groundHeight(bx,bz);
+      const s = 0.5+rng()*0.9;
+      const chunk = new THREE.Mesh(rockGeo, ashMat);
+      chunk.scale.set(s, s*(0.6+rng()*0.5), s);
+      chunk.position.set(bx, by+chunk.scale.y*0.3, bz);
+      chunk.rotation.set(rng()*7, rng()*7, rng()*7);
+      chunk.castShadow = true;
+      addOutline(chunk, 0.03);
+      addTo(scene, chunk);
+      if(chunk.scale.y > STEP*0.7) COLLIDERS.push({ x:bx, z:bz, r:s*0.8, bot:by, top:by+chunk.scale.y*0.7 });
+    }
+    // rising embers — same GPU point-sprite technique as the fen's bog wisps, tuned into a
+    // faster, more chaotic rise so the two pockets don't read as reskins of one effect
+    const eCount = PARAMS.scorchEmbers;
+    const eGeo = new THREE.BufferGeometry();
+    const ePos = new Float32Array(eCount*3), eSeed = new Float32Array(eCount);
+    for(let i=0;i<eCount;i++){
+      const a = rng()*Math.PI*2, r = Math.sqrt(rng())*sch.r*0.85;
+      ePos[i*3] = sch.x+Math.cos(a)*r; ePos[i*3+1] = groundHeight(sch.x+Math.cos(a)*r, sch.z+Math.sin(a)*r);
+      ePos[i*3+2] = sch.z+Math.sin(a)*r;
+      eSeed[i] = rng()*100;
+    }
+    eGeo.setAttribute('position', new THREE.BufferAttribute(ePos,3));
+    eGeo.setAttribute('aSeed', new THREE.BufferAttribute(eSeed,1));
+    const emberMat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+      uniforms:{ uTime:{value:0} },
+      vertexShader:`uniform float uTime; attribute float aSeed; varying float vA;
+        void main(){
+          vec3 p = position;
+          float period = 2.5+mod(aSeed,2.0);
+          float cyc = mod(uTime+aSeed*4.1, period)/period;
+          p.y += cyc*4.5;
+          p.x += sin(uTime*1.1+aSeed*3.0)*0.5; p.z += cos(uTime*0.9+aSeed*2.4)*0.5;
+          vA = smoothstep(0.0,0.1,cyc)*smoothstep(1.0,0.6,cyc);
+          vec4 mv = modelViewMatrix*vec4(p,1.0);
+          gl_PointSize = 22.0/-mv.z; gl_Position = projectionMatrix*mv;
+        }`,
+      fragmentShader:`varying float vA;
+        void main(){ float r=length(gl_PointCoord-0.5);
+          float a=smoothstep(0.5,0.05,r)*vA; gl_FragColor=vec4(1.0,0.55,0.2,a); if(a<0.02) discard; }`
+    });
+    const embers = new THREE.Points(eGeo, emberMat);
+    embers.frustumCulled = false;
+    addTo(scene, embers);
+    const schY = groundHeight(sch.x, sch.z);
+    const plScorch = new THREE.PointLight(0xff7a3a, 5, 14);
+    plScorch.position.set(sch.x, schY+2, sch.z);
+    addTo(scene, plScorch);
+    world.updaters.push((dt,t)=>{ emberMat.uniforms.uTime.value = t; });
   }
 
   // exposed for main.js: proximity checks read world.harvestables directly,
@@ -2036,31 +2426,17 @@ export function buildProps(scene, seed, world = WORLD){
   const crystalMats = crystalPalette.map(pal=>
     toonMat({ color:pal.color, emissive:pal.emissive, emissiveIntensity:theme.accentIntensity, rim:0.65, rimColor:pal.color }));
   const shardGeoVariants = [makeCrystalShardGeo(1.3), makeCrystalShardGeo(9.7)];
-  const clusterCount = PARAMS.crystalCount;
   const crystalClusters = []; // {cx,cy,cz,pal,ph} — drives the core sprites + mote system below
   const shardPlacements = [[],[],[],[]]; // bucketed by variant*2 + colorIdx
   // one collider per cluster, not per shard: a cluster reads as a single obstacle, and five
   // overlapping cylinders would only cost surfaceAt frames. Pushed from the loop that decides
   // each shard's transform, tracking the tallest shard, so it can't drift from the visuals.
-  const clusterTest = (x,z)=> slopeAt(x,z) < PARAMS.siteSlope && !inExclusion(x,z,2) && clearOf(x,z,1.6);
-  const clusterSites = scatter(rng, clusterCount, 6, clusterTest,
-    { r0:PARAMS.crystalRMin, r1:PARAMS.crystalRMin+PARAMS.crystalRVar });
-  for(let ci=0; ci<clusterSites.length; ci++){
-    const cx=clusterSites[ci].x, cz=clusterSites[ci].z, cy=groundHeight(cx,cz);
-    const colorIdx = ci%2;
-    crystalClusters.push({ cx, cy: cy+0.5, cz, pal:crystalPalette[colorIdx], ph: rng()*7 });
-    const shardCount = PARAMS.shardMin + ((rng()*PARAMS.shardVar)|0);
-    let top = cy;
-    for(let k=0;k<shardCount;k++){
-      const variant = (rng()*2)|0;
-      const s = PARAMS.shardSMin + rng()*PARAMS.shardSVar;
-      const sh = { x:cx+(rng()-0.5)*0.5, y:cy+s*(0.9+rng()*0.3), z:cz+(rng()-0.5)*0.5,
-        sx:s, sy:s*(0.8+rng()*0.7), sz:s, rx:(rng()-0.5)*0.6, ry:rng()*7, rz:(rng()-0.5)*0.6 };
-      shardPlacements[variant*2+colorIdx].push(sh);
-      top = Math.max(top, sh.y + sh.sy*1.15);
-    }
-    if(top - cy > STEP) COLLIDERS.push({ x:cx, z:cz, r:1.0, bot:cy, top });
-  }
+  //
+  // NOTE: crystals used to also scatter ambiently across almost the whole map (crystalCount:8,
+  // r0-r1 spanning most of the playable radius) on top of this. Removed on purpose — a crystal
+  // seam is meant to be what Crystal Hollow IS, not background dressing that shows up everywhere
+  // whether or not a world even rolled that pocket. Now the only crystals in the world are the
+  // pocket below and the cave-chamber seam further down, both deliberate, not incidental.
   // Crystal Hollow pocket: extra clusters concentrated in one region instead of scattered
   // uniformly, so a lucky world has a real "crystal cave" set-piece to remember. reuses the
   // exact same crystalClusters/shardPlacements arrays, so cores/motes/draw-calls below pick
@@ -2085,6 +2461,38 @@ export function buildProps(scene, seed, world = WORLD){
         top = Math.max(top, sh.y + sh.sy*1.15);
       }
       if(top - cy > STEP) COLLIDERS.push({ x:cx, z:cz, r:1.0, bot:cy, top });
+    }
+  }
+  // cave chambers: a seam of the same crystal formations, so the underground room reads as the
+  // same world's geology rather than a bolted-on arena. skipTag lets the scatter place inside the
+  // chamber's own exclusion (it exists to keep OTHER systems out, not this one).
+  if(world.caveChambers){
+    for(const chamber of world.caveChambers){
+      // keep the arrival spot, the exit alcove and the loot pedestal clear of shard colliders —
+      // a shard placed where the player lands would leave them spawned INSIDE a collider, and
+      // moveHoriz()'s escape valve for that case (item 01) waives collision entirely until they
+      // step clear of it, which knockback could then carry straight through the chamber wall.
+      const keepClear = (x,z)=> Math.hypot(x-chamber.arrival.x, z-chamber.arrival.z) > 4
+        && Math.hypot(x-chamber.exitTrigger.x, z-chamber.exitTrigger.z) > 4
+        && Math.hypot(x-chamber.lootSpot.x, z-chamber.lootSpot.z) > 4;
+      const chTest = (x,z)=> !inExclusion(x,z,1,'caveChamber') && clearOf(x,z,1.6) && keepClear(x,z);
+      for(const site of scatter(rng, PARAMS.caveChamberCrystals, 4, chTest,
+        { x:chamber.x, z:chamber.z, r0:0, r1:chamber.r*0.65 })){
+        const cx=site.x, cz=site.z, cy=groundHeight(cx,cz);
+        const colorIdx = (rng()*2)|0;
+        crystalClusters.push({ cx, cy: cy+0.5, cz, pal:crystalPalette[colorIdx], ph: rng()*7 });
+        const shardCount = PARAMS.hollowShardMin + ((rng()*PARAMS.hollowShardVar)|0);
+        let top = cy;
+        for(let k=0;k<shardCount;k++){
+          const variant = (rng()*2)|0;
+          const s = PARAMS.hollowSMin + rng()*PARAMS.hollowSVar;
+          const sh = { x:cx+(rng()-0.5)*0.5, y:cy+s*(0.9+rng()*0.3), z:cz+(rng()-0.5)*0.5,
+            sx:s, sy:s*(0.8+rng()*0.7), sz:s, rx:(rng()-0.5)*0.6, ry:rng()*7, rz:(rng()-0.5)*0.6 };
+          shardPlacements[variant*2+colorIdx].push(sh);
+          top = Math.max(top, sh.y + sh.sy*1.15);
+        }
+        if(top - cy > STEP) COLLIDERS.push({ x:cx, z:cz, r:1.0, bot:cy, top });
+      }
     }
   }
   for(let variant=0; variant<2; variant++){
@@ -2263,6 +2671,11 @@ export function buildProps(scene, seed, world = WORLD){
       }
     });
   }
+
+  // shrines: one-time run buffs the player finds rather than fights for (main.js owns the touch-
+  // trigger and the buff grant — this half only decides WHERE they are). Pushed to by the summit
+  // landmark below (a guaranteed one at the peak) and by the scattered pass further down.
+  const shrines = [];
 
   /* ----- LANDMARK: ancient mother-mushroom tower (not every world gets one — see hasLandmark) ----- */
   if(hasLandmark('tower')){
@@ -2474,6 +2887,140 @@ export function buildProps(scene, seed, world = WORLD){
     });
   }
 
+  /* ----- LANDMARK: village ruins — broken foundations of whatever stood here before the Bloom.
+     The intro screen says "the valley where your village once stood"; this is that line's one
+     physical payoff instead of just flavor text nothing in the world ever points back to. ----- */
+  if(hasLandmark('ruins')){
+    const rSite = spot(rng, PARAMS.ruinsDMin, PARAMS.ruinsDMin + PARAMS.ruinsDVar, 8);
+    const rx = rSite.x, rz = rSite.z;
+    const wallMat = toonMat({ color:0x8a8270, map:paintTexture('#8a8270',[{c:'#6a6252',n:12,r:9,a:0.45}],{dabs:220}), rim:0.35 });
+    const beamMat = toonMat({ color:0x3a2a1a, rim:0.25 });
+    const fw = 9 + rng()*4, fl = 7 + rng()*4;
+    const wallYaw = rng()*Math.PI*2, cosY = Math.cos(wallYaw), sinY = Math.sin(wallYaw);
+    // walk the footprint's perimeter in equal steps, jittered so it reads as a ruined room
+    // outline rather than a CAD rectangle — every wall segment gets its OWN broken height, so
+    // the skyline is stubs and near-standing sections, never one tidy consistent wall.
+    for(let i=0;i<PARAMS.ruinsWalls;i++){
+      const t = i/PARAMS.ruinsWalls, side = Math.floor(t*4), along = (t*4)%1;
+      let lx, lz;
+      if(side===0){ lx=-fw/2+along*fw; lz=-fl/2; }
+      else if(side===1){ lx=fw/2; lz=-fl/2+along*fl; }
+      else if(side===2){ lx=fw/2-along*fw; lz=fl/2; }
+      else { lx=-fw/2; lz=fl/2-along*fl; }
+      lx += (rng()-0.5)*1.2; lz += (rng()-0.5)*1.2;
+      const wx = rx + lx*cosY - lz*sinY, wz = rz + lx*sinY + lz*cosY, wy = groundHeight(wx, wz);
+      const h = 0.6 + rng()*2.2;
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(2.6+rng()*1.4, h, 0.6), wallMat);
+      wall.position.set(wx, wy+h*0.5, wz);
+      wall.rotation.y = wallYaw + t*Math.PI*2 + (rng()-0.5)*0.2;
+      wall.castShadow = true; wall.receiveShadow = true;
+      addOutline(wall, 0.035);
+      addTo(scene, wall);
+      if(h > STEP) COLLIDERS.push({ x:wx, z:wz, r:1.3, bot:wy, top:wy+h });
+    }
+    // fallen roof beams, lying across the footprint
+    for(let i=0;i<2;i++){
+      const bx = rx+(rng()-0.5)*fw*0.7, bz = rz+(rng()-0.5)*fl*0.7, by = groundHeight(bx,bz);
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 4.5+rng()*2, 7), beamMat);
+      beam.rotation.z = Math.PI/2; beam.rotation.y = rng()*Math.PI;
+      beam.position.set(bx, by+0.2, bz);
+      addOutline(beam, 0.05);
+      addTo(scene, beam);
+    }
+    // rubble scatter — same stone family as the walls, reuses the shared ambient-rock geometry
+    for(let i=0;i<PARAMS.ruinsRubble;i++){
+      const a = rng()*Math.PI*2, r = rng()*Math.max(fw,fl)*0.65;
+      const bx = rx+Math.cos(a)*r, bz = rz+Math.sin(a)*r, by = groundHeight(bx,bz);
+      const s = 0.3+rng()*0.5;
+      const chunk = new THREE.Mesh(rockGeo, wallMat);
+      chunk.scale.setScalar(s);
+      chunk.position.set(bx, by+s*0.3, bz);
+      chunk.rotation.set(rng()*7, rng()*7, rng()*7);
+      addTo(scene, chunk);
+    }
+  }
+
+  /* ----- LANDMARK: summit — a climbable multi-tier spire, the map's one guaranteed high point.
+     A shrine waits at the top (see the shrines pass below), so climbing it is a destination,
+     not just scenery you can see from far away. ----- */
+  if(hasLandmark('summit')){
+    const suSite = spot(rng, PARAMS.summitDMin, PARAMS.summitDMin + PARAMS.summitDVar, PARAMS.summitR0 + 3);
+    let curR = PARAMS.summitR0, curY = groundHeight(suSite.x, suSite.z), curX = suSite.x, curZ = suSite.z;
+    for(let i=0;i<PARAMS.summitTiers;i++){
+      const nextR = curR * (0.78 - rng()*0.06); // gentle shrink: stepped-formation rule (CLAUDE.md)
+                                                  // — too tight a shrink and the tier above has
+                                                  // nowhere to put the player's feet
+      const h = PARAMS.summitTierH + rng()*0.2;  // 1.7-1.9 m: over STEP, under the jump apex —
+                                                  // every tier is a climb, not a wall or a walk-up
+      const tier = new THREE.Mesh(new THREE.CylinderGeometry(nextR, curR, h, 10), rockMat);
+      tier.position.set(curX, curY+h*0.5, curZ);
+      tier.castShadow = true; tier.receiveShadow = true;
+      addOutline(tier, 0.04);
+      addTo(scene, tier);
+      COLLIDERS.push({ x:curX, z:curZ, r:curR, bot:curY, top:curY+h });
+      curY += h; curR = nextR;
+      // a little per-tier drift so the climb spirals instead of stacking dead straight — capped
+      // small relative to the tier's OWN radius, so the tier above never drifts off the tier below
+      const drift = curR*0.15;
+      curX += (rng()-0.5)*drift; curZ += (rng()-0.5)*drift;
+    }
+    const capR = Math.max(curR*1.15, 2.2); // floor on the peak's own size: RNG shrink alone could
+                                            // otherwise land a platform too small to comfortably stand on
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(capR, capR, 0.4, 10), rockMat);
+    cap.position.set(curX, curY+0.2, curZ);
+    cap.receiveShadow = true; addOutline(cap, 0.04);
+    addTo(scene, cap);
+    COLLIDERS.push({ x:curX, z:curZ, r:capR, bot:curY, top:curY+0.4 });
+    shrines.push({ x:curX, z:curZ, y:curY+0.4 });
+  }
+
+  /* ----- shrines: one-time run buffs, found rather than fought for. summit's own (if it rolled)
+     was pushed above; these fill out the rest on open ground, through the same siteTest sampler
+     every other authored landmark uses. Geometry is one small pedestal + orb per shrine — there
+     are at most 3 in any world, so this never needed instancing. ----- */
+  for(let i=0;i<PARAMS.shrineCount;i++){
+    const site = spot(rng, 30, 175, 5);
+    shrines.push({ x:site.x, z:site.z, y:groundHeight(site.x, site.z) });
+  }
+  const SHRINE_KINDS = [
+    { id:'vigor', color:0xff6a6a, name:'Shrine of Vigor' },
+    { id:'fury',  color:0xffa347, name:'Shrine of Fury' },
+    { id:'haste', color:0x6ad0ff, name:'Shrine of Haste' },
+  ];
+  if(shrines.length){
+    const pedestalMat = toonMat({ color:0x7a7266, map:paintTexture('#7a7266',[{c:'#5a5248',n:10,r:8,a:0.4}],{dabs:180}), rim:0.35 });
+    for(const sh of shrines){
+      const kind = SHRINE_KINDS[(rng()*SHRINE_KINDS.length)|0];
+      sh.kind = kind.id; sh.claimed = false;
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.1, 1.3, 8), pedestalMat);
+      base.position.set(sh.x, sh.y+0.65, sh.z);
+      base.castShadow = true; base.receiveShadow = true;
+      addOutline(base, 0.05);
+      addTo(scene, base);
+      COLLIDERS.push({ x:sh.x, z:sh.z, r:1.1, bot:sh.y, top:sh.y+1.3 });
+      const orbMat = toonMat({ color:kind.color, emissive:kind.color, emissiveIntensity:0.9, rim:0.8, rimColor:kind.color });
+      const orb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.32, 1), orbMat);
+      orb.position.set(sh.x, sh.y+1.5, sh.z);
+      addOutline(orb, 0.05);
+      addTo(scene, orb);
+      const shrineLight = new THREE.PointLight(kind.color, 5, 10);
+      shrineLight.position.set(sh.x, sh.y+1.6, sh.z);
+      addTo(scene, shrineLight);
+      const ph = rng()*7;
+      // claimed is toggled by main.js on the SAME object (world.shrines holds this exact
+      // reference) — reading it here rather than copying it is what lets the orb visually die
+      // the instant the player claims it, with no round trip back through world.js.
+      world.updaters.push((dt,t)=>{
+        orb.visible = !sh.claimed;
+        if(sh.claimed){ shrineLight.intensity = 0; return; }
+        orb.position.y = sh.y+1.5+Math.sin(t*1.3+ph)*0.08;
+        orb.rotation.y = t*0.6;
+        shrineLight.intensity = 5+Math.sin(t*2+ph)*1.5;
+      });
+    }
+  }
+  world.shrines = shrines;
+
   /* ----- birds ----- */
   {
     const birdMat = new THREE.MeshBasicMaterial({ color:0x2c2233, side:THREE.DoubleSide, fog:false });
@@ -2683,7 +3230,7 @@ function markOwnership(world){
     }
     // truncate in place: entities.js and main.js hold the exported COLLIDERS reference, and an
     // updater list swapped for a new array would leave the old closures running off a stale world.
-    OWNED.length = 0; COLLIDERS.length = 0; EXCLUSIONS.length = 0; SITES.length = 0;
+    OWNED.length = 0; COLLIDERS.length = 0; EXCLUSIONS.length = 0; SITES.length = 0; CAVE_CHAMBERS.length = 0;
     world.updaters.length = 0;
     world.update = ()=>{};
     RAVINE = null; POCKETS = {}; LANDMARKS = []; WORLD = null;

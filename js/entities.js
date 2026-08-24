@@ -1,10 +1,10 @@
 // entities.js — player, mushrooms, boss, powerups, projectiles
 import * as THREE from 'three';
 import { toonMat, addOutline, paintTexture, makeBlobShadow, glowTexture } from './fx.js';
-import { groundHeight, surfaceAt, slopeAt, inExclusion } from './world.js';
+import { groundHeight, surfaceAt, slopeAt, inExclusion, fenBogAt } from './world.js';
 import { WEAPONS_BY_ID } from './weapons.js';
 import { POTIONS_BY_ID } from './potions.js';
-import { buildSwordVariant } from './swordVisuals.js';
+import { buildSwordVariant, buildBow, buildSpear } from './swordVisuals.js';
 import { ARMOR_BY_ID, ARMOR_SLOTS } from './armor.js';
 
 /* ---------------- movement constants (items 02, 03, 04) ----------------
@@ -18,8 +18,7 @@ export const STEP = 1.5;        // tallest ledge you walk onto without jumping. 
                                 // piles and rock skirts are all authored under it on purpose.
 export const PLAYER_R = 0.85;   // body radius — also the forward-probe distance, so the shoulders
                                 // stop at a rock face instead of sinking into it
-export const PLAYER_H = 2.55;   // body column: what a wall must overlap to block you, and what a
-                                // spore pod's underside gets struck by
+export const PLAYER_H = 2.55;   // body column: what a wall must overlap to block you
 export const COYOTE = 0.13;     // grace after walking off a ledge. The ravine lip is meant to be a
                                 // running jump; frame-perfect timing is not the skill being tested.
 export const JUMP_BUF = 0.16;   // a jump pressed just before touchdown still fires on the landing
@@ -30,6 +29,15 @@ const JUMP_VY = 11;             // same impulse main.js's tryJump() has always a
 const LAND_HARD = -14;          // vy below this thumps (squash + sound). Walking downhill peaks
                                 // around -8, so a stroll never squashes.
 const SQUASH_EASE = 9;          // rate the squash scalar eases back to 1
+// air-dash tech: about half a jump's worth of lift, not a second full jump — dash-jump chaining
+// should feel like a reward for using both moves together, not a way to skip needing the jump at
+// all. dashMaxCd (2.2s) already rate-limits this on its own, so no separate "one per airtime" flag.
+const AIR_DASH_VY = 6;
+// weather: how hard a wind event pushes an airborne player, in m/s^2. Small enough that a normal
+// jump only drifts a step or two off target, not so strong it can blow you off a ledge you jumped
+// onto deliberately — main.js's updateWeather() owns the timer and the direction, this is only
+// the one number that decides how much a jump actually drifts.
+const WIND_PUSH = 5.5;
 
 /* ---------------- creature terrain rules (item 57) ----------------
    Slope is |grad h| from world.js. The ravine banks run ~1.0-1.6 and the valley rim ~0.45, so a
@@ -44,15 +52,6 @@ const MOB_RING = 195;       // same playable ring the player is clamped to
 const MOB_DETOUR = 0.7;     // how long an alternative heading that cleared is kept. Re-rolling one
                             // every frame is exactly what makes a blocked animal look broken.
 
-/* item 11 — spore pods (and anything else burst by jumping into it from below) register here.
-   The Player only ever READS this array, so world.js/main.js own creation and lifetime; entries
-   are `{x, z, bot, r, off?, onHead(player, game)}` where `bot` is the underside plane the head
-   crosses. Empty registry = one length check per frame, so this is a no-op until someone places
-   pods. `off = true` retires an entry; nothing splices, matching the COLLIDERS convention. */
-export const HEAD_HITS = [];
-export function registerHeadHit(entry){ HEAD_HITS.push(entry); return entry; }
-export function clearHeadHits(){ HEAD_HITS.length = 0; }
-
 // gradation: brown -> green -> red -> blue -> purple -> rainbow (lowest to highest)
 export const RARITIES = [
   { name:'Common',    color:0x8a6a42, glow:0x8a6a42, hp:28,  dmg:7,  speed:3.1, scale:0.85, score:1,  weight:56 },
@@ -64,13 +63,28 @@ export const RARITIES = [
 ];
 
 const capTexCache = {};
-function capTexture(color, rarityIdx=0){
-  const key = color.toString(16)+'_'+rarityIdx;
+// glow defaults to color itself (a same-hue accent) when a caller doesn't have a rarity glow
+// to hand in (the hunter's own hat, for instance) — every cap still gets a two-tone pattern,
+// never a single flat colour with just white freckles
+function capTexture(color, rarityIdx=0, glow=null){
+  const key = color.toString(16)+'_'+rarityIdx+'_'+(glow!=null?glow.toString(16):'x');
   if(!capTexCache[key]){
     const c = new THREE.Color(color);
+    const gl = new THREE.Color(glow ?? color);
+    const glowHex = '#'+gl.getHexString();
     const n = 5 + rarityIdx*3; // more ornate dappling at higher rarity
-    capTexCache[key] = paintTexture('#'+c.getHexString(),
-      [{c:'#fffaf0', n, r:18-rarityIdx, a:0.95},{c:'#fffaf0', n, r:9, a:0.9},{c:'#1c1410', n:0, r:0, a:0}], {dabs:320, dabsContrast:1});
+    const spots = [
+      {c:'#fffaf0', n, r:18-rarityIdx, a:0.95},
+      {c:'#fffaf0', n, r:9, a:0.9},
+      // accent freckles in the rarity's own glow colour — this is what stops every cap
+      // reading as "one base colour with pale spots" the way a single white layer does
+      {c:glowHex, n:4+rarityIdx*2, r:6+rarityIdx, a:0.55},
+    ];
+    const opts = {dabs:320, dabsContrast:1};
+    // rare+ get bullseye banding on top of the freckling, growing more ornate with rarity —
+    // this is the same escalation the boss cap texture already leaned on, just made explicit
+    if(rarityIdx >= 2) opts.rings = [{c:glowHex, count:2+Math.min(2, rarityIdx-1), width:2.5, a:0.4}];
+    capTexCache[key] = paintTexture('#'+c.getHexString(), spots, opts);
   }
   return capTexCache[key];
 }
@@ -110,7 +124,8 @@ export class Mushroom {
        super() runs, so reading it now would bank the base mushroom's speed for a boss. */
     this.burnT = 0; this.burnDps = 0; this.burnTick = 0;
     this.chillT = 0; this.chillSlow = 0;
-    this._baseSpeed = undefined; this._elemLit = false;
+    this.poisonT = 0; this.poisonWeaken = 0;
+    this._baseSpeed = undefined; this._baseDmg = undefined; this._elemLit = false;
     // item 57 wander/detour state. A heading is kept until it fails, and an alternative that
     // cleared is held for MOB_DETOUR seconds — the naive "add a fixed turn every blocked frame"
     // thrashes the same failing angle and reads as a broken animal.
@@ -135,7 +150,7 @@ export class Mushroom {
     stem.userData.noReceive = true;
     // cap
     const cap = new THREE.Mesh(new THREE.SphereGeometry(1.0*s, 12, 9, 0, Math.PI*2, 0, Math.PI*0.55),
-      toonMat({color:R.color, map:capTexture(R.color, rarityIdx), rim:0.55, rimColor:'#'+new THREE.Color(R.glow).getHexString()}));
+      toonMat({color:R.color, map:capTexture(R.color, rarityIdx, R.glow), rim:0.55, rimColor:'#'+new THREE.Color(R.glow).getHexString()}));
     cap.position.y = 1.15*s; cap.scale.set(1.15, 0.95, 1.15); addOutline(cap, 0.055);
     // dark cap underside
     const under = new THREE.Mesh(new THREE.CircleGeometry(1.05*s, 12),
@@ -208,23 +223,52 @@ export class Mushroom {
      makes a held emitter frame-rate independent. */
   applyElement(kind, ring){
     if(this.dead || !ring) return;
+    // elemental affix triangle (affixes.js): resist halves both duration and magnitude, weak
+    // adds half again — the affix's own hover-tag name is what makes this learnable rather than
+    // an invisible number, so the counter-ring is a read, not a guess.
+    let mult = 1;
+    if(this.affix){
+      if(this.affix.resist === kind) mult = 0.5;
+      else if(this.affix.weak === kind) mult = 1.5;
+    }
     if(kind === 'burn'){
-      if(ring.burnDur > this.burnT) this.burnT = ring.burnDur;
-      if(ring.burnDps > this.burnDps) this.burnDps = ring.burnDps;
+      const dur = ring.burnDur*mult, dps = ring.burnDps*mult;
+      if(dur > this.burnT) this.burnT = dur;
+      if(dps > this.burnDps) this.burnDps = dps;
     } else if(kind === 'chill'){
-      if(ring.chillDur > this.chillT) this.chillT = ring.chillDur;
-      if(ring.chillSlow > this.chillSlow) this.chillSlow = ring.chillSlow;
+      const dur = ring.chillDur*mult;
+      // capped at 0.92, never 1: rings.js is explicit that a hard freeze is worse for the player
+      // than a readable slow, and "weak" must not be the one path that accidentally creates one
+      const slow = Math.min(0.92, ring.chillSlow*mult);
+      if(dur > this.chillT) this.chillT = dur;
+      if(slow > this.chillSlow) this.chillSlow = slow;
+    } else if(kind === 'poison'){
+      const dur = ring.poisonDur*mult;
+      const weaken = Math.min(0.7, ring.poisonWeaken*mult); // same reasoning: weaken must stay well short of 1
+      if(dur > this.poisonT) this.poisonT = dur;
+      if(weaken > this.poisonWeaken) this.poisonWeaken = weaken;
     }
   }
   hit(dmg, from, game, kbMult=1){
     if(this.dead) return;
+    // Thorned reflects before the damage lands, not after: a killing blow still owes its retaliation.
+    // player.hurt() already gates on iframes, so a 3-hit combo only actually costs one reflect tick.
+    if(this.affix && this.affix.id === 'thorned' && game.player) game.player.hurt(dmg * this.affix.reflectPct, this.group.position, game);
     this.hp -= dmg; this.flash = 1;
     const dir = this.group.position.clone().sub(from).setY(0).normalize();
-    this.kb.addScaledVector(dir, (6 + dmg*0.15) * kbMult);
+    const kbResist = this.affix && this.affix.kbResist != null ? this.affix.kbResist : 1;
+    this.kb.addScaledVector(dir, (6 + dmg*0.15) * kbMult * kbResist);
     if(this.hp <= 0) this.die(game);
   }
   die(game){
     this.dead = true;
+    // pack leader falls: the buff it was granting has to go away the instant it does, not linger
+    // on packmates that outlive it — the buff is the leader's, not theirs to keep.
+    if(this.packMembers){
+      for(const m of this.packMembers){
+        if(!m.dead && m.packLeader === this){ m.dmg /= m._packDmgMult; m.speed /= m._packSpeedMult; m.packLeader = null; }
+      }
+    }
     const p = this.group.position.clone(); p.y += 1;
     const c = new THREE.Color(this.R.glow);
     // counts halved (26+14 -> 14+8): fx.js caps sprite pixel size, and the cap only stays loose
@@ -242,7 +286,11 @@ export class Mushroom {
   tryDir(ddx, ddz, feetY, zones){
     const p = this.group.position;
     const nx = p.x + ddx, nz = p.z + ddz;
-    if(nx*nx + nz*nz > MOB_RING*MOB_RING) return false;            // playable ring
+    // playable ring — exempt for cave guardians, who live in a sealed chamber built far outside
+    // it on purpose (see world.js CAVE_CHAMBERS). Without this exemption every single movement
+    // attempt fails no matter which way a guardian tries to step, since it's already past the
+    // ring before it moves at all: it stands and hops in place forever, never actually closing in.
+    if(!this.isCaveMob && nx*nx + nz*nz > MOB_RING*MOB_RING) return false;
     // authored keep-outs are a WANDER rule only: a hunting creature follows you anywhere it can
     // physically stand, and a boss ignores them outright so its approach can't be fenced off.
     if(zones && !this.isBoss && inExclusion(nx, nz, 0)) return false;
@@ -300,10 +348,20 @@ export class Mushroom {
        remember to ask. `_baseSpeed` is captured here on the first frame — by which point every
        constructor in the hierarchy has finished writing its own speed. */
     if(this._baseSpeed === undefined) this._baseSpeed = this.speed;
+    if(this._baseDmg === undefined) this._baseDmg = this.dmg;
     if(this.chillT > 0){
       this.chillT -= dt;
       if(this.chillT <= 0){ this.chillT = 0; this.chillSlow = 0; this.speed = this._baseSpeed; }
       else this.speed = this._baseSpeed * (1 - this.chillSlow);
+    }
+    // poison ring: weakens what it touches rather than racing burn's DPS — the payoff is safety,
+    // not a faster kill. Boss/GluttonBoss recompute this.dmg from their OWN baseDmg every frame
+    // for enrage (after this runs, via super.update()), so poison's weaken is overwritten on a
+    // boss the instant it applies — an accepted gap, not a bug: a boss earns full damage back.
+    if(this.poisonT > 0){
+      this.poisonT -= dt;
+      if(this.poisonT <= 0){ this.poisonT = 0; this.poisonWeaken = 0; this.dmg = this._baseDmg; }
+      else this.dmg = this._baseDmg * (1 - this.poisonWeaken);
     }
     if(this.burnT > 0){
       this.burnT -= dt;
@@ -451,10 +509,11 @@ export class Mushroom {
        those write cap.material.emissive every frame, so anything written before them is erased.
        `_elemLit` is what restores emissBase exactly once when the last effect expires: without it
        either the tint sticks forever or every un-lit creature pays an emissive write per frame. */
-    if(this.burnT > 0 || this.chillT > 0){
+    if(this.burnT > 0 || this.chillT > 0 || this.poisonT > 0){
       const b = this.emissBase, f = Math.max(0, this.flash);
       if(this.burnT > 0) this.cap.material.emissive.setRGB(b.r + f + 0.55, b.g + f*0.3 + 0.16, b.b + f*0.2);
-      else this.cap.material.emissive.setRGB(b.r + f, b.g + f*0.3 + 0.22, b.b + f*0.2 + 0.52);
+      else if(this.chillT > 0) this.cap.material.emissive.setRGB(b.r + f, b.g + f*0.3 + 0.22, b.b + f*0.2 + 0.52);
+      else this.cap.material.emissive.setRGB(b.r + f, b.g + f*0.3 + 0.5, b.b + f*0.2 + 0.05);
       this._elemLit = true;
     } else if(this._elemLit && this.flash <= 0){
       this.cap.material.emissive.copy(this.emissBase);
@@ -471,15 +530,19 @@ export class Boss extends Mushroom {
   constructor(scene, pos, trait=null, mult={hp:1,dmg:1,speed:1}){
     super(scene, 4, pos, 1);
     this.trait = trait;
-    this.R = { ...RARITIES[4], name:'Elder Myconid', hp:2200, dmg:34, speed:3.4, scale:3.4, score:100,
-      color: trait ? trait.tint : 0x7a4dbb, glow: trait ? trait.glow : 0xb46bff };
+    const ascendant = trait && trait.id === 'ascendant';
+    this.R = { ...RARITIES[4], name: ascendant ? 'The Bloom Ascendant' : 'Elder Myconid',
+      hp:2200, dmg:50, speed:3.4, scale:3.4, score:100,
+      color: trait ? trait.tint : 0x7a4dbb, glow: trait ? trait.glow : 0xb46bff,
+      rainbow: ascendant || undefined }; // reuses the mythic hue-cycle (see update() below) — the
+      // one visual a player already reads as "this is beyond the normal tier"
     this.maxHp = Math.round(this.R.hp * mult.hp); this.hp = this.maxHp;
     this.dmg = this.R.dmg * mult.dmg; this.speed = this.R.speed * mult.speed;
-    this.baseDmg = this.dmg; // wrathful ramps this live off missing-hp; everything else keeps it fixed
+    this.baseDmg = this.dmg; // wrathful + the always-on low-hp enrage both ramp this live
     this.group.scale.setScalar(3.4/1.7);
-    this.isBoss = true; this.bossWeaponId = 'sporecleaver'; this.ringCd = 5; this.summonCd = 9; this.fireballCd = 6;
+    this.isBoss = true; this.bossWeaponId = 'sporecleaver'; this.ringCd = 5; this.summonCd = 8; this.fireballCd = 5; this.blinkCd = 9;
     this._prevHp = this.hp; this._sinceHitT = 0;
-    this.cap.material = toonMat({ color:this.R.color, map:capTexture(this.R.color),
+    this.cap.material = toonMat({ color:this.R.color, map:capTexture(this.R.color, 4, this.R.glow),
       rim:0.7, rimColor:'#'+new THREE.Color(this.R.glow).getHexString(), emissive:0x220a44, emissiveIntensity:0.6 });
     this.emissBase = this.cap.material.emissive.clone();
     // a boss is singular, but it still SPAWNS and DIES mid-run, so it gets no light either —
@@ -494,17 +557,24 @@ export class Boss extends Mushroom {
     if(this.hp < this._prevHp) this._sinceHitT = 0; else this._sinceHitT += dt;
     this._prevHp = this.hp;
     const missing = 1 - this.hp/this.maxHp;
-    const isTrait = id => this.trait && this.trait.id === id;
+    // 'ascendant' matches every check below — see bossTraits.js: The Bloom Ascendant is
+    // deliberately every elder mechanic at once, not a new bespoke one.
+    const isTrait = id => this.trait && (this.trait.id === id || this.trait.id === 'ascendant');
 
     if(isTrait('regen') && this._sinceHitT > 3 && this.hp < this.maxHp){
       this.hp = Math.min(this.maxHp, this.hp + this.maxHp*0.025*dt);
     }
-    this.dmg = isTrait('wrathful') ? this.baseDmg * (1 + missing*0.4) : this.baseDmg;
+    // always-on enrage past the halfway mark, on top of (and stacking with) wrathful's own ramp —
+    // every Elder fight gets meaner in its second half, not just wrathful-rolled ones
+    const baseEnrage = missing > 0.5 ? (missing - 0.5) * 0.7 : 0;
+    const wrathBonus = isTrait('wrathful') ? missing * 0.4 : 0;
+    this.dmg = this.baseDmg * (1 + baseEnrage + wrathBonus);
+    const cdRate = 1 + baseEnrage; // cooldowns run faster too, not just harder-hitting
 
-    this.ringCd -= dt; this.summonCd -= dt;
+    this.ringCd -= dt * cdRate; this.summonCd -= dt * cdRate;
     if(this.ringCd <= 0){
       const enrage = isTrait('wrathful') ? missing*4 : missing*3;
-      this.ringCd = 6 - Math.min(isTrait('wrathful') ? 4 : 2.5, enrage);
+      this.ringCd = 5 - Math.min(isTrait('wrathful') ? 4 : 2.5, enrage);
       game.spawnRing(this.group.position.clone(), this.dmg*0.9, 0xb46bff);
       game.spawnRing(this.group.position.clone(), this.dmg*0.7, 0xffb02e, 2.2);
       if(isTrait('mirror')) game.spawnRing(this.group.position.clone(), this.dmg*0.6, this.trait.glow, 4.4);
@@ -512,7 +582,7 @@ export class Boss extends Mushroom {
       game.shake(0.5);
     }
     if(this.summonCd <= 0){
-      this.summonCd = isTrait('swarming') ? 7 : (isTrait('fusion') ? 9 : 11);
+      this.summonCd = isTrait('swarming') ? 6 : (isTrait('fusion') ? 8 : 9);
       game.audio.roar(1);
       const count = isTrait('swarming') ? 4 : (isTrait('fusion') ? 4 : 3);
       for(let i=0;i<count;i++){
@@ -524,13 +594,40 @@ export class Boss extends Mushroom {
       game.announce('The Elder calls its brood!');
     }
 
-    this.fireballCd -= dt;
-    if(isTrait('pyroclast') && this.fireballCd <= 0 && game.player){
-      this.fireballCd = 7 + Math.random()*2;
+    // ranged fireball is now a baseline attack for every Elder fight — the pyroclast trait
+    // just makes it hit harder and come around more often, instead of being the only way to see it
+    this.fireballCd -= dt * cdRate;
+    if(this.fireballCd <= 0 && game.player){
+      this.fireballCd = (isTrait('pyroclast') ? 5 : 7) + Math.random()*2;
+      const fbColor = isTrait('pyroclast') ? this.trait.glow : 0xb46bff;
       game.spawnFireball(this.group.position.clone().setY(this.group.position.y+1.4*this.R.scale),
-        game.player.group.position.clone(), this.dmg*0.85, this.trait.glow);
+        game.player.group.position.clone(), this.dmg*(isTrait('pyroclast') ? 0.95 : 0.75), fbColor);
       game.audio.spit();
       game.announce('⚠ The Elder hurls cinderfire! ⚠');
+    }
+
+    // gap-closer: if the player has been kiting at range, the Elder blinks in close and
+    // detonates on arrival — no more sitting safely out of range for the whole fight
+    this.blinkCd -= dt * cdRate;
+    if(this.blinkCd <= 0 && game.player){
+      const toP = game.player.group.position.clone().sub(this.group.position).setY(0);
+      const dist = toP.length();
+      if(dist > 11){
+        this.blinkCd = 8 + Math.random()*2;
+        const origin = this.group.position.clone().setY(this.group.position.y+1.5*this.R.scale);
+        game.particles.burst(origin, 22, {r:0.7,g:0.4,b:1, spread:5, size:10, life:0.6});
+        const dir = toP.normalize();
+        const landPos = game.player.group.position.clone().sub(dir.multiplyScalar(4));
+        this.group.position.x = landPos.x; this.group.position.z = landPos.z;
+        this.baseY = groundHeight(landPos.x, landPos.z);
+        const dest = this.group.position.clone().setY(this.group.position.y+1.5*this.R.scale);
+        game.particles.burst(dest, 26, {r:0.7,g:0.4,b:1, spread:5, size:11, life:0.7});
+        if(game.player.group.position.distanceTo(this.group.position) < 4.5){
+          game.player.hurt(this.dmg*0.55, this.group.position, game);
+        }
+        game.audio.warp(); game.shake(0.5);
+        game.announce('⚠ The Elder blinks through the spores! ⚠');
+      }
     }
   }
 }
@@ -542,14 +639,15 @@ export class GluttonBoss extends Mushroom {
   constructor(scene, pos, trait=null, mult={hp:1,dmg:1,speed:1}){
     super(scene, 4, pos, 1);
     this.trait = trait;
-    this.R = { ...RARITIES[4], name:'Rotmaw the Bloated', hp:2600, dmg:30, speed:2.6, scale:3.4, score:100,
+    this.R = { ...RARITIES[4], name:'Rotmaw the Bloated', hp:2600, dmg:46, speed:2.6, scale:3.4, score:100,
       color: trait ? trait.tint : 0x9acc3a, glow: trait ? trait.glow : 0xc8e066 };
     this.maxHp = Math.round(this.R.hp * mult.hp); this.hp = this.maxHp;
     this.dmg = this.R.dmg * mult.dmg; this.speed = this.R.speed * mult.speed;
+    this.baseDmg = this.dmg; // frenzied + the always-on low-hp enrage both ramp this live
     this.group.scale.set(4.6, 2.5, 4.6); // wide and squat, not tall — reads as fat rather than "bigger Elder"
     this.isBoss = true; this.bossWeaponId = 'ravenousmaw';
     // recolor + a bulging belly slung under the cap
-    const bileMat = toonMat({ color:this.R.color, map:capTexture(this.R.color), rim:0.5,
+    const bileMat = toonMat({ color:this.R.color, map:capTexture(this.R.color, 4, this.R.glow), rim:0.5,
       rimColor:'#'+new THREE.Color(this.R.glow).getHexString(), emissive:0x2a3a10, emissiveIntensity:0.4 });
     this.cap.material = bileMat;
     this.emissBase = this.cap.material.emissive.clone();
@@ -565,7 +663,7 @@ export class GluttonBoss extends Mushroom {
     if(this.aura){ this.aura.material.color.set(this.R.glow); this.aura.material.opacity = 0.30;
       this.aura.scale.setScalar(8.5); this.aura.position.y = 1.8; }   // see Boss: no PointLight
     if(this.groundRing) this.groundRing.material.color.set(this.R.glow);
-    this.chargeCd = 8; this.vomitCd = 5; this.puddleCd = 10; this.summonCd = 13; this.fireballCd = 7;
+    this.chargeCd = 7; this.vomitCd = 4; this.puddleCd = 9; this.summonCd = 11; this.fireballCd = 5;
     this.charging = false; this.telegraphT = 0;
   }
   hit(dmg, from, game, kbMult=1){
@@ -591,17 +689,23 @@ export class GluttonBoss extends Mushroom {
       }
       return;
     }
-    this.chargeCd -= dt; this.vomitCd -= dt; this.puddleCd -= dt; this.summonCd -= dt; this.fireballCd -= dt;
+    // always-on enrage past the halfway mark, on top of (and stacking with) frenzied's own ramp
+    const missing = 1 - this.hp/this.maxHp;
+    const baseEnrage = missing > 0.5 ? (missing - 0.5) * 0.7 : 0;
+    this.dmg = this.baseDmg * (1 + baseEnrage);
+    const cdRate = 1 + baseEnrage;
+
+    this.chargeCd -= dt*cdRate; this.vomitCd -= dt*cdRate; this.puddleCd -= dt*cdRate; this.summonCd -= dt*cdRate; this.fireballCd -= dt*cdRate;
     if(this.charging && this.state !== 'lunge'){ this.charging = false; }
     if(!this.charging && this.chargeCd <= 0){
-      let cd = 9 - Math.min(3, (1-this.hp/this.maxHp)*3.5);
-      if(isTrait('frenzied')) cd -= Math.min(3, (1-this.hp/this.maxHp)*3); // stacks on top of the baseline enrage
-      this.chargeCd = Math.max(2.5, cd);
+      let cd = 7 - Math.min(3, missing*3.5);
+      if(isTrait('frenzied')) cd -= Math.min(3, missing*3); // stacks on top of the baseline enrage
+      this.chargeCd = Math.max(2, cd);
       this.telegraphT = 0.6;
       game.announce('⚠ Rotmaw inhales... ⚠');
     }
     if(this.vomitCd <= 0 && game.player){
-      this.vomitCd = 5.5;
+      this.vomitCd = 4.5;
       const corrosive = isTrait('corrosive');
       const projColor = corrosive ? this.trait.glow : this.R.glow;
       const base = game.player.group.position.clone().setY(1).sub(this.group.position).normalize();
@@ -614,7 +718,7 @@ export class GluttonBoss extends Mushroom {
     }
     if(this.puddleCd <= 0){
       const toxic = isTrait('toxic');
-      this.puddleCd = 11;
+      this.puddleCd = 9;
       for(let i=0;i<(toxic?4:3);i++){
         const a = Math.random()*Math.PI*2, d = 3+Math.random()*6;
         const pp = this.group.position.clone().add(new THREE.Vector3(Math.cos(a)*d, 0, Math.sin(a)*d));
@@ -623,7 +727,7 @@ export class GluttonBoss extends Mushroom {
       game.audio.roar(0.4);
     }
     if(this.summonCd <= 0){
-      this.summonCd = isTrait('fusion') ? 11 : 14;
+      this.summonCd = isTrait('fusion') ? 9 : 11;
       game.audio.roar(1);
       const count = isTrait('fusion') ? 3 : 2;
       for(let i=0;i<count;i++){
@@ -635,12 +739,93 @@ export class GluttonBoss extends Mushroom {
       game.announce('Rotmaw burps up its brood!');
     }
 
-    if(isTrait('pyroclast') && this.fireballCd <= 0 && game.player){
-      this.fireballCd = 8 + Math.random()*2;
+    // ranged fireball is now a baseline attack for every Rotmaw fight — pyroclast just
+    // makes it hit harder and come around more often
+    if(this.fireballCd <= 0 && game.player){
+      this.fireballCd = (isTrait('pyroclast') ? 6 : 8) + Math.random()*2;
+      const fbColor = isTrait('pyroclast') ? this.trait.glow : this.R.glow;
       game.spawnFireball(this.group.position.clone().setY(this.group.position.y+1.2),
-        game.player.group.position.clone(), this.dmg*0.9, this.trait.glow);
+        game.player.group.position.clone(), this.dmg*(isTrait('pyroclast') ? 1.0 : 0.8), fbColor);
       game.audio.spit();
       game.announce('⚠ Rotmaw spits searing magma! ⚠');
+    }
+  }
+}
+
+/* =============== COMPANION: SPORE PUP =============== */
+// Unlocked permanently by beating a boss (progress.unlockCompanion). Deliberately NOT a second
+// combat system: fauna.js's critters already don't fight back for exactly this reason — a
+// stomp-kill enemy competes with the melee combo for the attack button AND the kill fantasy at
+// once. The pup's assist bolt is small, capped, and scales off the PLAYER's own level rather
+// than carrying a leveling track of its own — a helper, not a second character.
+const _cTo = new THREE.Vector3();
+export class Companion {
+  constructor(scene){
+    this.scene = scene;
+    const g = this.group = new THREE.Group();
+    const bodyMat = toonMat({ color:0xf2e4c8, rim:0.5, rimColor:0xfff6c8 });
+    const capMat = toonMat({ color:0xffb347, emissive:0x5a3a10, emissiveIntensity:0.3, rim:0.6, rimColor:0xffe066 });
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.17, 0.3, 8), bodyMat);
+    stem.position.y = 0.15; addOutline(stem, 0.05);
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 8, 0, Math.PI*2, 0, Math.PI*0.55), capMat);
+    cap.position.y = 0.3; cap.scale.set(1.1, 0.85, 1.1); addOutline(cap, 0.04);
+    // big friendly eyes — the visual opposite of a Mushroom enemy's angry brow, so it silhouettes
+    // as an ally at a glance even before its colour registers
+    this.eyes = [];
+    for(const sx of [-1,1]){
+      const e = new THREE.Mesh(new THREE.SphereGeometry(0.05,8,6), new THREE.MeshBasicMaterial({color:0xffffff}));
+      e.position.set(0.09*sx, 0.2, 0.14); addOutline(e, 0.15);
+      const p = new THREE.Mesh(new THREE.SphereGeometry(0.026,6,5), new THREE.MeshBasicMaterial({color:0x1c1410}));
+      p.position.set(0.09*sx, 0.195, 0.165);
+      g.add(e, p); this.eyes.push(e);
+    }
+    g.add(stem, cap);
+    this.cap = cap;
+    this.blob = makeBlobShadow(0.55); this.blob.position.y = 0.02; g.add(this.blob);
+    scene.add(g);
+    this.t = Math.random()*10;
+    this.boltCd = 3 + Math.random()*2;
+    this.baseY = 0;
+    this.yaw = 0;
+  }
+  update(dt, game){
+    this.t += dt;
+    const p = game.player;
+    if(!p){ return; }
+    const g = this.group;
+    // trail behind and beside the player rather than sitting glued to their hip — reads as
+    // a companion choosing to follow, not a prop bolted to the model
+    const followYaw = p.yaw + 2.5;
+    const tx = p.group.position.x + Math.sin(followYaw)*1.6, tz = p.group.position.z + Math.cos(followYaw)*1.6;
+    g.position.x += (tx - g.position.x) * Math.min(1, dt*4);
+    g.position.z += (tz - g.position.z) * Math.min(1, dt*4);
+    const gy = groundHeight(g.position.x, g.position.z);
+    this.baseY += (gy - this.baseY) * Math.min(1, dt*10);
+    g.position.y = this.baseY + Math.abs(Math.sin(this.t*4))*0.1;
+    const targetYaw = Math.atan2(p.group.position.x-g.position.x, p.group.position.z-g.position.z);
+    this.yaw += (((targetYaw - this.yaw + Math.PI*3) % (Math.PI*2)) - Math.PI) * Math.min(1, dt*6);
+    g.rotation.y = this.yaw;
+
+    this.boltCd -= dt;
+    if(this.boltCd <= 0){
+      let nearest = null, nd = 196; // 14 units, squared
+      for(const e of game.enemies){
+        if(e.dead) continue;
+        const dx = e.group.position.x-g.position.x, dz = e.group.position.z-g.position.z;
+        const d2 = dx*dx + dz*dz;
+        if(d2 < nd){ nd = d2; nearest = e; }
+      }
+      if(nearest){
+        // capped growth off the PLAYER's level, not its own — see the note above
+        this.boltCd = Math.max(2.5, 5 - game.level*0.05);
+        const dmg = Math.round(3 + Math.min(20, game.level)*0.6);
+        _cTo.copy(nearest.group.position).sub(g.position); _cTo.y = 0; _cTo.normalize();
+        game.spawnProjectile(g.position.clone().setY(g.position.y+0.3), _cTo, dmg, 0xffe066, false, true);
+        game.audio.spit();
+        game.particles.spawn(g.position.x, g.position.y+0.4, g.position.z, {r:1,g:0.88,b:0.4, spread:0.4, size:6, life:0.3});
+      } else {
+        this.boltCd = 1.2; // nothing in range: recheck soon rather than idling out the full cooldown
+      }
     }
   }
 }
@@ -660,7 +845,7 @@ export class Player {
     head.position.y = 1.62; addOutline(head, 0.09);
     // hood / hat (mushroom cap hat!)
     const hat = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 8, 0, Math.PI*2, 0, Math.PI*0.5),
-      toonMat({ color:0xe63a2e, map:capTexture(0xe63a2e), rim:0.55 }));
+      toonMat({ color:0xe63a2e, map:capTexture(0xe63a2e, 1, 0xffe0a0), rim:0.55 }));
     hat.position.y = 1.72; addOutline(hat, 0.09);
     // scarf
     const scarf = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.09, 6, 12), toonMat({color:0xffb52e, rim:0.4}));
@@ -687,6 +872,17 @@ export class Player {
       return v;
     });
     this.blade = this.swordVariants[0].blade;
+    // the bow is its own model, not a rarity variant of the shared blade mesh — only one exists
+    // right now, so unlike swordVariants there's nothing to pick between, just show/hide it
+    this.bowVariant = buildBow();
+    this.bowVariant.group.position.set(0, -0.55, 0);
+    this.bowVariant.group.visible = false;
+    this.armR.add(this.bowVariant.group);
+    // spear — same "own model, not a rarity variant" reasoning as the bow above
+    this.spearVariant = buildSpear();
+    this.spearVariant.group.position.set(0, -0.85, 0);
+    this.spearVariant.group.visible = false;
+    this.armR.add(this.spearVariant.group);
     this.legR = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.35, 3, 6), toonMat({color:0x3a2f4d, rim:0.3}));
     this.legL = this.legR.clone();
     this.legR.position.set(0.16, 0.35, 0); this.legL.position.set(-0.16, 0.35, 0);
@@ -737,8 +933,8 @@ export class Player {
     this.elemRing = null;      // a RINGS entry, or null
     this.ringCharge = 0;       // seconds left. 0 with a ring set means spent-and-not-yet-cleared.
     // armor: one equipped id per slot + everything found this run (forge tiers persist in Progress)
-    this.armor = { helmet:null, ring:null, charm:null };
-    this.armorOwned = { helmet:[], ring:[], charm:[] };
+    this.armor = { helmet:null, ring:null, charm:null, boots:null };
+    this.armorOwned = { helmet:[], ring:[], charm:[], boots:[] };
     this.equipWeapon('blade');
   }
   addArmor(slot, id){
@@ -772,6 +968,21 @@ export class Player {
     this.equipped = id;
     const w = WEAPONS_BY_ID[id];
     for(const v of this.swordVariants) v.group.visible = false;
+    if(w.type === 'bow'){
+      this.spearVariant.group.visible = false;
+      this.bowVariant.group.visible = true;
+      this.bowVariant.stave.material.color.set(w.color);
+      this.bowVariant.stave.material.emissive.set(w.emissive);
+      return;
+    }
+    this.bowVariant.group.visible = false;
+    if(w.type === 'spear'){
+      this.spearVariant.group.visible = true;
+      this.spearVariant.tip.material.color.set(w.color);
+      this.spearVariant.tip.material.emissive.set(w.emissive);
+      return;
+    }
+    this.spearVariant.group.visible = false;
     const variant = this.swordVariants[w.rarity];
     variant.group.visible = true;
     this.blade = variant.blade;
@@ -872,28 +1083,6 @@ export class Player {
     }
     return !surfaceAt(nx, nz, feetY).blocked;
   }
-  /* item 11 — head collision against spore pods. A crossing test, not a distance test: the crown
-     has to pass through the pod's underside plane during THIS frame, travelling upward. A
-     proximity check would also burst a pod you merely walked past. */
-  headBonk(prevY, game){
-    const g = this.group;
-    const prevHead = prevY + PLAYER_H, headY = g.position.y + PLAYER_H;
-    for(let i=0;i<HEAD_HITS.length;i++){
-      const o = HEAD_HITS[i];
-      if(o.off) continue;
-      if(prevHead > o.bot || headY < o.bot) continue;
-      const dx = g.position.x - o.x, dz = g.position.z - o.z, rr = (o.r || 1) + PLAYER_R*0.55;
-      if(dx*dx + dz*dz > rr*rr) continue;
-      // clamp just under it and bonk back down, so the impact reads instead of the head sliding
-      // up through the pod on the next frame
-      g.position.y = o.bot - PLAYER_H - 0.01;
-      this.vy = -2;
-      this.squash = 1.28;
-      if(o.onHead) o.onHead(this, game);
-      return o;                               // one pod per frame — the bonk kills our rise anyway
-    }
-    return null;
-  }
   getMagnet(game){ return (this.boostTimers.magnet > 0 ? 2.2 : 0) + (game ? this.getArmorBonus('magnet', game) : 0); }
   hurt(dmg, from, game){
     if(this.iframe > 0 || this.dashT > 0 || game.state !== 'play') return;
@@ -915,11 +1104,24 @@ export class Player {
   }
   startDash(game){
     if(this.dashCd > 0) return;
-    this.dashCd = this.dashMaxCd; this.dashT = 0.28;
+    // boots: dashCdReduce shortens the cooldown you just paid, not the one you're about to pay —
+    // read here (once, at the moment the dash actually fires) rather than baked into dashMaxCd
+    // itself, so swapping boots mid-run changes the very next dash, not retroactively.
+    this.dashCd = this.dashMaxCd * (1 - this.getArmorBonus('dashCdReduce', game));
+    this.dashT = 0.28;
     const f = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.dashDir.copy(this.moveInput.lengthSq() > 0.01 ? this.moveInput.clone().normalize() : f);
+    // air-dash tech: dashing while genuinely airborne (past coyote, so walking off a ledge
+    // doesn't accidentally grant this) gives a real upward kick and refunds one jump charge —
+    // dash-jump chaining is the intended move, not an exploit, so it has to feel deliberate.
+    const airDashed = !this.grounded && this.coyoteT <= 0;
+    if(airDashed){
+      this.vy = Math.max(this.vy, AIR_DASH_VY);
+      if(this.jumps > 0) this.jumps--;
+    }
     game.audio.dash();
-    game.particles.burst(this.group.position.clone().setY(1), 14, {r:0.7,g:0.95,b:1, spread:2, size:9, life:0.4});
+    const c = airDashed ? {r:0.85,g:0.7,b:1} : {r:0.7,g:0.95,b:1}; // violet tell vs. the grounded dash's cyan
+    game.particles.burst(this.group.position.clone().setY(1), 14, {...c, spread:2, size:9, life:0.4});
   }
   attack(game){
     // allow chaining only once the current swing is past its apex (recover phase)
@@ -947,24 +1149,49 @@ export class Player {
 
     // movement
     const input = this.moveInput;
-    const spd = this.speed * this.speedMult * (this.potionTimers.swift > 0 ? POTIONS_BY_ID.swift.mult : 1) * (this.boostTimers.spd > 0 ? 1.3 : 1);
+    // fen hollow's bog: up to a 30% slow at the pocket's own center, ramped — a reason to route
+    // around the fen rather than through it, the same way the ravine is a reason to find the bridge
+    const bogSlow = 1 - 0.3*fenBogAt(g.position.x, g.position.z);
+    const spd = this.speed * this.speedMult * (1 + this.getArmorBonus('speedBonus', game)) * bogSlow
+      * (this.potionTimers.swift > 0 ? POTIONS_BY_ID.swift.mult : 1) * (this.boostTimers.spd > 0 ? 1.3 : 1);
     if(this.dashT > 0){
       this.dashT -= dt;
       this.vel.x = this.dashDir.x * spd * 3.4;
       this.vel.z = this.dashDir.z * spd * 3.4;
       if(Math.random()<0.6) game.particles.spawn(g.position.x, g.position.y+0.8, g.position.z,
         {r:0.6,g:0.9,b:1, spread:1.5, size:7, life:0.35});
+    } else if(this.grounded && input.lengthSq()<0.01){
+      // no input, grounded: friction ALONE governs the coast-out. It used to run AFTER the
+      // accel-blend below still pulled toward zero on its own schedule — invisible before, because
+      // the old 0.0001 exponent crushed velocity to nothing in one frame regardless, but it would
+      // have put a ~33%-per-frame ceiling on rain's slide however far this pow was loosened, since
+      // the blend's own pull dominates once the friction pow stops being the tightest term. Skipping
+      // the blend for exactly this case is what makes "wet ground" an actual, visible difference.
+      const stopPow = game.weather === 'rain' ? 0.35 : 0.0001;
+      this.vel.x *= Math.pow(stopPow,dt); this.vel.z *= Math.pow(stopPow,dt);
     } else {
       const accel = this.grounded ? 40 : 18;
       this.vel.x += (input.x*spd - this.vel.x) * Math.min(1, accel*dt/spd*8);
       this.vel.z += (input.z*spd - this.vel.z) * Math.min(1, accel*dt/spd*8);
-      if(this.grounded && input.lengthSq()<0.01){ this.vel.x *= Math.pow(0.0001,dt); this.vel.z *= Math.pow(0.0001,dt); }
+    }
+    // wind: a steady lateral push while airborne only — grounded movement stays fully in the
+    // player's hands, so wind is felt specifically as "my jump drifted", not as a constant shove
+    // that fights every step. Applied to vel, not position, so it composes with dash/attack lunge
+    // instead of overriding them.
+    if(!this.grounded && game.weather === 'wind'){
+      this.vel.x += game.windX*WIND_PUSH*dt;
+      this.vel.z += game.windZ*WIND_PUSH*dt;
     }
     this.moveHoriz(this.vel.x*dt, this.vel.z*dt);
     // playable ring: clamp x/z only. multiplyScalar() here scaled y too, which quietly sank the
-    // player into the terrain whenever they touched the map edge.
-    const bd = Math.hypot(g.position.x, g.position.z);
-    if(bd > 195){ const k = 195/bd; g.position.x *= k; g.position.z *= k; }
+    // player into the terrain whenever they touched the map edge. Cave chambers (main.js
+    // enterCave) deliberately sit far outside this ring — main.js sets game.inCave for exactly
+    // this reason, so the clamp meant for the overworld edge doesn't fight the chamber's own
+    // wall ring and drag the player straight back out through it, every single frame.
+    if(!game.inCave){
+      const bd = Math.hypot(g.position.x, g.position.z);
+      if(bd > 195){ const k = 195/bd; g.position.x *= k; g.position.z *= k; }
+    }
 
     // gravity / jump / ground (items 02, 03, 11)
     const wasGrounded = this.grounded;
@@ -972,9 +1199,7 @@ export class Player {
     this.coyoteT = Math.max(0, this.coyoteT - dt);
     this.jumpBuf = Math.max(0, this.jumpBuf - dt);
     this.vy -= 30*dt;
-    const prevY = g.position.y;
     g.position.y += this.vy*dt;
-    if(this.vy > 0 && HEAD_HITS.length) this.headBonk(prevY, game);
     if(g.position.y <= gy){
       const impact = this.vy;
       g.position.y = gy; this.vy = 0;
@@ -1006,39 +1231,64 @@ export class Player {
     if(this.attackT > 0){
       this.attackT -= dt;
       const p = 1 - Math.max(0, this.attackT)/this.attackDur;
+      // the arm-swing pose (windup/swing/recover below) reads fine as a bow draw-and-release too,
+      // so it's shared — but the slashing ground-arc and the blade glow-trail are melee-only
+      // flourishes that would look wrong on a bow, so those two are gated on this instead
+      const isBow = WEAPONS_BY_ID[this.equipped].type === 'bow';
+      // spear gets its OWN pose, not a shared one: a side-to-side swing arc is exactly the read
+      // a reach weapon should NOT have — the whole point of a spear is a straight line, so armZ/
+      // twist stay near zero here while armX (the recoil-then-jab) does all the work.
+      const isSpear = WEAPONS_BY_ID[this.equipped].type === 'spear';
       const side = this.combo === 2 ? -1 : 1;   // combos 1/3 sweep right→left, combo 2 left→right
       const W = 0.24, S = 0.62;                  // wind-up end / swing end (normalized time)
       let armX = 0, armZ = 0, twist = 0;
       if(p < W){
-        // wind-up: blade back, torso coiled, slight crouch
         const e = p/W, s = e*e*(3-2*e);
-        armX = -2.4*s; armZ = 0.7*side*s; twist = 0.75*side*s;
-        this.atkDip = 0.09*s;
+        if(isSpear){
+          // wind-up: draw the spear straight back, torso barely turns — a jab, not a coil
+          armX = -1.7*s; twist = 0.2*side*s;
+          this.atkDip = 0.05*s;
+        } else {
+          // wind-up: blade back, torso coiled, slight crouch
+          armX = -2.4*s; armZ = 0.7*side*s; twist = 0.75*side*s;
+          this.atkDip = 0.09*s;
+        }
         this.arc.material.opacity *= 0.6;
       } else if(p < S){
-        // swing: snappy ease-out sweep, torso whips through, forward lunge
         const q = (p-W)/(S-W), e = 1-Math.pow(1-q, 3);
-        if(this.combo === 3){ armX = -2.4 + 3.5*e; armZ = 0.7*side*(1-e); }
-        else { armX = -2.0 + 1.6*e; armZ = (0.7 - 2.6*e)*side; }
-        twist = (0.75 - 1.6*e)*side;
+        if(isSpear){
+          // thrust: the arm drives straight out along the shaft, no side sweep
+          armX = -1.7 + 4.9*e; twist = 0.2*(1-e)*side;
+        } else if(this.combo === 3){ armX = -2.4 + 3.5*e; armZ = 0.7*side*(1-e); twist = (0.75-1.6*e)*side; }
+        else { armX = -2.0 + 1.6*e; armZ = (0.7 - 2.6*e)*side; twist = (0.75-1.6*e)*side; }
         _fwd.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-        const lunge = (this.combo === 3 ? 30 : 18) * (1-q);
+        const lunge = (isSpear ? 24 : this.combo === 3 ? 30 : 18) * (1-q);
         this.vel.x += _fwd.x*lunge*dt; this.vel.z += _fwd.z*lunge*dt;
-        // swing arc fx follows the blade sweep
-        this.arc.position.copy(g.position); this.arc.position.y += 0.9;
-        this.arc.rotation.x = -Math.PI/2 + (this.combo===3 ? 0.9 : 0.15);
-        this.arc.rotation.z = -this.yaw + (1.2 - 2.4*e)*side;
-        this.arc.material.opacity = Math.sin(q*Math.PI)*0.9;
-        this.arc.scale.setScalar(1 + q*0.25 + (this.combo===3?0.35:0));
-        // glowing blade trail
-        _tip.set(0,-1.3,0); this.blade.localToWorld(_tip);
-        game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.55,g:0.95,b:1, spread:0.4, size:8, life:0.35});
+        if(isSpear){
+          // thrust glow: a straight streak off the point instead of a slashing ground arc
+          _tip.set(0,-1.5,0); this.spearVariant.tip.localToWorld(_tip);
+          game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.9,g:0.92,b:1, spread:0.3, size:7, life:0.3});
+        } else if(!isBow){
+          // swing arc fx follows the blade sweep
+          this.arc.position.copy(g.position); this.arc.position.y += 0.9;
+          this.arc.rotation.x = -Math.PI/2 + (this.combo===3 ? 0.9 : 0.15);
+          this.arc.rotation.z = -this.yaw + (1.2 - 2.4*e)*side;
+          this.arc.material.opacity = Math.sin(q*Math.PI)*0.9;
+          this.arc.scale.setScalar(1 + q*0.25 + (this.combo===3?0.35:0));
+          // glowing blade trail
+          _tip.set(0,-1.3,0); this.blade.localToWorld(_tip);
+          game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.55,g:0.95,b:1, spread:0.4, size:8, life:0.35});
+        } else if(Math.random() < 0.4){
+          // bow draw shimmer: a light dust off the string instead of a slash trail
+          _tip.set(0,0,0); this.bowVariant.string.localToWorld(_tip);
+          game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.75,g:0.9,b:0.6, spread:0.3, size:6, life:0.3});
+        }
       } else {
         // recover: ease back to neutral from the follow-through pose
         const q = (p-S)/(1-S), e = 1-Math.pow(1-q, 2), k = 1-e;
-        if(this.combo === 3){ armX = 1.1*k; armZ = 0; }
-        else { armX = -0.4*k; armZ = -1.9*side*k; }
-        twist = -0.85*side*k;
+        if(isSpear){ armX = 1.4*k; }
+        else if(this.combo === 3){ armX = 1.1*k; armZ = 0; twist = -0.85*side*k; }
+        else { armX = -0.4*k; armZ = -1.9*side*k; twist = -0.85*side*k; }
         this.arc.material.opacity *= 0.65;
       }
       this.armR.rotation.x = armX; this.armR.rotation.z = armZ;
@@ -1058,7 +1308,37 @@ export class Player {
         const fin = wdef.finisher;
         const finisherDmgMult = (isFinisher && fin && fin.type==='devour') ? (1+fin.mult) : 1;
         const dmgBase = (this.baseDmg + wdef.dmg) * this.dmgMult * wGearMult * powerMult * orbDmgMult * armorDmgMult * finisherDmgMult * (this.combo===3 ? 2.2 : 1);
-        let arcDot = wdef.special && wdef.special.type==='cleave' ? 0.25 - wdef.special.arc : 0.25;
+        // bow: fire-and-travel instead of an instant arc check. Everything ABOVE this line —
+        // combo timing, dmgBase, the finisher-on-3 gate — is the same chokepoint every other
+        // weapon goes through; only how the hit is actually delivered differs from here down.
+        if(wdef.type === 'bow'){
+          _fwd.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+          const originY = g.position.y + 1.4;
+          const loose = (dirX, dirZ) => {
+            const crit = Math.random() < 0.15 + wdef.crit + armorCrit;
+            const dmg = Math.round(dmgBase * (0.9+Math.random()*0.2) * (crit?1.8:1));
+            game.spawnProjectile(g.position.clone().setY(originY), new THREE.Vector3(dirX,0,dirZ),
+              dmg, wdef.color, false, true, wdef.knockback, crit);
+          };
+          if(isFinisher && fin && fin.type==='volley'){
+            for(let i=0;i<fin.count;i++){
+              const off = (i-(fin.count-1)/2) * fin.spreadAngle;
+              const c = Math.cos(off), s = Math.sin(off);
+              loose(_fwd.x*c - _fwd.z*s, _fwd.x*s + _fwd.z*c);
+            }
+            game.particles.burst(g.position.clone().setY(originY), 10, {r:0.6,g:0.85,b:0.4, spread:2, size:7, life:0.4});
+          } else {
+            loose(_fwd.x, _fwd.z);
+          }
+          game.audio.swing(this.combo); // reuse: a bow's release still wants the same "thwip" cue
+          this.impactT = 0.1;
+        } else {
+        // spear: a narrow forward cone instead of the sword's wide arc — precise reach along a
+        // line rather than a cleave around you, which is the whole identity a straight-line
+        // thrust pose (above) promises. Its higher `range` stat already reaches further, so
+        // narrow + long is what actually reads as "pierce a line" rather than "hit less".
+        let arcDot = wdef.type === 'spear' ? 0.6
+          : wdef.special && wdef.special.type==='cleave' ? 0.25 - wdef.special.arc : 0.25;
         let extraRange = 0;
         if(isFinisher && fin){
           if(fin.type==='sweep') arcDot -= fin.arcBonus;
@@ -1073,7 +1353,11 @@ export class Player {
           const d = _to.length();
           if(d < 1.9 + wdef.range + extraRange + 1.6*e.R.scale && _to.normalize().dot(_fwd) > arcDot){
             const crit = Math.random() < 0.15 + wdef.crit + armorCrit;
-            let dmg = Math.round(dmgBase * (0.9+Math.random()*0.2) * (crit?1.8:1));
+            // chilled prey is exposed prey: the ice ring buys time on its own (chillSlow), and
+            // melee cashes that time in for extra damage — the combo the elemental system was
+            // built to reward without ever letting the ring out-damage the blade itself
+            const chillVuln = e.chillT > 0 ? 1.25 : 1;
+            let dmg = Math.round(dmgBase * (0.9+Math.random()*0.2) * (crit?1.8:1) * chillVuln);
             if(wdef.special && wdef.special.type==='execute' && e.hp/e.maxHp < wdef.special.threshold)
               dmg = Math.round(dmg * (1+wdef.special.bonus));
             let kbMult = wdef.knockback;
@@ -1138,6 +1422,7 @@ export class Player {
           // friendly: the PLAYER's shockwave. Same shared pool as the boss ring burst.
           game.spawnRing(g.position.clone(), Math.round(dmgBase*fin.mult), wdef.color, 0, true);
           game.audio.hit(); game.shake(0.4);
+        }
         }
       }
     } else {

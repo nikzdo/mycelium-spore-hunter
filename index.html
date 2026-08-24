@@ -40,6 +40,9 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   padding:14px 46px;border:4px solid var(--ink);border-radius:999px;background:linear-gradient(180deg,#ffcf6b,#f59b3c);
   box-shadow:0 6px 0 var(--ink),0 12px 30px rgba(0,0,0,.4);color:var(--ink);cursor:pointer;animation:pulse 1.6s ease-in-out infinite}
 #title .hint{margin-top:22px;font-size:14px;opacity:.85;letter-spacing:.08em}
+#title .golden{margin-top:14px;font-family:'Gochi Hand',cursive;font-size:clamp(17px,2vw,22px);
+  color:#ffe28a;text-shadow:0 0 12px rgba(255,200,80,.9),0 0 28px rgba(255,170,40,.6),0 2px 0 rgba(28,20,16,.8);
+  letter-spacing:.06em;animation:pulse 1.6s ease-in-out infinite}
 @keyframes float{0%,100%{transform:translateY(0) rotate(-1deg)}50%{transform:translateY(-12px) rotate(1deg)}}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
 /* ---------- cards ---------- */
@@ -86,7 +89,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
    the stacking is a flex column instead. */
 #rightcol{position:absolute;top:18px;right:20px;width:250px;display:flex;flex-direction:column;gap:9px;align-items:stretch}
 /* COINS ARE THE SCORE, WHICH IS WHY THEY GET THE ONLY LARGE NUMBER ON SCREEN. Every source pays
-   them — mushroom kills, spore pods, sealed chests, critter stomps — so coins are the one figure
+   them — mushroom kills, buried caches, sealed chests, critter stomps — so coins are the one figure
    that always moves. Mycelium (contracts only) and essence (kills only) each see one slice of a
    hunt, so neither can carry a headline; they read as the secondary row they are. */
 #currency{background:linear-gradient(180deg,rgba(50,38,66,.74),rgba(24,17,34,.8));
@@ -478,6 +481,9 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
 #eqs-ring{right:16px;top:130px}
 #eqs-charm{left:16px;top:244px}
 #eqs-elem{right:16px;top:244px}
+/* boots mirror the helmet — head slot up top, feet slot at the bottom, the same "ring of slots
+   around the figure" the rest of the doll already promises */
+#eqs-boots{left:50%;top:358px;transform:translateX(-50%)}
 /* rarity lives in the FRAME, not in the icon: an icon is already carrying what the item is */
 .eqslot[data-r],.eqtile[data-r]{border-color:var(--rc,#6b4a2a);
   box-shadow:0 0 0 2px rgba(255,255,255,.5) inset,0 3px 0 rgba(0,0,0,.25)}
@@ -761,14 +767,14 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
       <div class="curcap">COINS BANKED</div>
       <div id="lockpickcell" class="zero">
         <span class="cname2 has">🗝️ LOCKPICKS</span>
-        <span class="cname2 none">🗝️ NONE — BURST A POD</span>
+        <span class="cname2 none">🗝️ NONE — DIG A CACHE</span>
         <span id="lockpickval" class="num">0</span>
       </div>
       <div id="curow">
         <div class="cur" id="mycocell"><span id="mycohud">🌿 0</span></div>
         <div class="cur" id="esscell"><span id="esshud">✦ 0</span></div>
       </div>
-      <!-- item 06. The counts alone were unreadable: "24 pods · 6 chests · 10 critters · 4 gems"
+      <!-- item 06. The counts alone were unreadable: "3 caches · 6 chests · 10 critters · 4 gems"
            floating under a wallet looks like more wallet, and a player reasonably asked what it
            was. A caption fixes it for the price of one line — the numbers are unchanged, the
            SENTENCE they belong to is what was missing. -->
@@ -822,6 +828,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
   <div class="logo">MYCELIUM</div>
   <div class="sub">— SPORE <span style="color:#ffb347">HUNTER</span> —</div>
   <button class="cta" id="startbtn">CLICK TO START</button><br>
+  <div class="golden hidden" id="goldenBadge">✨ GOLDEN SEED — this valley overflows with treasure ✨</div>
   <button id="tomebtn">📖 SPORE TOME</button>
   <div class="hint">W/S move &nbsp;•&nbsp; MOUSE steer &nbsp;•&nbsp; A/D turn &nbsp;•&nbsp; CLICK attack &nbsp;•&nbsp; SPACE jump &nbsp;•&nbsp; SHIFT dash &nbsp;•&nbsp; 1-7 weapons &nbsp;•&nbsp; Q/E/R/F/G potions &nbsp;•&nbsp; H harvest &nbsp;•&nbsp; B backpack &nbsp;•&nbsp; TAB tome &nbsp;•&nbsp; M mute &nbsp;•&nbsp; ESC pause</div>
 </div>
@@ -877,6 +884,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
     <div id="tometabbar">
       <button class="ttab" id="ttab-alch">MUTATIONS</button>
       <button class="ttab" id="ttab-equip">EQUIPMENT</button>
+      <button class="ttab" id="ttab-forge">FORGE</button>
     </div>
   <div class="tomebook">
     <div class="tomepage left" id="tomeleft"></div>
@@ -905,6 +913,7 @@ canvas{display:block;filter:saturate(1.16) contrast(1.06)}
         <div class="eqslot" id="eqs-ring"></div>
         <div class="eqslot" id="eqs-charm"></div>
         <div class="eqslot" id="eqs-elem"></div>
+        <div class="eqslot" id="eqs-boots"></div>
         <div id="eqstats"></div>
       </div>
       <div id="eqinv">

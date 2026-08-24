@@ -20,7 +20,7 @@
 
 export const RINGS = [
   {
-    id:'fire', name:'Fire Ring', icon:'🔥', kind:'burn',
+    id:'fire', name:'Fire Ring', icon:'🔥', kind:'burn', verb:'burn', hissFreq:320,
     // hot orange, deliberately clear of the Ember Signet's coal red so the HUD chip and the gear
     // chip can never be mistaken for each other
     color:0xff7a24, glow:0xffd07a,
@@ -36,7 +36,7 @@ export const RINGS = [
     desc:'Hold to spray fire. Burns keep ticking after you let go.',
   },
   {
-    id:'ice', name:'Ice Ring', icon:'❄️', kind:'chill',
+    id:'ice', name:'Ice Ring', icon:'❄️', kind:'chill', verb:'freeze', hissFreq:900,
     color:0x7ad4ff, glow:0xdcf6ff,
     charge:13,                  // shorter than fire: a slow is worth more per second than a burn
     reach:8.0, angle:0.72,      // wider and shorter — a blizzard is a wall, not a jet
@@ -46,6 +46,22 @@ export const RINGS = [
     chillDur:2.6, chillSlow:0.68,
     particles:{ n:3, size:8, life:0.55, rise:0.4, spread:1.9, grav:2.4, alpha:0.8 },
     desc:'Hold to freeze. Chilled creatures crawl and swing late.',
+  },
+  {
+    // fire trades for spread, ice trades for time — poison trades for safety: it doesn't burn
+    // faster or slow harder, it makes what's still standing hit you for less while it dies.
+    id:'spore', name:'Spore Ring', icon:'☠️', kind:'poison', verb:'weaken', hissFreq:520,
+    color:0x8fd93a, glow:0xd4ff8a,
+    charge:15,
+    reach:8.5, angle:0.62,
+    dps:6,                      // between fire's spread-damage and ice's near-zero: poison's real
+                                 // payload is defensive, not offensive, so its own tick stays modest
+    // weaken, not a bigger DoT: a poisoned mushroom still dies on its own schedule, but hits for
+    // noticeably less while it does — reach into the mob before it reaches you, buying survival
+    // rather than a kill you were already going to get.
+    poisonDur:3.0, poisonWeaken:0.35,
+    particles:{ n:3, size:8, life:0.6, rise:0.9, spread:1.6, grav:0.4, alpha:0.8 },
+    desc:'Hold to weaken. Poisoned prey hit for noticeably less while it lasts.',
   },
 ];
 export const RINGS_BY_ID = Object.fromEntries(RINGS.map(r => [r.id, r]));

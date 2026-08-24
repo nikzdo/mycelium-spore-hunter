@@ -50,7 +50,8 @@ export const MUTATIONS = [
 const LS = { bank:'mycelium_bank', life:'mycelium_lifetime', muts:'mycelium_mutations',
   weaponGear:'mycelium_weapon_gear', armorGear:'mycelium_armor_gear',
   coins:'mycelium_coins', myco:'mycelium_myco', contracts:'mycelium_contracts', depth:'mycelium_depth',
-  lockpicks:'mycelium_spines' };
+  lockpicks:'mycelium_spines', companion:'mycelium_companion',
+  eldersBeaten:'mycelium_elders_beaten', gluttonsBeaten:'mycelium_gluttons_beaten' };
 
 // ---------------- world depth: how many bosses in a row you've beaten. mobs everywhere
 // (not just far from spawn) scale up with it, so worlds keep getting harder as long as you
@@ -58,6 +59,21 @@ const LS = { bank:'mycelium_bank', life:'mycelium_lifetime', muts:'mycelium_muta
 export function depthMult(depth){ return 1 + (depth-1)*0.15; }
 function loadDepth(){
   try{ return Math.max(1, parseInt(localStorage.getItem(LS.depth))||1); }catch(e){ return 1; }
+}
+
+// ---------------- lifetime boss-win counts, UNLIKE depth: never reset on death. The Bloom
+// Ascendant (main.js resetRun, bossTraits.js) gates on both of these together, not depth alone —
+// depth only proves a current streak, and "beat both archetypes" is a lifetime achievement that
+// dying shouldn't take away partway through earning it. ----
+function loadCount(key){
+  try{ return Math.max(0, parseInt(localStorage.getItem(key))||0); }catch(e){ return 0; }
+}
+
+// ---------------- companion: unlocked once, permanently, by beating a boss. It's a milestone
+// gate rather than a currency purchase on purpose — "you proved yourself" reads differently
+// from "you paid for it", and this game already has a currency sink in the Forge. ----
+function loadCompanion(){
+  try{ return localStorage.getItem(LS.companion) === '1'; }catch(e){ return false; }
 }
 
 // ---------------- gear collection: rarity is fixed per item (what it looks like / where it
@@ -88,7 +104,7 @@ function loadGear(key, byId){
 
    WHY THE ROTATION HAD TO GROW. Three active contracts, all of them "pick N mushrooms of one
    colour", meant Mycelium had exactly one faucet and the whole quest system pointed at exactly one
-   verb. Meanwhile the world had grown four other verbs — burst a pod overhead, pry a chest, ride a
+   verb. Meanwhile the world had grown four other verbs — dig a buried cache, pry a chest, ride a
    vent, lift a crystal — and none of them ever appeared in an objective. A quest board that ignores
    four fifths of what the world does is not a quest board, it is a shopping list.
 
@@ -106,11 +122,12 @@ export const QUEST_KINDS = [
   // the only kind that can offer three DIFFERENT contracts at once without repeating itself.
   { kind:'harvest', weight:34, icon:'🍄', min:5,  var:8,  pay:2.0, payVar:0.8,
     verb:(n, name)=> `Harvest ${n} ${name}` },
-  // Pods are the cheapest verb to satisfy (they are on your route anyway) so they need the most,
-  // and pay the least per unit. A quest whose target you meet by accident should not out-earn one
-  // you have to go looking for.
-  { kind:'pod',     weight:20, icon:'🌸', min:6,  var:7,  pay:1.5, payVar:0.6,
-    verb:(n)=> `Burst ${n} flower pod${n===1?'':'s'}` },
+  // Caches are CAPPED by the world, same constraint as gems below (3-4 exist, full stop), so the
+  // need has to stay small enough that finding them all is realistic in one hunt, and the pay
+  // is high per unit because reaching one at all means actual exploring, not a route you were
+  // walking anyway.
+  { kind:'cache',   weight:14, icon:'⛏️', min:1,  var:2,  pay:4.0, payVar:1.5,
+    verb:(n)=> `Dig up ${n} buried cache${n===1?'':'s'}` },
   // Chests cost a lockpick each, so the need is small and the pay is the highest per unit in the
   // table. This is also the edge that closes the loop: chest quests pay Mycelium, Mycelium buys
   // lockpicks, lockpicks open chests.
@@ -205,34 +222,35 @@ function loadMuts(){
 // ---------------- lockpicks + sealed chests: the conversion edge (item 15) ----------------
 // Before this, four currencies ran in four straight lines: essence bought mutations, coins
 // bought gear levels, duplicates bought stars, Mycelium bought nothing at all. The fix is a
-// resource whose only job is *access*: a spore pod is a jump you make anyway, a sealed chest
-// pays like a small boss, and a lockpick is the one thing that connects them.
+// resource whose only job is *access*: a buried cache is worth going out of your way for, a
+// sealed chest pays like a small boss, and a lockpick is the one thing that connects them.
 //
-// SPORE PODS ARE WHERE LOCKPICKS COME FROM, SO SEALED CHESTS ALWAYS STAY REACHABLE. That
-// sentence is the design; 0.35 is only the dial that sets its pace. Everything else follows
+// BURIED CACHES ARE WHERE LOCKPICKS COME FROM, SO SEALED CHESTS ALWAYS STAY REACHABLE. That
+// sentence is the design; 0.5 is only the dial that sets its pace. Everything else follows
 // from refusing to leave a currency with no outgoing edge:
-//   pods / critters -> lockpicks -> chests -> coins + gear duplicates
+//   caches / critters -> lockpicks -> chests -> coins + gear duplicates
 //   duplicates -> stars, and past 6 stars -> coins (already true, untouched)
 //   coins -> gear levels, and coins -> essence shortfalls -> mutations (already true)
 //   contracts -> Mycelium -> lockpicks            <- the edge that was missing entirely
 // Mycelium had exactly one source and no sink, which made it a score rather than a currency.
 // Contracts renew forever, so that exchange is also the floor under the whole loop: a hunt
-// that spawns no pods can still be converted into a way into a chest. ----
+// where every cache goes undug can still be converted into a way into a chest. ----
 
 // per-interaction lockpick odds. `pity` = after this many dry interactions in a row the next
 // one is guaranteed (0 = pure chance).
 export const LOCKPICK_SOURCES = {
-  // Pods carry the pity because they are the source of record. Expected pods per lockpick,
-  // pity included: .35 + 2(.65)(.35) + 3(.65^2)(.35) + 4(.65^3) = 2.32 — so ~5 pods pay for
-  // the average crusted chest, and a cold streak can never cost more than 4 pods.
-  pod:     { chance:0.35, pity:4, label:'spore pod' },
+  // Caches carry the pity because they are the source of record. Expected caches per lockpick,
+  // pity included: .5 + 2(.5)(.5) + 3(.5^2) = 1.75 — and since a world only ever has 3-4 of
+  // them, that is roughly one guaranteed lockpick per world just from finding them, not a
+  // farmable stream: unlike the pods this replaced, there is no "again" to reach for.
+  cache:   { chance:0.5, pity:3, label:'buried cache' },
   // Critters pay coins on every stomp (see stompCritter) and a lockpick roughly every 8th, so
-  // routing through them is worth doing without making pods redundant.
+  // routing through them is worth doing without making caches the only route in.
   critter: { chance:0.12, pity:0, label:'critter' },
 };
 
 // One finished contract pays ~10-34 Mycelium, i.e. 1-2 lockpicks. Deliberately worse per-lockpick
-// than pods: the exchange exists so you can never be locked out, not so you can skip the world.
+// than caches: the exchange exists so you can never be locked out, not so you can skip the world.
 export const LOCKPICK_MYCO_COST = 12;
 
 // item 14 — a gamble that hides its odds is a slot machine; one that publishes them is a
@@ -252,7 +270,7 @@ export const CHEST_GLYPH = '🧰';
 const CHEST_PIP = '◆';
 export const CHEST_TIERS = [
   { id:'crusted',   name:'Crusted Chest',   tier:1, chance:0.45, maxTries:5,
-    coins:[18,34],   myco:[0,0],   gearChance:0,   color:'#d8b483' },
+    coins:[18,34],   myco:[0,0],   gearChance:0.15,   color:'#d8b483' },
   { id:'ironbound', name:'Ironbound Chest', tier:2, chance:0.25, maxTries:9,
     coins:[45,80],   myco:[0,0],   gearChance:0.5, color:'#8fc3ff' },
   { id:'elder',     name:'Elder Chest',     tier:3, chance:0.10, maxTries:20,
@@ -299,6 +317,17 @@ export class Progress {
     while(this.contracts.length < 3) this.contracts.push(rollContract());
     if(!this.weaponGear.blade) this.weaponGear.blade = { dupes:0, stars:0, level:1 }; // starting weapon is always in the collection
     this.depth = loadDepth();            // consecutive boss wins since your last death
+    this.companionUnlocked = loadCompanion(); // permanent, once true it never reverts
+    this.eldersBeaten = loadCount(LS.eldersBeaten);     // lifetime, never reset by a death
+    this.gluttonsBeaten = loadCount(LS.gluttonsBeaten);
+  }
+  // returns true only the FIRST time — main.js uses that to fire the unlock announcement once,
+  // not on every subsequent boss kill of a run where it was already unlocked
+  unlockCompanion(){
+    if(this.companionUnlocked) return false;
+    this.companionUnlocked = true;
+    try{ localStorage.setItem(LS.companion, '1'); }catch(e){}
+    return true;
   }
   saveBank(){ try{ localStorage.setItem(LS.bank, JSON.stringify(this.bank)); }catch(e){} }
   saveLife(){ try{ localStorage.setItem(LS.life, JSON.stringify(this.lifetime)); }catch(e){} }
@@ -310,6 +339,11 @@ export class Progress {
   saveDepth(){ try{ localStorage.setItem(LS.depth, String(this.depth)); }catch(e){} }
   // call when a boss falls — the *next* world starts one notch harder
   advanceDepth(){ this.depth++; this.saveDepth(); }
+  // call once per boss win, with which archetype fell — main.js's victory() flow
+  recordBossWin(archetype){
+    if(archetype === 'elder'){ this.eldersBeaten++; try{ localStorage.setItem(LS.eldersBeaten, String(this.eldersBeaten)); }catch(e){} }
+    else if(archetype === 'glutton'){ this.gluttonsBeaten++; try{ localStorage.setItem(LS.gluttonsBeaten, String(this.gluttonsBeaten)); }catch(e){} }
+  }
   // call on player death — mob scaling falls back to baseline
   resetDepth(){ this.depth = 1; this.saveDepth(); }
   _gearMap(kind){ return kind === 'weapon' ? this.weaponGear : this.armorGear; }
@@ -321,7 +355,7 @@ export class Progress {
 
   // ---------------- lockpicks: grant, spend, and the sources that feed them.
   // Nothing outside this file touches localStorage, so every lockpick that exists came through
-  // one of these four doors: a pod, a critter, the Mycelium exchange, or the floor. ----
+  // one of these four doors: a buried cache, a critter, the Mycelium exchange, or the floor. ----
   grantLockpicks(n=1){
     n = n|0;
     if(n > 0){ this.lockpicks += n; this.saveLockpicks(); }
@@ -335,8 +369,8 @@ export class Progress {
   }
   // one interaction with a lockpick source. Rolls the published chance, applies that source's
   // pity rule, grants on success. Returns everything a popup needs to explain itself.
-  lockpickRoll(source='pod'){
-    const s = LOCKPICK_SOURCES[source] || LOCKPICK_SOURCES.pod;
+  lockpickRoll(source='cache'){
+    const s = LOCKPICK_SOURCES[source] || LOCKPICK_SOURCES.cache;
     const dry = this._lockpickDry[source] || 0;
     const forced = s.pity > 0 && dry + 1 >= s.pity;
     const got = forced || Math.random() < s.chance;
@@ -429,7 +463,7 @@ export class Progress {
       gear: Math.random() < t.gearChance, coinsTotal:this.coins };
   }
 
-  /* THE ONE ADVANCE PATH for every quest kind. Every verb in the game — harvest, pod, chest,
+  /* THE ONE ADVANCE PATH for every quest kind. Every verb in the game — harvest, cache, chest,
      vent, stomp, gem — reaches the contract board through here, so the payout, the replacement
      roll and the save all happen in exactly one place and a new kind is a row in QUEST_KINDS
      rather than a new method with its own subtly different completion handling.
@@ -442,7 +476,7 @@ export class Progress {
     const completed = [];
     // `advanced` counts contracts whose `have` actually moved. The caller needs it to know whether
     // to repaint the board: without it, PARTIAL progress was invisible — the panel only refreshed
-    // when something COMPLETED, so bursting a pod against a "burst 5 pods" contract left 0/5 on
+    // when something COMPLETED, so digging a cache against a "dig 2 caches" contract left 0/2 on
     // screen and the whole quest kind read as broken.
     let advanced = 0;
     for(const c of this.contracts){
@@ -587,5 +621,33 @@ export class Progress {
     this.coins -= cost; g.level++;
     this.saveCoins(); this._saveGear(kind);
     return true;
+  }
+
+  // ---------------- Spore Forge: craft a specific item on demand ----------------
+  // Every other way gear reaches a player — kills, chests — is luck. The Forge is the one place
+  // Mycelium (previously a near dead-end past lockpicks) and coins buy a SPECIFIC piece instead
+  // of praying for the right drop. A crafted item is not a different kind of gear, it's gear from
+  // a different SOURCE — so it goes through the exact same ownGear/addDupe doors a real find does,
+  // and the star/level math never has to know the difference.
+  craftCost(kind, id){
+    const def = kind === 'weapon' ? WEAPONS_BY_ID[id] : ARMOR_BY_ID[id];
+    if(!def) return null;
+    const r = def.rarity;
+    return { myco: 8 + r*10, coins: 25 + r*45 };
+  }
+  canCraft(kind, id){
+    const cost = this.craftCost(kind, id);
+    return !!cost && this.myco >= cost.myco && this.coins >= cost.coins;
+  }
+  craftGear(kind, id){
+    if(!this.canCraft(kind, id)) return null;
+    const cost = this.craftCost(kind, id);
+    this.myco -= cost.myco; this.coins -= cost.coins;
+    this.saveMyco(); this.saveCoins();
+    const def = kind === 'weapon' ? WEAPONS_BY_ID[id] : ARMOR_BY_ID[id];
+    const hadBefore = !!this.gearOf(kind, id);
+    if(!hadBefore) this.ownGear(kind, id);
+    const dupeResult = hadBefore ? this.addDupe(kind, id, def.rarity) : null;
+    return { ok:true, hadBefore, dupeResult, cost };
   }
 }

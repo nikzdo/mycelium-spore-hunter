@@ -23,6 +23,16 @@ export const WEAPONS = [
     finisher:{type:'pierce', name:'Impaling Thrust', extraRange:2.2},
     color:0xff5a4a, emissive:0x8a1a1a, geomScale:{x:0.5,y:1.75,z:0.5},
     desc:'Long-reaching thorn-forged spear. Finishes wounded prey instantly.' },
+  { id:'windsong', name:'Windsong Bow', icon:'🏹', rarity:2, type:'bow',
+    dmg:8, atkSpeed:0.88, range:0, crit:0.12, knockback:0.75, special:null,
+    // arrows fire through the same friendly-projectile pool the nova finisher already uses (see
+    // spawnProjectile in main.js), so speed/life/collision radius are shared tuning, not per-
+    // weapon fields here. The combo timing, damage math and finisher-on-3 gate are the exact same
+    // chokepoint every other weapon goes through in Player.attack() — only what happens at the
+    // hit moment (fire-and-travel vs. instant arc) differs, and that lives in entities.js.
+    finisher:{type:'volley', name:'Piercing Volley', count:3, spreadAngle:0.22},
+    color:0x8fbf5a, emissive:0x3a6a1a, geomScale:{x:1,y:1,z:1},
+    desc:'Loose arrows from a distance — draws slower, but keeps you out of a blade\'s reach.' },
   { id:'rapier', name:'Ember Rapier', icon:'🤺', rarity:2, type:'sword',
     dmg:8, atkSpeed:0.85, range:0.35, crit:0.1, knockback:0.8, special:{type:'lifesteal', amt:0.08},
     finisher:{type:'heal', name:'Ember Surge', healFrac:0.12, spdDur:4},

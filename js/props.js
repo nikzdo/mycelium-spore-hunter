@@ -1,4 +1,4 @@
-// props.js — the interactive props. Items 11 (spore pods), 13 (vents), 14 (sealed chests),
+// props.js — the interactive props. Items 11 (buried caches), 13 (vents), 14 (sealed chests),
 // 18 (guaranteed treasure).
 //
 // This module is the toys. Everything else in the world is scenery you route around; these four
@@ -12,14 +12,12 @@
 //   import { buildProps } from './props.js';
 //   const props = buildProps(scene, mulberry32(deriveSeed(seed, 0x9705)), world, {
 //     progress, pops: rewardPops, onEvent: onPropEvent });
-//   // pods register themselves with entities.js's HEAD_HITS; call clearHeadHits() before a rebuild.
 //   // per frame:  props.update(dt, t, camera, player.group.position);
 //
 import * as THREE from 'three';
-import { toonMat, addOutline, paintStates, canvasStates, linearColor, anchorToBase,
+import { toonMat, addOutline, paintTexture, paintStates, canvasStates, linearColor, anchorToBase,
          makeProgressBar, glowTexture, RewardPops } from './fx.js';
 import { COLLIDERS, groundHeight, groundOnly, slopeAt, inExclusion, scatter, reachable } from './world.js';
-import { registerHeadHit, PLAYER_H } from './entities.js';
 import { mulberry32, deriveSeed } from './rng.js';
 import { mergeGeos } from './rockgen.js';
 
@@ -30,44 +28,26 @@ const clamp01 = (v)=> v < 0 ? 0 : v > 1 ? 1 : v;
 const easeOutQuint = (t)=> 1 - Math.pow(1-t, 5);
 const smooth = (t)=> t*t*(3-2*t);
 
-// Derived, never authored. entities.js keeps JUMP_VY private but exports PLAYER_H, so this is the
-// closest this file can get to the real number — and importing PLAYER_H means a retune over there
-// shows up here as a moved pod instead of as an item that silently stopped working.
-const JUMP_APEX = 11*11/(2*30);              // JUMP_VY^2 / 2g, entities.js:29-30
-export const HEAD_APEX = JUMP_APEX + PLAYER_H;   // 4.57 m: how high the crown gets from flat ground
-
 /* ================================================================================
    knobs. One flat object, same convention as world.js's PARAMS, so item 10's dev
    panel can write into it without knowing anything about this file's internals.
    ================================================================================ */
 export const PROP_PARAMS = {
-  /* --- item 11: spore pods --- */
-  // THE reachability constraint. A standing jump is JUMP_VY 11 against gravity 30, so the feet
-  // rise 11^2/(2*30) = 2.02 m; add PLAYER_H 2.55 and the crown tops out 4.57 m over the ground it
-  // left. podBotMin/Var must stay inside that or a pod becomes decoration. If entities.js ever
-  // retunes JUMP_VY, these two numbers are what stops the whole item from silently going dead.
-  podBotMin: 3.45, podBotVar: 0.62,   // metres above the ground the pod hovers over
-  podClusters: 7, podPerMin: 1, podPerVar: 3,   // 1-3 pods per cluster
-  podStep: 2.35,                    // spacing along the cluster heading
-  podR: 0.66,                       // visual radius of the BULB; the corolla reaches ~1.5x this
-  // Still under the widest point of the flower, but no longer under the bulb: item 03 grew a
-  // corolla, and a hit disc narrower than the thing you are aiming at turns clean-looking hits
-  // into misses. If PETAL.out/len change, this changes with them — see the note on PETAL.
-  podHitR: 0.76,
-  podColR: 0.5,                      // collider radius — narrower again, so a pod never feels sticky
-  podSlope: 0.85, podPad: 1.6, podClear: 1.7,
-  podMinH: -3.0,                     // never over the ravine void even if exclusion misses
-  podEdgeBand: 9,                    // "just outside an exclusion" band — ravine lips, site rims
-  podAnchorR: 30,                    // how close to a landmark counts as an interesting arc
-  podBias: 0.6,                      // fraction of clusters that must land somewhere interesting
-  podChargeChance: 0.28,             // pods worth returning to
-  podChargeMin: 2, podChargeVar: 2,  // 2-3 hits
-  podRichChance: 0.12, podRichMult: 10,
-  podCoinMin: 6, podCoinVar: 6,
-  podBob: 0.14, podBobRate: 1.7, podSway: 0.11, podSwayRate: 0.9,
-  podKick: 0.85,                     // metres the pod jumps up on a hit
-  podBumpT: 0.34,                    // seconds of the kick arc
-  podCool: 0.28,                     // lockout after a hit, so one rise can't pay twice
+  /* --- item 11: buried caches ---
+     Deliberately RARE and CAPPED, unlike the pods this replaced: 3-4 per world, full stop, no
+     recharge, no cluster to farm. The whole point is that reaching one means you went and
+     explored for it — see main.js digCache() for the payout, which leans into that with a
+     bigger, guaranteed-feeling reward per dig than a pod ever gave for one hit. */
+  cacheCountMin: 3, cacheExtraChance: 0.5,   // 3, or 4 half the time
+  cacheMinDist: 55,                  // spread requirement — no two caches within casual sight
+  cacheDMin: 22,                     // never right at spawn: the FIRST one still has to be found
+  cacheR: 0.62, cacheH: 0.42,        // mound footprint / height — a low dig site, not a wall
+  cacheReach: 2.2,                   // interact radius
+  cacheSlope: 0.7, cachePad: 1.8, cacheClear: 2.0,
+  cacheCoinMin: 45, cacheCoinVar: 35,
+  cacheMotes: 7,                     // orbiting sparkle motes per cache — one shared draw call
+  cacheGlowR: 1.15,
+  cacheDigT: 0.42,                   // seconds the unearth animation takes
 
   /* --- item 13: vents --- */
   ventCount: 4, ventMinDist: 62, ventSlope: 0.5, ventPad: 4, ventClear: 3.2,
@@ -103,9 +83,10 @@ export const PROP_PARAMS = {
    saturated bio-plastics with one warm accent.
    ================================================================================ */
 const PAL = {
-  pod:      { skin:'#7be0b0', deep:'#1f6f5c', crack:'#123a33', glow:0x2fbf8a },
-  podRich:  { skin:'#ffd86b', deep:'#b06a12', crack:'#4a2a06', glow:0xffab24 },
-  podSpent: { skin:'#8d8a86', deep:'#3a3733', crack:'#191614', glow:0x000000 },
+  // dirt/wood browns for the mound, one warm gold seal — the same "manufactured accent against
+  // an earthy body" split the chest/treasure palettes already use. glowHex is the same colour as
+  // glow, spelled as a CSS string: canvas gradients want a string, materials want the hex number.
+  cache: { skin:'#6a4a30', deep:'#2f2013', crack:'#160f09', glow:0xffcf5a, glowHex:'#ffcf5a' },
   chest: {
     crusted:   { body:'#a58b6a', band:0x6e5a43, plate:0xc9a86a, glow:0xffd79a },
     ironbound: { body:'#7d8ea8', band:0x2f3a4e, plate:0xa8c4e0, glow:0xbfe4ff },
@@ -206,102 +187,27 @@ function nonIndexed(g){
   return own;
 }
 
-// a pod: lathe profile, bottom-up, so the belly brightening in bandShade lands on the underside
-function podBodyGeo(r, h){
-  const pts = [];
-  // the flange at 0.26 h is the GILL RIM: it is the part the head hits, so the silhouette says so
-  // from any angle. Without it a lathe pod is an egg, and an egg does not read as "hit me here".
-  const prof = [[0.00,0.00],[0.28,0.02],[0.52,0.09],[0.70,0.18],[1.02,0.25],[0.84,0.33],
-                [0.99,0.52],[0.92,0.70],[0.73,0.85],[0.44,0.95],[0.20,1.02],[0.11,1.14],
-                [0.06,1.26],[0.00,1.28]];
-  for(const p of prof) pts.push(new THREE.Vector2(p[0]*r, p[1]*h));
-  const g = new THREE.LatheGeometry(pts, 12);
-  return anchorToBase(g).geo;
-}
-
-/* --- the corolla (item 03). A ring of petals grown off the gill rim, plus a stamen crown. ---
-
-   WHY A FLOWER AND NOT JUST A PRETTIER POD: the pod is the only prop in the game you can reach by
-   ONE route — jumping into it from underneath — and the old egg silhouette said nothing about
-   that. Petals splayed BELOW the horizontal are the affordance: the face you are meant to hit is
-   the face the flower opens toward, so the thing looks, from the only angle you ever approach it
-   at, like a target. Read from above it is still a pod, which is what keeps it legible as one
-   object in a clearing full of them.
-
-   THE CONSTRAINT THE PETALS MUST NOT BREAK: `petalOut` is bounded by podHitR, not the reverse. A
-   corolla wider than the head-hit disc turns every clean-looking miss into a bug report, so if
-   you widen the flower you widen podHitR in the same commit or you have made the prop lie. */
-const PETAL = {
-  n: 6,               // odd counts read as a pinwheel from directly below; 6 reads as a flower
-  yFrac: 0.27,        // AT the gill flange (prof peak 1.02 @ 0.25h) — the petals grow out of the rim
-  tilt: 0.46,         // radians below horizontal. Enough that the corolla is visible from beneath
-  out: 0.56,          // how far the petal root sits from the axis, as a fraction of pod radius
-  // Reach is out + len*cos(tilt) = 1.56 pod radii = 1.03 m, so a flower is ~2.1 m across against
-  // a podStep of 2.35 m. THAT is the ceiling on len: any longer and the pods in a cluster grow
-  // into each other and a row of flowers becomes one hedge.
-  len: 1.12, wide: 0.68, thick: 0.22,   // all fractions of pod radius
-  /* Deeper than the pink you actually want to SEE, deliberately. The shared material adds its
-     mint emissive (0x2fbf8a at 0.42) FLAT to every fragment, petals included, and then ACES at
-     exposure 1.28 lifts the result again — a pale rose here arrives on screen as off-white. The
-     tint has to be authored below the target so the emissive can add its way up to it. This is
-     the same "solve for the composite, not the swatch" rule the palette's contrast floors follow. */
-  tint: 0xe64c86,
-  stamens: 5, stamenR: 0.095, stamenY: 0.99, stamenOut: 0.13, stamenTint: 0xffe08a,
-};
-// the reserved white corner of every pod texture, and the single UV every petal vertex is pinned
-// to. Centre of the patch, not its edge: a UV on the boundary samples the pod's paint under
-// linear filtering. See the note where the patch is drawn.
-// v is size/2, NOT 1 - size/2, and that is not a typo. Three.js textures default to flipY:true,
-// so canvas row 0 (the top) is v = 1 and the patch drawn at the canvas BOTTOM-right lands at low
-// v. Pointing at 1 - size/2 samples the top of the sheet instead — which is the pod's own dark
-// gradient stop, and is exactly why the first attempt produced pale grey-green petals.
-const PETAL_UV = { size: 0.125, u: 1 - 0.125/2, v: 0.125/2 };
-function pinUV(geo, u, v){
-  const uv = geo.attributes.uv;
-  if(!uv) return geo;
-  for(let i=0;i<uv.count;i++) uv.setXY(i, u, v);
-  uv.needsUpdate = true;
-  return geo;
-}
-// one petal blade, lathed then flattened: a teardrop of revolution squashed on one axis is a
-// petal, and it costs 5 profile points instead of hand-authored triangles.
-const PETAL_PROFILE = [[0.02,0.00],[0.34,0.15],[0.50,0.42],[0.40,0.72],[0.19,0.91],[0.00,1.00]];
-function petalBlade(r){
-  const pts = [];
-  for(const q of PETAL_PROFILE) pts.push(new THREE.Vector2(q[0]*PETAL.wide*r, q[1]*PETAL.len*r));
-  const g = nonIndexed(new THREE.LatheGeometry(pts, 6));
-  g.scale(1, 1, PETAL.thick/PETAL.wide);        // flatten across the blade: revolution -> petal
-  // the lathe grows along +Y; lay it over so it grows along +Z, then drop the tip below level
-  g.rotateX(Math.PI/2 + PETAL.tilt);
-  return g;
-}
-function flowerPodGeo(r, h){
-  const parts = [];
-  parts.push(bandShade(nonIndexed(podBodyGeo(r, h)), {
-    color:0xffffff, amount:0.30, shadow:0.24, width:1.15,
-    belly:0.85,                     // the underside is the part that pays, so it is the part that glows
-    ao:0.10 }));
-  for(let i=0;i<PETAL.n;i++){
-    const a = (i/PETAL.n)*TAU;
-    const blade = pinUV(petalBlade(r), PETAL_UV.u, PETAL_UV.v);
-    blade.translate(0, h*PETAL.yFrac, r*PETAL.out);
-    blade.rotateY(a);
-    // shaded in its own tint BEFORE the merge, for the same reason the chest's plate is: after
-    // the merge there is one colour attribute and no way to tell the parts apart again.
-    // belly brightens toward a part's LOWEST vertices and bandShade recomputes the bounding box
-    // PER PART, so a lone petal's own tip is its own y-min. At belly 1.15 that made f up to 2.15,
-    // multiplied again by amount — the tint blew straight past 1.0 and every petal clipped to
-    // white. 0.30 is the most that keeps the corolla's underside lit rather than blown out.
-    parts.push(bandShade(blade, { color: PETAL.tint, amount:0.26, shadow:0.20, belly:0.30 }));
+// a cache mound: a low, lumpy dome of disturbed earth. Built PER-CACHE (not shared) — there are
+// only ever 3-4 of these in a world, so a unique jitter per mound costs nothing and means no two
+// dig sites are the same lump, which matters more here than for anything batched.
+function cacheMoundGeo(rng, r, h){
+  const g = new THREE.SphereGeometry(r, 10, 6, 0, TAU, 0, Math.PI*0.5);   // a flattened dome
+  g.scale(1, h/r, 1);
+  const p = g.attributes.position;
+  for(let i=0;i<p.count;i++){
+    const x=p.getX(i), y=p.getY(i), z=p.getZ(i);
+    const j = 1 + (rng()-0.5)*0.4;              // per-vertex jitter: a lump, not a dome
+    p.setXYZ(i, x*j, y, z*j);
   }
-  for(let i=0;i<PETAL.stamens;i++){
-    const a = (i/PETAL.stamens)*TAU + 0.31;
-    const dot = pinUV(nonIndexed(new THREE.SphereGeometry(PETAL.stamenR*r, 6, 4)),
-      PETAL_UV.u, PETAL_UV.v);
-    dot.translate(Math.cos(a)*r*PETAL.stamenOut, h*PETAL.stamenY, Math.sin(a)*r*PETAL.stamenOut);
-    parts.push(bandShade(dot, { color: PETAL.stamenTint, amount:0.20, shadow:0.10 }));
-  }
-  return mergeGeos(parts);
+  g.computeVertexNormals();
+  return g;                                     // already base-anchored: the flat side sits at y=0
+}
+// the seal: a flat glowing disc set into the top of the mound, carrying the crack/rune texture.
+// A separate part rather than baked into the mound's own UVs, because it is the one thing that
+// has to swap look the instant a cache is dug — one texture atlas doing double duty as both
+// "dirt" and "glow" would mean the whole mound recolours when only the rune should.
+function cacheSealGeo(r){
+  return new THREE.CircleGeometry(r*0.72, 16);
 }
 
 /* a faceted crystal cluster: four shards of falling height leaning off a shared base, merged so
@@ -432,55 +338,41 @@ function crystalGeo(rng){
    state change is one material reference swap, never canvas work at the moment it flips.
    ================================================================================ */
 
-// 3 wear stages for a pod: fresh, cracked (been hit, still has charges), husk (spent).
-// The middle stage is the whole reason charges are legible — a cracked pod tells you from across
-// the clearing that it still owes you something.
-function podTextures(rng, pal){
-  return canvasStates(3, (g, s, i, t)=>{
-    const grad = g.createLinearGradient(0, 0, 0, s);
-    grad.addColorStop(0, pal.deep); grad.addColorStop(0.45, pal.skin); grad.addColorStop(1, pal.deep);
-    g.fillStyle = grad; g.fillRect(0, 0, s, s);
-    // painterly dabs, then vertical ribs so the lathe reads as a seed pod rather than a ball
-    for(let k=0;k<180;k++){
-      const x = rng()*s, y = rng()*s, r = 2 + rng()*7;
-      g.fillStyle = rng() < 0.5 ? pal.skin : pal.deep;
-      g.globalAlpha = 0.07 + rng()*0.12;
-      g.beginPath(); g.ellipse(x, y, r, r*0.55, rng()*Math.PI, 0, 7); g.fill();
+// 2 states for a cache seal: sealed (glowing rune, radiating cracks, a bright core) and dug
+// (dead, dark, the same cracks gone cold) — one texture swap is the whole "you already got this
+// one" tell, same convention as the chest's lid staying open rather than a second mesh.
+function cacheSealTextures(rng, pal){
+  return canvasStates(2, (g, s, i)=>{
+    const dug = i === 1;
+    const grad = g.createRadialGradient(s/2, s/2, 2, s/2, s/2, s*0.6);
+    if(dug){
+      grad.addColorStop(0, '#3a342c'); grad.addColorStop(1, pal.deep);
+    } else {
+      grad.addColorStop(0, pal.glowHex); grad.addColorStop(0.42, pal.skin); grad.addColorStop(1, pal.deep);
     }
-    g.globalAlpha = 0.30; g.strokeStyle = pal.deep; g.lineWidth = 2;
-    for(let k=0;k<8;k++){ const x = (k+0.5)*s/8; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, s); g.stroke(); }
-    g.globalAlpha = 1;
-    // cracks scale with the wear stage: `t` is 0..1 across the states, so one number drives it
-    const cracks = Math.round(t*13);
-    g.strokeStyle = pal.crack; g.lineWidth = 1.6 + t*1.6;
-    for(let k=0;k<cracks;k++){
-      let x = rng()*s, y = rng()*s;
+    g.fillStyle = grad; g.fillRect(0, 0, s, s);
+    // cracks radiating from the centre — fewer and duller once dug, so the seal reads as spent
+    // from across the clearing the same way a cracked-open chest lid does
+    const lines = dug ? 6 : 10;
+    g.strokeStyle = pal.crack; g.lineWidth = dug ? 3 : 2.2;
+    g.globalAlpha = dug ? 0.85 : 0.55;
+    for(let k=0;k<lines;k++){
+      const a = (k/lines)*Math.PI*2 + rng()*0.3;
+      let x = s/2, y = s/2;
       g.beginPath(); g.moveTo(x, y);
-      for(let j=0;j<4;j++){ x += (rng()-0.5)*s*0.22; y += (rng()-0.5)*s*0.22; g.lineTo(x, y); }
+      for(let j=0;j<4;j++){
+        x += Math.cos(a)*s*0.09 + (rng()-0.5)*s*0.05;
+        y += Math.sin(a)*s*0.09 + (rng()-0.5)*s*0.05;
+        g.lineTo(x, y);
+      }
       g.stroke();
     }
-    if(i === 2){                                     // husk: drained, grey, holed
-      g.globalAlpha = 0.55; g.fillStyle = '#4a4744'; g.fillRect(0, 0, s, s); g.globalAlpha = 1;
-      g.fillStyle = pal.crack;
-      for(let k=0;k<5;k++){
-        const x = rng()*s, y = rng()*s, r = 6 + rng()*10;
-        g.beginPath(); g.ellipse(x, y, r, r*0.7, rng()*3, 0, 7); g.fill();
-      }
+    g.globalAlpha = 1;
+    if(!dug){
+      g.fillStyle = '#fff8e0';
+      g.beginPath(); g.arc(s/2, s/2, s*0.05, 0, 7); g.fill();
     }
-    /* THE NEUTRAL PATCH — item 03's petals depend on it and it is the last thing drawn on purpose.
-       MeshToonMaterial multiplies color * map * vertexColor, so a petal sharing the pod's material
-       ALSO samples the pod's texture, and mint-green paint times a pink vertex colour is a dull
-       grey-green: measured (0.20,0.75,0.44) x (1.00,0.48,0.66) = (0.20,0.36,0.29). The corolla
-       came out as a colourless frill for exactly this reason.
-       Reserving one white corner and pinning every petal UV to its CENTRE makes the map
-       contribute ~1.0 there, which hands the petal's hue back to its vertex colours — and keeps
-       the whole flower on ONE mesh with ONE material, which is the point. The patch is a fat
-       16/128 of the sheet so the first few mip levels still resolve white rather than bleeding the
-       pod's paint into the petals at distance. Every wear state gets it: a husk's petals are grey
-       because their vertex colours say so, not because the atlas forgot. */
-    g.globalAlpha = 1; g.fillStyle = '#ffffff';
-    g.fillRect(s - s*PETAL_UV.size, s - s*PETAL_UV.size, s*PETAL_UV.size, s*PETAL_UV.size);
-  }, 128);
+  }, 96);
 }
 
 /* ================================================================================
@@ -495,8 +387,8 @@ function podTextures(rng, pal){
  *        so a seed rebuilds identical props. Math.random() is never called for either.
  * world  the object returned by buildWorld(). Read defensively: this module lands whether or not
  *        the terrain wave has finished exposing authored-site positions (see item 18 below).
- * opts   { progress, pops, parent, onEvent, registerHeadHit, quality,
- *          podClusters, ventCount, treasureCount, grantCoins }
+ * opts   { progress, pops, parent, onEvent, quality,
+ *          ventCount, treasureCount, grantCoins }
  */
 export function buildProps(scene, rng, world = {}, opts = {}){
   const P = PROP_PARAMS;
@@ -544,19 +436,6 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     }
     return true;
   }
-  // the same question in 3D, for the hover band: a pod may stand over open ground and still be
-  // buried in the flank of a spire two metres up.
-  function bandFree(x, z, pad, bot, top){
-    for(let i=0;i<COLLIDERS.length;i++){
-      const c = COLLIDERS[i];
-      if(c.off) continue;
-      const dx = x-c.x, dz = z-c.z, rr = c.r + pad;
-      if(dx*dx + dz*dz > rr*rr) continue;
-      if(c.top > bot && c.bot < top) return false;
-    }
-    return true;
-  }
-
   const events = [];   // every event also lands here, so a caller without onEvent can drain it
 
   function emit(ev){
@@ -587,158 +466,137 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     /* world.js does not use one coordinate name. Sites and positions are {x,z}, but geysers are
        {gx,gy,gz} and cave mouths are {cx,cz,cy} — so the old `Number.isFinite(p.x)` test silently
        dropped BOTH of those lists, and two of the most interesting landmarks in the world never
-       counted as interesting. Pods bias their clusters toward anchors (podBias), so the bias was
-       quietly running on a short list. Read defensively here rather than renaming fields in
-       world.js: this module's whole contract is to read that object defensively. */
+       counted as interesting. Read defensively here rather than renaming fields in world.js:
+       this module's whole contract is to read that object defensively. */
     const ax = Number.isFinite(p.x) ? p.x : Number.isFinite(p.gx) ? p.gx : p.cx;
     const az = Number.isFinite(p.z) ? p.z : Number.isFinite(p.gz) ? p.gz : p.cz;
     if(Number.isFinite(ax) && Number.isFinite(az)) anchors.push({ x:ax, z:az });
   }
   pushAnchor(world.sites); pushAnchor(world.motherShroom); pushAnchor(world.pondPos);
   pushAnchor(world.geysers); pushAnchor(world.caveSpots); pushAnchor(world.spawnPoint);
-  function nearAnchor(x, z, r){
-    const r2 = r*r;
-    for(let i=0;i<anchors.length;i++){
-      const dx = x-anchors[i].x, dz = z-anchors[i].z;
-      if(dx*dx + dz*dz < r2) return true;
-    }
-    return false;
-  }
-  // A ravine lip is a point that is legal to stand on but a couple of metres from somewhere that
-  // is not. inExclusion() is the only exported view of the ravine, so read it at two clearances:
-  // the difference between them IS the edge, without world.js having to publish RAVINE.
-  function nearEdge(x, z, pad, band){
-    return !inExclusion(x, z, pad) && inExclusion(x, z, band);
-  }
 
-  /* ================================ item 11 — spore pods ================================
-     The money box, and the reason jumping has a job. Everything else in this file is a thing you
-     walk to; a pod is the only prop you can only get by leaving the ground. */
-  const pods = [];
+  /* ================================ item 11 — buried caches ================================
+     Found, not farmed. A cache is a small mound with a glowing sealed rune on top; walking up to
+     one and pressing the interact key digs it, once, forever. There are only ever cacheCountMin
+     (+1 half the time) of them in a world, spread cacheMinDist apart — reaching all of them means
+     you actually explored, which is the entire reason this replaced the old jump-farmable pods. */
+  const caches = [];
+  let moteMat = null, moteActiveAttr = null;
   {
-    // already band-shaded part-by-part inside flowerPodGeo — the petals and the stamens carry
-    // their own tints, which is the whole reason the corolla can ride the pod's shared material.
-    const geo = keepGeo(flowerPodGeo(P.podR, P.podR*1.9));
-    // 2 kinds x 3 wear stages x 2 hover states = 12 shared materials, 6 shared textures.
-    // Hover brightening is a material SWAP rather than a per-pod material, which is what keeps a
-    // clearing full of pods at two draw calls each instead of one material compile each.
-    const texFor = { normal: podTextures(look, PAL.pod), rich: podTextures(look, PAL.podRich) };
-    for(const k in texFor) for(const t of texFor[k]) keepTex(t);
-    const mats = {};
-    for(const kind of ['normal','rich']){
-      const pal = kind === 'rich' ? PAL.podRich : PAL.pod;
-      mats[kind] = { plain: [], hot: [] };
-      for(let s=0;s<3;s++){
-        const spent = s === 2;
-        const glow = spent ? 0x14100e : pal.glow;
-        mats[kind].plain.push(keepMat(toonMat({ color:0xffffff, vertexColors:true,
-          map: texFor[kind][s], emissive: glow, emissiveIntensity: spent ? 0.12 : 0.42,
-          rim: spent ? 0.18 : 0.62, rimColor: spent ? 0x9a948c : 0xd8fff0 })));
-        mats[kind].hot.push(keepMat(toonMat({ color:0xffffff, vertexColors:true,
-          map: texFor[kind][s], emissive: glow, emissiveIntensity: spent ? 0.2 : 1.05,
-          rim: spent ? 0.25 : 1.0, rimColor: 0xffffff })));
-      }
+    const moundMap = keepTex(paintTexture(PAL.cache.skin,
+      [{ c: PAL.cache.deep, n: 14, r: 9, a: 0.4 }], { dabs: 200 }));
+    const moundMat = keepMat(toonMat({ color:0xffffff, map: moundMap, rim:0.3 }));
+    const sealGeo = keepGeo(cacheSealGeo(P.cacheR));
+    const sealTex = cacheSealTextures(look, PAL.cache);
+    for(const t of sealTex) keepTex(t);
+    // 2 states (sealed / dug) x 2 hover states = 4 shared materials for every cache in the world —
+    // same "material swap, never a per-instance compile" rule the pod's wear stages used.
+    const sealMats = { plain: [], hot: [] };
+    for(let s=0;s<2;s++){
+      const dug = s === 1;
+      sealMats.plain.push(keepMat(toonMat({ color:0xffffff, map: sealTex[s],
+        emissive: dug ? 0x000000 : PAL.cache.glow, emissiveIntensity: dug ? 0.05 : 0.65,
+        rim: dug ? 0.15 : 0.7, rimColor: dug ? 0x3a342c : PAL.cache.glowHex })));
+      sealMats.hot.push(keepMat(toonMat({ color:0xffffff, map: sealTex[s],
+        emissive: dug ? 0x000000 : PAL.cache.glow, emissiveIntensity: dug ? 0.08 : 1.1,
+        rim: dug ? 0.2 : 1.0, rimColor: 0xffffff })));
     }
 
-    // A pod hangs in the air, so "reachable" is a question about the GROUND UNDER IT: the jump
-    // that pays it has to start from somewhere. podBotMin is already clamped against HEAD_APEX,
-    // which proves the pod is within reach of the ground below it — reachable() is what proves
-    // the player can stand on that ground in the first place.
-    const podTest = (x, z)=>{
-      const h = groundHeight(x, z);
-      if(h < P.podMinH) return false;
-      if(slopeAt(x, z) > P.podSlope) return false;
-      if(inExclusion(x, z, P.podPad)) return false;
-      if(!clearOf(x, z, P.podClear)) return false;
-      if(!bandFree(x, z, P.podClear, h + P.podBotMin - 0.3, h + P.podBotMin + P.podBotVar + 1.8)) return false;
-      return reachable(x, z);
-    };
-    // two passes: the interesting places first (ravine lips and landmark aprons, where the arc has
-    // something to read against), then a plain top-up so a world with no ravine still gets pods.
-    const want = opts.podClusters ?? P.podClusters;
-    const biased = Math.round(want * P.podBias);
-    const spots = scatter(rng, biased, 9, (x,z)=> podTest(x,z) &&
-      (nearEdge(x, z, P.podPad, P.podEdgeBand) || nearAnchor(x, z, P.podAnchorR)));
-    for(const s of scatter(rng, want - spots.length, 9, podTest)) spots.push(s);
+    // Ground-level, not airborne — no reach past the jump, just a place that has to be found.
+    const cacheTest = (x, z)=> slopeAt(x, z) < P.cacheSlope && !inExclusion(x, z, P.cachePad)
+      && clearOf(x, z, P.cacheClear) && reachable(x, z);
+    const count = P.cacheCountMin + (rng() < P.cacheExtraChance ? 1 : 0);
+    const spots = scatter(rng, count, P.cacheMinDist, cacheTest, { r0: P.cacheDMin, r1: 190 });
 
     for(const s of spots){
-      const heading = rng()*TAU, n = P.podPerMin + ((rng()*P.podPerVar)|0);
-      for(let i=0;i<n;i++){
-        const x = s.x + Math.cos(heading)*P.podStep*i, z = s.z + Math.sin(heading)*P.podStep*i;
-        if(i > 0 && !podTest(x, z)) break;           // the cluster stops where the ground stops
-        const gh = groundHeight(x, z);
-        // the roll is clamped against HEAD_APEX, not just authored under it: a pod out of reach is
-        // not a hard pod, it is a bug the player cannot tell apart from bad aim.
-        const bot = gh + Math.min(P.podBotMin + rng()*P.podBotVar, HEAD_APEX - 0.4);
-        const rich = rng() < P.podRichChance;
-        const charged = rng() < P.podChargeChance;
-        const pod = {
-          type:'pod', x, z, groundY: gh,
-          bot, restY: bot,                          // mesh origin sits at the pod's own base (anchorToBase)
-          r: P.podHitR, kind: rich ? 'rich' : 'normal',
-          mult: rich ? P.podRichMult : 1,
-          coins: Math.round((P.podCoinMin + rng()*P.podCoinVar)) * (rich ? P.podRichMult : 1),
-          charges: charged ? P.podChargeMin + ((rng()*P.podChargeVar)|0) : 1,
-          hits: 0, spent: false, stage: 0, hovered: false,
-          bump: 0, cool: 0, phase: rng()*TAU, swayPhase: rng()*TAU,
-          mesh: null, head: null, col: null,
-        };
-        pod.maxCharges = pod.charges;
-        const mesh = shared(new THREE.Mesh(geo, mats[pod.kind].plain[0]));
-        mesh.position.set(x, bot, z);
-        mesh.rotation.y = rng()*TAU;
-        mesh.castShadow = true;
-        mesh.userData.prop = pod;
-        addOutline(mesh, 0.045);
-        root.add(mesh);
-        pod.mesh = mesh;
-        pod.mats = mats[pod.kind];
-        // INVARIANT: the collider and the head-hit entry are pushed by the SAME loop that builds
-        // the mesh, so a pod is solid from above and payable from below and the three can never
-        // drift apart. bot/top are re-synced from the mesh every frame (see update) — a bobbing
-        // silhouette with a static collision volume is exactly the drift this rule forbids.
-        pod.col = pushCollider(x, z, P.podColR, bot - 0.12, bot + P.podR*1.9 + 0.12);
-        // item 11's crossing test lives in entities.js's Player.headBonk() — the ONE place that
-        // knows the crown's previous and current Y. This file only registers the plane and owns
-        // what happens when it is crossed: `bot` is the underside, `onHead` is the payout.
-        pod.head = { x, z, r: P.podHitR, bot, off: false, pod,
-          onHead: (player, game)=> payPod(pod, game) };
-        (opts.registerHeadHit || registerHeadHit)(pod.head);
-        pods.push(pod);
+      const gy = groundHeight(s.x, s.z);
+      const cache = { type:'cache', x: s.x, z: s.z, y: gy,
+        reach: P.cacheReach, coins: Math.round(P.cacheCoinMin + rng()*P.cacheCoinVar),
+        dug: false, digT: 0, hovered: false, phase: rng()*TAU,
+        moteStart: caches.length*P.cacheMotes, mats: sealMats,
+        mound: null, seal: null, light: null };
+      const mound = ownsGeo(new THREE.Mesh(cacheMoundGeo(look, P.cacheR, P.cacheH), moundMat));
+      mound.position.set(s.x, gy, s.z);
+      mound.rotation.y = rng()*TAU;
+      mound.castShadow = true; mound.receiveShadow = true;
+      mound.userData.prop = cache;
+      addOutline(mound, 0.035);
+      root.add(mound);
+      const seal = shared(new THREE.Mesh(sealGeo, sealMats.plain[0]));
+      seal.rotation.x = -Math.PI/2;
+      seal.position.set(s.x, gy + P.cacheH*0.94, s.z);
+      seal.userData.prop = cache;
+      root.add(seal);
+      // static, never added/removed after this — same rule chests and landmarks already follow,
+      // only rules out a real light on something that spawns or despawns mid-run
+      const light = new THREE.PointLight(PAL.cache.glow, 4.5, P.cacheGlowR*7);
+      light.position.set(s.x, gy + 0.55, s.z);
+      root.add(light);
+      cache.mound = mound; cache.seal = seal; cache.light = light;
+      caches.push(cache);
+    }
+
+    // orbiting sparkle motes — one shared draw call for every cache in the world, same GPU-shader
+    // trick world.js's crystal clusters use. aActive lets digCache() snuff just ONE cache's motes
+    // without touching the buffer everyone else's points live in.
+    if(caches.length){
+      const n = caches.length*P.cacheMotes;
+      const moteGeo = new THREE.BufferGeometry();
+      const motePos = new Float32Array(n*3), moteSeed = new Float32Array(n), moteActive = new Float32Array(n).fill(1);
+      let mi = 0;
+      for(const c of caches){
+        for(let k=0;k<P.cacheMotes;k++){
+          motePos[mi*3]=c.x; motePos[mi*3+1]=c.y+0.35; motePos[mi*3+2]=c.z;
+          moteSeed[mi]=look()*100;
+          mi++;
+        }
       }
+      moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos,3));
+      moteGeo.setAttribute('aSeed', new THREE.BufferAttribute(moteSeed,1));
+      const activeAttr = new THREE.BufferAttribute(moteActive,1);
+      moteGeo.setAttribute('aActive', activeAttr);
+      moteActiveAttr = activeAttr;
+      moteMat = new THREE.ShaderMaterial({
+        transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+        uniforms:{ uTime:{value:0}, uColor:{value:new THREE.Color(PAL.cache.glow)} },
+        vertexShader:`uniform float uTime; attribute float aSeed; attribute float aActive; varying float vA;
+          void main(){
+            vec3 p = position;
+            float orb = uTime*0.7+aSeed;
+            p.x += cos(orb)*(0.35+0.25*sin(aSeed)); p.z += sin(orb)*(0.35+0.25*cos(aSeed));
+            p.y += 0.25+sin(uTime*1.2+aSeed*2.0)*0.22;
+            vA = (0.4+0.4*sin(uTime*2.0+aSeed*3.0)) * aActive;
+            vec4 mv = modelViewMatrix*vec4(p,1.0);
+            gl_PointSize = 34.0/-mv.z; gl_Position = projectionMatrix*mv;
+          }`,
+        fragmentShader:`uniform vec3 uColor; varying float vA;
+          void main(){ float r=length(gl_PointCoord-0.5);
+            float a=smoothstep(0.5,0.05,r)*vA; gl_FragColor=vec4(uColor,a); if(a<0.02) discard; }`
+      });
+      keepGeo(moteGeo); keepMat(moteMat);
+      const motes = new THREE.Points(moteGeo, moteMat);
+      motes.frustumCulled = false;
+      root.add(motes);
     }
   }
 
-  // The single payout chokepoint for a pod, whichever side found the crossing.
-  function payPod(pod, game){
-    if(pod.spent || pod.cool > 0) return null;
-    pod.cool = P.podCool;
-    pod.bump = 1e-4;                            // starts the sin(bump*PI) kick arc
-    pod.hits++;
-    const coins = grantCoins(pod.coins);
-    // PODS ARE WHERE LOCKPICKS COME FROM, SO SEALED CHESTS ALWAYS STAY REACHABLE. progress.js
-    // owns the chance AND the pity streak — rolling our own here would double-count both.
-    const lockpick = progress && progress.lockpickRoll ? progress.lockpickRoll('pod') : null;
-    const y = pod.mesh.position.y;
-    pops.pop(pod.x, y + 0.5, pod.z, pod.mult > 1 ? 5 : 2);
-    if(pod.hits >= pod.charges) setPodSpent(pod);
-    else setPodStage(pod, 1);                   // cracked: still owes you something, and shows it
-    return emit({ type:'pod', pod, coins, mult: pod.mult,
-      hits: pod.hits, charges: pod.charges, chargesLeft: Math.max(0, pod.charges - pod.hits),
-      spent: pod.spent, lockpick, x: pod.x, y, z: pod.z,
-      // entities.js has ALREADY clamped and bonked the player by the time onHead runs; these are
-      // reported so the caller can size a camera kick or a sound to the same impact, not re-apply it.
-      clampY: pod.head.bot, vy: -2, game: game || null });
-  }
-  function setPodStage(pod, stage){
-    if(pod.stage === stage) return;
-    pod.stage = stage;
-    pod.mesh.material = (pod.hovered ? pod.mats.hot : pod.mats.plain)[stage];
-  }
-  function setPodSpent(pod){
-    pod.spent = true;
-    pod.head.off = true;                        // stops paying, permanently and legibly
-    setPodStage(pod, 2);
+  // The single payout chokepoint for a cache — one dig, ever, whichever caller found it.
+  function digCache(cache){
+    if(!cache || cache.dug) return null;
+    cache.dug = true;
+    cache.digT = 1e-4;                          // starts the settle-and-dim animation in update()
+    cache.seal.material = (cache.hovered ? cache.mats.hot : cache.mats.plain)[1];
+    const coins = grantCoins(cache.coins);
+    // BURIED CACHES ARE WHERE LOCKPICKS COME FROM, SO SEALED CHESTS ALWAYS STAY REACHABLE.
+    // progress.js owns the chance AND the pity streak — rolling our own here would double-count both.
+    const lockpick = progress && progress.lockpickRoll ? progress.lockpickRoll('cache') : null;
+    pops.pop(cache.x, cache.y + 0.9, cache.z, 6);
+    if(moteActiveAttr){
+      for(let k=0;k<P.cacheMotes;k++) moteActiveAttr.array[cache.moteStart+k] = 0;
+      moteActiveAttr.needsUpdate = true;
+    }
+    return emit({ type:'cache', cache, coins, lockpick,
+      x: cache.x, y: cache.y + 0.9, z: cache.z });
   }
 
   /* ================================ item 13 — vents ================================
@@ -1123,7 +981,7 @@ export function buildProps(scene, rng, world = {}, opts = {}){
   /* ================================ hover targets ================================ */
   // built ONCE. hoverTargets() is called from a raycast every frame, so it must not allocate.
   const targets = [];
-  for(const p of pods) targets.push(p.mesh);
+  for(const c of caches){ targets.push(c.mound); targets.push(c.seal); }
   for(const c of chests){ targets.push(c.base); targets.push(c.lid); }
   for(const v of vents) targets.push(v.mesh);
   for(const t of treasures) targets.push(t.mesh);
@@ -1137,7 +995,7 @@ export function buildProps(scene, rng, world = {}, opts = {}){
   }
   function applyHover(p, on){
     p.hovered = on;
-    if(p.type === 'pod') p.mesh.material = (on ? p.mats.hot : p.mats.plain)[p.stage];
+    if(p.type === 'cache') p.seal.material = (on ? p.mats.hot : p.mats.plain)[p.dug ? 1 : 0];
     else if(p.type === 'chest'){ p.base.material = p.lid.material = on ? p.kit.hot : p.kit.mat; }
     else if(p.type === 'treasure') p.mesh.material = on ? p.mats.hot : p.mats.plain;
     else if(p.type === 'vent') p.glow.material.opacity = on ? 0.62 : 0.35;
@@ -1147,29 +1005,25 @@ export function buildProps(scene, rng, world = {}, opts = {}){
   // No allocations. Indexed loops, plain-number maths, and every material change is a reference
   // swap to something already compiled.
   function update(dt, t, camera, playerPos){
-    for(let i=0;i<pods.length;i++){
-      const p = pods[i];
-      if(p.cool > 0) p.cool -= dt;
-      let y = p.restY;
-      if(p.bump > 0){
-        // the kick: sin(bump*PI) is a full arc up and back with no state beyond one scalar
-        p.bump += dt/P.podBumpT;
-        if(p.bump >= 1) p.bump = 0;
-        else y += Math.sin(p.bump*Math.PI)*P.podKick;
+    if(moteMat) moteMat.uniforms.uTime.value = t;
+    for(let i=0;i<caches.length;i++){
+      const c = caches[i];
+      if(c.dug){
+        if(c.digT < 1){
+          // settle-and-dim: the mound sinks a touch, the seal follows it down, and the light
+          // fades to a faint ember rather than snuffing out — a dug cache is still a place, just
+          // an emptied one, the same way an opened chest keeps its lid up rather than vanishing.
+          c.digT = clamp01(c.digT + dt/P.cacheDigT);
+          const k = easeOutQuint(c.digT);
+          c.mound.position.y = c.y - 0.08*k;
+          c.seal.position.y = c.y + P.cacheH*0.94 - 0.1*k;
+          c.light.intensity = 4.5*(1-k) + 0.6*k;
+        }
+        continue;
       }
-      if(!p.spent){
-        y += Math.sin(t*P.podBobRate + p.phase)*P.podBob;
-        p.mesh.position.x = p.x + Math.sin(t*P.podSwayRate + p.swayPhase)*P.podSway;
-        p.mesh.rotation.y += dt*0.35;
-        // faint pulse so a live pod is never quite still — the difference between a prop and a toy
-        p.mesh.scale.setScalar(1 + Math.sin(t*2.6 + p.phase)*0.026);
-      } else {
-        y -= 0.06;                                 // a husk sags, permanently
-      }
-      p.mesh.position.y = y;
-      // collision follows the silhouette, not the rest pose (see the build-loop invariant)
-      p.head.bot = y;
-      p.col.bot = y - 0.12; p.col.top = y + P.podR*1.9 + 0.12;
+      // a live cache is never quite still: idle glow breathing, and the rune turns slowly
+      c.light.intensity = 4.5 + Math.sin(t*1.6 + c.phase)*1.2;
+      c.seal.rotation.z += dt*0.12;
     }
     for(let i=0;i<chests.length;i++){
       const c = chests[i];
@@ -1248,6 +1102,19 @@ export function buildProps(scene, rng, world = {}, opts = {}){
   }
 
   /* ================================ queries the caller drives ================================ */
+
+  function nearestCache(px, pz, py){
+    let best = null, bd = P.cacheReach*P.cacheReach;
+    for(let i=0;i<caches.length;i++){
+      const c = caches[i];
+      if(c.dug) continue;
+      if(py !== undefined && Math.abs(py - c.y) > 3.0) continue;
+      const dx = px - c.x, dz = pz - c.z, d = dx*dx + dz*dz;
+      if(d < bd){ bd = d; best = c; }
+    }
+    return best;
+  }
+  function cachePrompt(cache){ return cache ? 'Dig up the buried cache' : ''; }
 
   function nearestChest(px, pz, py){
     let best = null, bd = P.chestReach*P.chestReach;
@@ -1333,11 +1200,9 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     let n = mesh, p = null;
     while(n && !p){ p = n.userData && n.userData.prop; n = n.parent; }
     if(!p) return '';
-    if(p.type === 'pod'){
-      if(p.spent) return '🥀 Spent husk';
-      const left = p.charges - p.hits;
-      const rich = p.mult > 1 ? ' ×10 value' : '';
-      return `🌸 Flower pod${rich} — ×${left}, jump up into it`;
+    if(p.type === 'cache'){
+      if(p.dug) return '🕳️ Emptied dig site';
+      return '⛏️ Buried cache — dig it up';
     }
     if(p.type === 'chest') return promptFor(p) || '🧰 Sealed chest';
     if(p.type === 'vent') return ventPrompt(p);
@@ -1354,7 +1219,6 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     // retire, never splice: surfaceAt() walks COLLIDERS by index for every entity every frame,
     // and world.js truncates the array in place on its own teardown.
     for(const c of colliders) c.off = true;
-    for(const p of pods) p.head.off = true;
     for(const b of own.misc) if(b.dispose) b.dispose();
     if(popsOwned) pops.dispose();
     root.traverse(n=>{                       // only what a mesh actually owns; see markOwnership
@@ -1368,18 +1232,17 @@ export function buildProps(scene, rng, world = {}, opts = {}){
     for(const t of own.tex) t.dispose();
     own.geo.length = own.mat.length = own.tex.length = own.misc.length = 0;
     if(root.parent) root.parent.remove(root);
-    pods.length = chests.length = vents.length = treasures.length = 0;
+    caches.length = chests.length = vents.length = treasures.length = 0;
     targets.length = 0; colliders.length = 0; events.length = 0;
   }
 
   return {
-    root, pods, chests, vents, treasures, colliders, events,
+    root, caches, chests, vents, treasures, colliders, events,
     treasureSource, anchors,
     update, nearestChest, promptFor, infoFor, pry, ventUnderfoot, travel, ventPrompt,
-    collectTreasure, payPod,
+    collectTreasure, nearestCache, cachePrompt, digCache,
     hoverTargets: ()=> targets,
     labelFor, propOf, setHovered,
-    headEntries: ()=> pods.map(p=>p.head),
     dispose,
   };
 }

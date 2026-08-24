@@ -36,7 +36,18 @@ export const ARMOR = [
     lifesteal:0.08, dropBonus:0.15, magnet:0.25, desc:'Cold, and always facing the deepest Bloom.' },
   { id:'heartofgrove', slot:'charm', name:'Heart of the Grove', icon:'💗', rarity:4,
     lifesteal:0.12, dropBonus:0.20, magnet:0.35, desc:'Still beats, faintly, in your hand.' },
+  // ---- boots: move speed + dash cooldown ----
+  { id:'worntreads', slot:'boots', name:'Worn Treads', icon:'🥾', rarity:0,
+    speedBonus:0.04, desc:'Scuffed leather. Better traction than bare feet.' },
+  { id:'springboots', slot:'boots', name:'Spring-Step Boots', icon:'👢', rarity:1,
+    speedBonus:0.07, dashCdReduce:0.08, desc:'A little bounce in every stride.' },
+  { id:'swiftgreaves', slot:'boots', name:'Swift Greaves', icon:'🥾', rarity:2,
+    speedBonus:0.10, dashCdReduce:0.15, desc:"Light enough to forget you're wearing them." },
+  { id:'stormtreads', slot:'boots', name:'Storm Treads', icon:'⚡', rarity:3,
+    speedBonus:0.14, dashCdReduce:0.22, magnet:0.15, desc:'Static crackles off the soles at a dead sprint.' },
+  { id:'windwalkers', slot:'boots', name:'Windwalker Boots', icon:'🌪️', rarity:4,
+    speedBonus:0.20, dashCdReduce:0.32, magnet:0.25, desc:'Barely touch the ground anymore.' },
 ];
 export const ARMOR_BY_ID = Object.fromEntries(ARMOR.map(a => [a.id, a]));
-export const ARMOR_SLOTS = ['helmet', 'ring', 'charm'];
-export const SLOT_ICON = { helmet:'🪖', ring:'💍', charm:'🔮' };
+export const ARMOR_SLOTS = ['helmet', 'ring', 'charm', 'boots'];
+export const SLOT_ICON = { helmet:'🪖', ring:'💍', charm:'🔮', boots:'🥾' };

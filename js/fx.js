@@ -101,6 +101,15 @@ export function paintTexture(base, spots, opts={}){
       g.fillStyle=sp.c; g.globalAlpha=sp.a??0.9;
       g.beginPath(); g.ellipse(x,y,r,r*0.8,Math.random()*3,0,7); g.fill();
     }} g.globalAlpha=1; }
+  // optional concentric accent rings (bullseye banding) — reserved for higher-rarity/boss
+  // caps so their pattern reads as more ornate than the plain freckled dabbing everyone gets
+  if(opts.rings){ for(const rg of opts.rings){
+    const cx=s/2, cy=s*0.46;
+    for(let i=0;i<rg.count;i++){
+      const rad = (i+1)/(rg.count+0.5) * s*0.47 * (0.9+Math.random()*0.15);
+      g.strokeStyle = rg.c; g.globalAlpha = rg.a ?? 0.5; g.lineWidth = rg.width ?? 3;
+      g.beginPath(); g.ellipse(cx,cy,rad,rad*0.82,0,0,Math.PI*2); g.stroke();
+    }} g.globalAlpha=1; }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
