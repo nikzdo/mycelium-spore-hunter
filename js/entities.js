@@ -4,7 +4,7 @@ import { toonMat, addOutline, paintTexture, makeBlobShadow, glowTexture } from '
 import { groundHeight, surfaceAt, slopeAt, inExclusion, fenBogAt } from './world.js';
 import { WEAPONS_BY_ID } from './weapons.js';
 import { POTIONS_BY_ID } from './potions.js';
-import { buildSwordVariant, buildBow, buildSpear } from './swordVisuals.js';
+import { buildSwordVariant, buildBow, buildSpear, buildSporePod } from './swordVisuals.js';
 import { ARMOR_BY_ID, ARMOR_SLOTS } from './armor.js';
 
 /* ---------------- movement constants (items 02, 03, 04) ----------------
@@ -61,6 +61,101 @@ export const RARITIES = [
   { name:'Legendary', color:0x9a3ae0, glow:0xb46bff, hp:330, dmg:35, speed:5.3, scale:1.95, score:20, weight:1.6 },
   { name:'Mythic',    color:0xff5ad0, glow:0xffe066, hp:600, dmg:50, speed:6.0, scale:2.35, score:50, weight:0.35, rainbow:true },
 ];
+/* Colour variants, one hue-family per rarity. Rarity is still read entirely by SCALE and glow
+   INTENSITY (the emissiveIntensity ramp a few lines down, unchanged) — colour was never the tier
+   signal, so giving each tier a small family of hues to draw from adds visible species variety
+   without making rarity any harder to read at a glance. Generated, not hand-picked: every sibling
+   keeps the tier's own saturation and lightness and only rotates hue, which is what keeps a family
+   cohesive instead of five arbitrary swatches that happen to share a rarity. Mythic is excluded —
+   it already cycles every hue live (see the rainbow branch in Mushroom.update() below), so a
+   static variant would just be a hue it passes through anyway. */
+function hueVariant(hex, dh){
+  const c = new THREE.Color(hex);
+  const hsl = { h:0, s:0, l:0 };
+  c.getHSL(hsl);
+  c.setHSL((hsl.h + dh + 1) % 1, hsl.s, hsl.l);
+  return c.getHex();
+}
+for(const r of RARITIES){
+  if(r.rainbow) continue;
+  r.colorVariants = [
+    { color:r.color, glow:r.glow },                                   // the original — always first
+    { color:hueVariant(r.color, 0.12), glow:hueVariant(r.glow, 0.12) },
+    { color:hueVariant(r.color, -0.12), glow:hueVariant(r.glow, -0.12) },
+  ];
+}
+
+/* "Wild Fungal Forms": rarity is read by SHAPE now, not just colour/scale. Each profile is a
+   generatrix for THREE.LatheGeometry — [radiusFraction, heightFraction] pairs from the top pole
+   (r=0) down to the rim, deliberately left OPEN at the bottom (the `under` disc mesh already caps
+   the underside, gilled or flat per `gills`). `warp` layers are the same vertex-push-by-noise
+   technique the butterfly wings and the tree canopy already use elsewhere in this codebase, kept
+   consistent rather than inventing a new kind of irregularity. `extra:'twin'` (Legendary only)
+   grows a second, smaller lathe cap as a CHILD of the first, sharing its material by reference —
+   see buildCapGeometry's caller for why that sharing matters. */
+export const CAP_PROFILES = [
+  // Common — the ORIGINAL sphere-clip silhouette, reproduced exactly: the most common enemy in
+  // the game should look unchanged, the same "understated baseline" every tier system this
+  // session has used (COMPANION_TIERS, CHOIR_TYPES all keep their tier 0 plain on purpose).
+  { pts:[[0,1.0],[0.35,0.97],[0.62,0.86],[0.84,0.62],[0.98,0.30],[1.0,0.0],[0.94,-0.16]],
+    posY:1.15, scale:[1.15,0.95,1.15], warp:[], gills:false, extra:null },
+  // Uncommon — a tall, flared bell with a curled-under lip, and gills now visible underneath.
+  { pts:[[0,1.25],[0.22,1.22],[0.42,1.1],[0.62,0.86],[0.84,0.5],[1.05,0.12],[1.18,-0.1],[1.08,-0.22]],
+    posY:1.1, scale:[1,1,1], warp:[], gills:true, extra:null },
+  // Rare — a flat, wide shelf fungus: low where Uncommon is tall, so the two never read as the
+  // same base shape with a size bump.
+  { pts:[[0,0.55],[0.5,0.52],[1.0,0.42],[1.45,0.22],[1.7,-0.02],[1.6,-0.14]],
+    posY:0.95, scale:[1,1,1], warp:[], gills:true, extra:null },
+  // Epic — the Uncommon bell family, pushed shaggy and spiky by one moderate warp layer.
+  { pts:[[0,1.3],[0.22,1.26],[0.42,1.14],[0.64,0.88],[0.86,0.52],[1.05,0.14],[1.15,-0.08]],
+    posY:1.1, scale:[1,1,1], warp:[{f:3,amp:0.18,ph:0}], gills:true, extra:null },
+  // Legendary — two caps fused into one colony, the biggest single silhouette change in the set.
+  { pts:[[0,1.2],[0.24,1.17],[0.44,1.05],[0.64,0.8],[0.86,0.46],[1.05,0.1],[1.12,-0.1]],
+    posY:1.1, scale:[1,1,1], warp:[], gills:true, extra:'twin' },
+  // Mythic — a coral-like bumpy dome: a big slow wave plus a finer high-frequency ripple on top
+  // of it, rather than separate spike meshes (which would need their own per-frame upkeep to
+  // stay in sync with the rainbow hue-cycle this tier already does on the shared cap material).
+  { pts:[[0,1.15],[0.3,1.12],[0.55,0.98],[0.78,0.68],[0.96,0.32],[1.05,0.0],[0.98,-0.16]],
+    posY:1.15, scale:[1.1,1,1.1], warp:[{f:4,amp:0.22,ph:0},{f:9,amp:0.08,ph:1.7}], gills:true, extra:null },
+];
+function buildCapGeometry(profile, s){
+  const pts = profile.pts.map(([r,y]) => new THREE.Vector2(r*s, y*s));
+  const geo = new THREE.LatheGeometry(pts, 12); // 12 segments: matches the old sphere's own radial density
+  if(profile.warp && profile.warp.length){
+    const pos = geo.attributes.position;
+    for(let i=0;i<pos.count;i++){
+      const x=pos.getX(i), y=pos.getY(i), z=pos.getZ(i);
+      let push = 1;
+      for(const w of profile.warp) push += Math.sin(x*w.f+y*w.f*0.7+w.ph)*Math.cos(z*w.f-y*w.f*0.5+w.ph)*w.amp;
+      pos.setXYZ(i, x*push, y, z*push);
+    }
+    geo.computeVertexNormals();
+  }
+  return geo;
+}
+let gillTex = null;
+// mushroom gills, viewed from below: alternating light/dark spokes radiating from the stem —
+// cached once and shared, the same reason stemTex below is cached, since a canvas repaint per
+// mushroom would hitch the frame it spawns on.
+function gillTexture(){
+  if(gillTex) return gillTex;
+  const s = 256;
+  const c = document.createElement('canvas'); c.width = c.height = s;
+  const g = c.getContext('2d');
+  g.fillStyle = '#2c1f18'; g.fillRect(0,0,s,s);
+  const cx = s/2, cy = s/2, n = 28;
+  for(let i=0;i<n;i++){
+    const a = (i/n)*Math.PI*2;
+    g.strokeStyle = i%2===0 ? '#4a3524' : '#1c120c';
+    g.lineWidth = 3+Math.random()*2; g.globalAlpha = 0.8;
+    g.beginPath(); g.moveTo(cx,cy); g.lineTo(cx+Math.cos(a)*s*0.5, cy+Math.sin(a)*s*0.5); g.stroke();
+  }
+  g.globalAlpha = 1;
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  gillTex = t;
+  return t;
+}
 
 const capTexCache = {};
 // glow defaults to color itself (a same-hue accent) when a caller doesn't have a rarity glow
@@ -89,6 +184,7 @@ function capTexture(color, rarityIdx=0, glow=null){
   return capTexCache[key];
 }
 let stemTex = null;
+let mossTex = null; // Spore Druid's cloak — see Player's constructor
 // shared temps (no per-frame allocations in hot paths)
 const _fwd = new THREE.Vector3(), _tip = new THREE.Vector3(), _to = new THREE.Vector3();
 // Mushroom.update's player-delta. Its OWN scratch, deliberately not _to: _to belongs to
@@ -105,11 +201,24 @@ const ELEM_BURN_TICK = 0.4;
 // seconds between terrain-steepness rechecks per creature; see the note in Mushroom.update
 const SLOPE_RECHECK = 0.125;
 const BURN_FROM = new THREE.Vector3();   // reused: burn ticks must not allocate
+const CHOIR_RING_PERIOD = 1.4;  // seconds per sound-ring loop — see Mushroom.update()/addChoirRing()
+const CHOIR_EVASIVE_DMG_MULT = 0.5;  // Hushed Chant: incoming damage halved while phased
+const CHOIR_HEAL_PCT = 0.05, CHOIR_HEAL_PERIOD = 3.5; // Mending Song: heal pulse size + cadence
+const CHOIR_EVASIVE_ON = 2.2, CHOIR_EVASIVE_OFF = 4.2; // Hushed Chant: phase window + the gap between them
+const WINTER_STOP_POW = 0.12;   // winter's own permanent chill-slick — pow() closer to 0 decays
+                                 // velocity faster, so this is deliberately milder than rain's 0.35
 
 export class Mushroom {
   constructor(scene, rarityIdx, pos, zoneMult){
-    const R = RARITIES[rarityIdx];
-    this.rarity = rarityIdx; this.R = R;
+    this.rarity = rarityIdx;
+    // colour variant, stats untouched: RARITIES[rarityIdx].colorVariants (built at module load,
+    // see above) always lists the tier's own hp/dmg/speed/etc — the spread below just swaps which
+    // hue this particular mushroom draws its cap/glow from. Bosses override this.R again in their
+    // own constructors right after super(), so this pick is simply discarded for them.
+    const base = RARITIES[rarityIdx];
+    const variants = base.colorVariants;
+    const R = variants ? { ...base, ...variants[(Math.random()*variants.length)|0] } : base;
+    this.R = R;
     this.maxHp = R.hp * zoneMult; this.hp = this.maxHp;
     this.dmg = R.dmg * 0.85 * (1 + (zoneMult-1)*0.7);
     this.speed = R.speed * (1 + (zoneMult-1)*0.15);
@@ -138,6 +247,7 @@ export class Mushroom {
     if(!stemTex) stemTex = paintTexture('#f2e4c8', [{c:'#d9c8a8',n:8,r:6,a:0.5}], {dabs:200});
     const g = this.group = new THREE.Group();
     const s = R.scale;
+    this._capS = s;
     // stem
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.42*s, 0.55*s, 1.3*s, 8), toonMat({color:0xf2e4c8, map:stemTex, rim:0.35}));
     stem.position.y = 0.65*s; addOutline(stem, 0.07);
@@ -148,14 +258,16 @@ export class Mushroom {
        Set here rather than in shadowize() because the reason is about this mesh's ROLE, and only
        the file that knows the mushroom is built from a cap-over-stem can say so. */
     stem.userData.noReceive = true;
-    // cap
-    const cap = new THREE.Mesh(new THREE.SphereGeometry(1.0*s, 12, 9, 0, Math.PI*2, 0, Math.PI*0.55),
+    // cap — geometry/position/scale/outline/underside all come from setCapProfile() below, the
+    // ONE door both this constructor and Boss/GluttonBoss (forcing the plain profile back after
+    // super()) go through, so the two can never build the shape two different ways.
+    const cap = new THREE.Mesh(new THREE.BufferGeometry(),
       toonMat({color:R.color, map:capTexture(R.color, rarityIdx, R.glow), rim:0.55, rimColor:'#'+new THREE.Color(R.glow).getHexString()}));
-    cap.position.y = 1.15*s; cap.scale.set(1.15, 0.95, 1.15); addOutline(cap, 0.055);
-    // dark cap underside
-    const under = new THREE.Mesh(new THREE.CircleGeometry(1.05*s, 12),
-      new THREE.MeshBasicMaterial({ color:0x2c1f18 }));
-    under.position.y = 1.17*s; under.rotation.x = Math.PI/2; g.add(under);
+    g.add(cap);
+    const under = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color:0x2c1f18 }));
+    under.rotation.x = Math.PI/2; g.add(under);
+    this.cap = cap; this.under = under;
+    this.setCapProfile(rarityIdx);
     // eyes (angry)
     const eyeMat = new THREE.MeshBasicMaterial({color:0xffffff});
     const pupMat = new THREE.MeshBasicMaterial({color:0x1c1410});
@@ -203,18 +315,68 @@ export class Mushroom {
           opacity:0.34+rarityIdx*0.04, blending:THREE.AdditiveBlending, depthWrite:false,
           side:THREE.DoubleSide, fog:false }));
       ring.rotation.x = -Math.PI/2; ring.position.y = 0.08; g.add(ring); this.groundRing = ring;
+      // floating halo — a THIRD, airborne ring above the cap that slowly spins and wobbles, the
+      // "this one is special" read from any angle or distance, not just from directly above like
+      // the ground pool. Positioned off the cap profile's own top point so it clears every shape
+      // (a flat Rare shelf and a tall Legendary twin-cap need very different clearance).
+      const profTop = CAP_PROFILES[rarityIdx].posY*s + CAP_PROFILES[rarityIdx].pts[0][1]*CAP_PROFILES[rarityIdx].scale[1]*s;
+      const halo = new THREE.Mesh(new THREE.RingGeometry(0.55*s, 0.68*s, 20),
+        new THREE.MeshBasicMaterial({ color:R.glow, map:glowTexture(), transparent:true,
+          opacity:0.4+rarityIdx*0.05, blending:THREE.AdditiveBlending, depthWrite:false,
+          side:THREE.DoubleSide, fog:false }));
+      halo.position.y = profTop + 0.5*s; g.add(halo); this.halo = halo;
     }
     /* the hit flash WRITES cap.material.emissive, so the rarity glow has to be remembered
        somewhere or the first hit erases it permanently — flash now adds on top of this. */
     this.emissBase = cap.material.emissive.clone();
     this.blob = makeBlobShadow(2.4*s); this.blob.position.y = 0.05; g.add(this.blob);
     this.body = new THREE.Group(); this.body.add(stem, cap);
-    this.cap = cap; this.stem = stem;
+    this.stem = stem;
     g.add(this.body);
     g.position.copy(pos);
     g.position.y = groundHeight(pos.x, pos.z);
     scene.add(g);
     this.baseY = g.position.y;
+  }
+  /* The ONE door that builds (or rebuilds) the cap's shape — geometry, position, scale, its ink
+     outline, the underside disc, and the Legendary "twin cap" child. Called once from the
+     constructor above at whatever rarityIdx it was built with, and called AGAIN by Boss/
+     GluttonBoss right after super() to force the plain dome back (idx 0) — bosses already carry
+     their own visual identity (giant scale, belly, trait tint) and a twin-fused-cap or
+     coral-bumped silhouette stretched to boss scale, especially GluttonBoss's non-uniform
+     (4.6, 2.5, 4.6), reads as broken rather than "a bigger mushroom". Deliberately leaves
+     `cap.material` untouched: that still carries rarityIdx's own texture ornateness and emissive
+     glow, which bosses WANT to keep — only the shape resets, not the richness. */
+  setCapProfile(idx){
+    const profile = CAP_PROFILES[Math.max(0, Math.min(CAP_PROFILES.length-1, idx))];
+    const s = this._capS;
+    if(this.capOutline){ this.cap.remove(this.capOutline); this.capOutline = null; }
+    if(this.cap2){ this.cap.remove(this.cap2); this.cap2 = null; }
+    this.cap.geometry = buildCapGeometry(profile, s);
+    this.cap.position.y = profile.posY*s;
+    this.cap.scale.set(profile.scale[0], profile.scale[1], profile.scale[2]);
+    this.capOutline = addOutline(this.cap, 0.055);
+    // the underside disc's own size/height follow the profile's own rim point, so a flat wide
+    // Rare shelf gets a flat wide gill disc and a tall narrow Uncommon bell gets a narrow one,
+    // instead of every shape sharing one disc sized for the original sphere.
+    const rimPt = profile.pts[profile.pts.length-1];
+    this.under.geometry = new THREE.CircleGeometry(Math.max(0.3, rimPt[0])*s*profile.scale[0]*1.08, 12);
+    this.under.position.y = profile.posY*s + rimPt[1]*profile.scale[1]*s + 0.02*s;
+    this.under.material = profile.gills
+      ? new THREE.MeshBasicMaterial({ map: gillTexture(), color:0xffffff })
+      : new THREE.MeshBasicMaterial({ color:0x2c1f18 });
+    if(profile.extra === 'twin'){
+      // a second, smaller cap grown from the same colony — shares cap.material BY REFERENCE
+      // (not a clone), so hit-flash and elemental tint, which only ever write
+      // this.cap.material.emissive, paint both caps at once with no extra per-frame code.
+      const geo2 = buildCapGeometry(profile, s*0.58);
+      const cap2 = new THREE.Mesh(geo2, this.cap.material);
+      cap2.position.set(0.5*s, -0.22*s, 0.1*s);
+      cap2.rotation.set(0, 0.4, 0.3);
+      addOutline(cap2, 0.045);
+      this.cap.add(cap2);
+      this.cap2 = cap2;
+    }
   }
   /* THE ONE DOOR for every elemental effect, whatever applied it. Effects REFRESH rather than
      stack — max(), not += — and that is a balance decision, not laziness: a held cone re-touches
@@ -251,6 +413,10 @@ export class Mushroom {
   }
   hit(dmg, from, game, kbMult=1){
     if(this.dead) return;
+    // Hushed Chant member mid-phase: "hard to hit what you can't quite see" — reduced BEFORE the
+    // reflect calc below, so Thorned (if this member somehow also carried an affix) reflects what
+    // actually landed, not the pre-phase number.
+    if(this.evasive) dmg *= CHOIR_EVASIVE_DMG_MULT;
     // Thorned reflects before the damage lands, not after: a killing blow still owes its retaliation.
     // player.hurt() already gates on iframes, so a 3-hit combo only actually costs one reflect tick.
     if(this.affix && this.affix.id === 'thorned' && game.player) game.player.hurt(dmg * this.affix.reflectPct, this.group.position, game);
@@ -269,6 +435,23 @@ export class Mushroom {
         if(!m.dead && m.packLeader === this){ m.dmg /= m._packDmgMult; m.speed /= m._packSpeedMult; m.packLeader = null; }
       }
     }
+    // choir leader falls: SAME pattern as the pack revert above, same reason — a buff the leader
+    // was granting cannot survive the leader. Killing the lead singer is the tactical read a choir
+    // is FOR, so "silence the group" has to be instant, not a lingering echo of a buff. Which
+    // field actually needs reverting depends on the song: War Chant stored a damage multiplier,
+    // Mending Song stored nothing (its heal pulse was driven entirely by the leader's own update,
+    // so it already stops the instant the leader does), Hushed Chant left a live `evasive` flag
+    // that nothing else would ever turn back off — leaving it on would be the exact class of bug
+    // a permanent-tint leader already had before this feature (see the main.js spawn* fixes).
+    if(this.choirMembers){
+      for(const m of this.choirMembers){
+        if(!m.dead && m.choirLeader === this){
+          if(this.choirType === 0) m.dmg /= m._choirDmgMult;
+          else if(this.choirType === 2 && m.evasive){ m.evasive = false; if(m.evasionSprite) m.evasionSprite.material.opacity = 0; }
+          m.choirLeader = null;
+        }
+      }
+    }
     const p = this.group.position.clone(); p.y += 1;
     const c = new THREE.Color(this.R.glow);
     // counts halved (26+14 -> 14+8): fx.js caps sprite pixel size, and the cap only stays loose
@@ -278,6 +461,37 @@ export class Mushroom {
     game.audio.pop(this.rarity);
     game.onKill(this);
     this.scene.remove(this.group);
+  }
+  // Singing group "choir" leader tell — built lazily, only for the one mushroom in a run that
+  // main.js's spawnChoir() actually promotes to lead singer, so this costs nothing for the
+  // overwhelming majority of mushrooms that never sing. A flat additive ring rather than reusing
+  // `aura`/`groundRing` on purpose: packs and choirs both draw from common/uncommon specifically
+  // to stay clear of the rare+ affix system (see spawnEnemy in main.js), so neither rarity tier
+  // has those built in, and a choir leader needs its OWN silhouette anyway — an expanding ring
+  // reads as "singing", a pulsing dot (what groundRing already does) would just read as a pack
+  // leader with a different tint.
+  addChoirRing(color=0x7ad8ff){
+    if(this.choirRing) return;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.6, 0.78, 20),
+      new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.5,
+        blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide, fog:false }));
+    ring.rotation.x = -Math.PI/2;
+    ring.position.y = 0.1;
+    this.group.add(ring);
+    this.choirRing = ring;
+    this.isChoirLeader = true;
+  }
+  // Hushed Chant member tell: a lazily-built billboard sprite, hidden (opacity 0) until the
+  // leader's phase window opens — same billboarded-sprite-not-a-shell technique as a rarity aura,
+  // kept as its OWN sprite rather than piggybacking on the cap's emissive so that the leader's
+  // own tint/flash logic (see spawnChoir/spawnPack's emissBase fix) never has to know this exists.
+  addEvasionSprite(){
+    if(this.evasionSprite) return;
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map:glowTexture(), color:0xb47aff,
+      transparent:true, opacity:0, blending:THREE.AdditiveBlending, depthWrite:false, fog:false }));
+    spr.scale.setScalar(1.1); spr.position.y = 0.55;
+    this.group.add(spr);
+    this.evasionSprite = spr;
   }
   /* item 57 — ONE gate every enemy step passes through: chase, lunge, wander and knockback all
      call it, so a creature can never end up somewhere its own wander would have refused.
@@ -477,14 +691,67 @@ export class Mushroom {
     const squash = 1 + Math.sin(this.t*6)*0.14*(this.state==='chase'?1.5:0.5);
     this.body.scale.set(1/Math.sqrt(squash), squash, 1/Math.sqrt(squash));
     for(let i=0;i<2;i++) this.arms[i].rotation.z = Math.sin(this.t*6+i*3)*0.4;
-    // rarity aura: pulsing ground ring + rising particles
+    // rarity aura: pulsing ground ring + rising particles, both escalating with rarity so a
+    // Mythic visibly throws off more motes than a Rare rather than the same fixed sprinkle on
+    // every rare+ tier regardless of how far above Rare it actually is
     if(this.groundRing){
       this.groundRing.material.opacity = 0.4 + Math.sin(this.t*3)*0.2;
       this.groundRing.scale.setScalar(1 + Math.sin(this.t*3)*0.1);
-      if(Math.random() < dt*4){
+      const moteRate = 4 + (this.rarity-2)*2.5; // 4 at Rare, climbing to 11.5 at Mythic
+      if(Math.random() < dt*moteRate){
         const c = new THREE.Color(this.R.glow);
+        const big = this.rarity >= 4; // Legendary+: a visibly bigger, brighter mote, not just more of the same
         game.particles.spawn(g.position.x+(Math.random()-0.5)*1.5, g.position.y+0.3, g.position.z+(Math.random()-0.5)*1.5,
-          {r:c.r, g:c.g, b:c.b, spread:0.4, size:6, life:1.1, vy:1.6, drag:0.99});
+          {r:c.r, g:c.g, b:c.b, spread:0.4, size:big?8:6, life:big?1.5:1.1, vy:big?2.1:1.6, drag:0.99});
+      }
+    }
+    // floating halo: a slow spin plus a gentle wobble off the flat plane, so it reads as an
+    // airborne ring in 3D rather than a flat decal that happens to face the camera
+    if(this.halo){
+      this.halo.rotation.z += dt*(0.5+this.rarity*0.08);
+      this.halo.rotation.x = Math.PI/2 + Math.sin(this.t*1.3)*0.22;
+      this.halo.material.opacity = (0.4+this.rarity*0.05) + Math.sin(this.t*2.2)*0.1;
+    }
+    // choir leader's "singing" tell: an expanding sound-ring that loops outward and fades, then
+    // restarts — a silhouette a pack leader's static scale+tint never makes, which matters because
+    // both draw from the same common/uncommon band (see main.js spawnChoir) and have to read as
+    // different THREATS at a glance, not just different colours.
+    if(this.choirRing){
+      const cyc = (this.t % CHOIR_RING_PERIOD) / CHOIR_RING_PERIOD;
+      this.choirRing.scale.setScalar(0.4 + cyc*2.6);
+      this.choirRing.material.opacity = (1-cyc)*0.6;
+    }
+    // choir leader's SONG — only the leader has `choirMembers`, so this only ever runs once per
+    // choir, not once per member. War Chant's buff is a static multiplier applied once at spawn
+    // (main.js spawnChoir) and reverted once in die() above; Mending and Hushed are the two songs
+    // that need something done every frame FROM the leader, which is why they live here instead.
+    if(this.choirMembers){
+      if(this.choirType === 1){
+        // Mending Song: a periodic heal pulse to every living member — no per-member state to
+        // leave behind, so unlike Hushed below it needs no cleanup in die(): the pulse simply
+        // stops the instant this leader's own update() stops running.
+        this.healPulseCd = (this.healPulseCd ?? CHOIR_HEAL_PERIOD) - dt;
+        if(this.healPulseCd <= 0){
+          this.healPulseCd = CHOIR_HEAL_PERIOD;
+          for(const m of this.choirMembers){
+            if(m.dead) continue;
+            m.hp = Math.min(m.maxHp, m.hp + m.maxHp*CHOIR_HEAL_PCT);
+            game.particles.burst(m.group.position.clone().setY(1), 6, {r:0.55,g:1,b:0.6, spread:1.2, size:6, life:0.5});
+          }
+        }
+      } else if(this.choirType === 2){
+        // Hushed Chant: toggles an evasive phase window on every living member in lockstep —
+        // reverted explicitly in die() above, since nothing else would ever turn `evasive` back off.
+        this.evasiveCd = (this.evasiveCd ?? CHOIR_EVASIVE_OFF) - dt;
+        if(this.evasiveCd <= 0){
+          this.evasiveOn = !this.evasiveOn;
+          this.evasiveCd = this.evasiveOn ? CHOIR_EVASIVE_ON : CHOIR_EVASIVE_OFF;
+        }
+        for(const m of this.choirMembers){
+          if(m.dead) continue;
+          m.evasive = this.evasiveOn;
+          if(m.evasionSprite) m.evasionSprite.material.opacity = this.evasiveOn ? 0.55 : 0;
+        }
       }
     }
 
@@ -504,6 +771,7 @@ export class Mushroom {
       this.cap.material.emissive.copy(this._rc);
       if(this.aura) this.aura.material.color.copy(this._rc);
       if(this.groundRing) this.groundRing.material.color.copy(this._rc);
+      if(this.halo) this.halo.material.color.copy(this._rc);
     }
     /* Elemental tint LAST, so it beats both the hit flash and the mythic hue cycle above — both of
        those write cap.material.emissive every frame, so anything written before them is erased.
@@ -529,6 +797,9 @@ export class Boss extends Mushroom {
   // mult: seeded {hp,dmg,speed} multipliers so even the same trait doesn't feel identical twice.
   constructor(scene, pos, trait=null, mult={hp:1,dmg:1,speed:1}){
     super(scene, 4, pos, 1);
+    // force the plain dome back — see setCapProfile's own comment for why a boss keeps none of
+    // the Legendary "twin cap" shape that rarityIdx 4 would otherwise have built
+    this.setCapProfile(0);
     this.trait = trait;
     const ascendant = trait && trait.id === 'ascendant';
     this.R = { ...RARITIES[4], name: ascendant ? 'The Bloom Ascendant' : 'Elder Myconid',
@@ -550,6 +821,7 @@ export class Boss extends Mushroom {
     if(this.aura){ this.aura.material.color.set(this.R.glow); this.aura.material.opacity = 0.34;
       this.aura.scale.setScalar(9.5); this.aura.position.y = 2.2; }
     if(this.groundRing) this.groundRing.material.color.set(this.R.glow);
+    if(this.halo) this.halo.material.color.set(this.R.glow);
   }
   update(dt, game){
     super.update(dt, game);
@@ -561,23 +833,29 @@ export class Boss extends Mushroom {
     // deliberately every elder mechanic at once, not a new bespoke one.
     const isTrait = id => this.trait && (this.trait.id === id || this.trait.id === 'ascendant');
 
-    if(isTrait('regen') && this._sinceHitT > 3 && this.hp < this.maxHp){
-      this.hp = Math.min(this.maxHp, this.hp + this.maxHp*0.025*dt);
+    // blooming (Spring surge) rides regen's own branch: shorter unharmed-window, bigger heal rate
+    if((isTrait('regen')||isTrait('blooming')) && this._sinceHitT > (isTrait('blooming')?1.5:3) && this.hp < this.maxHp){
+      this.hp = Math.min(this.maxHp, this.hp + this.maxHp*(isTrait('blooming')?0.045:0.025)*dt);
     }
     // always-on enrage past the halfway mark, on top of (and stacking with) wrathful's own ramp —
-    // every Elder fight gets meaner in its second half, not just wrathful-rolled ones
+    // every Elder fight gets meaner in its second half, not just wrathful-rolled ones. withering
+    // (Autumn surge) rides this same branch, just with a bigger multiplier.
     const baseEnrage = missing > 0.5 ? (missing - 0.5) * 0.7 : 0;
-    const wrathBonus = isTrait('wrathful') ? missing * 0.4 : 0;
+    const wrathBonus = isTrait('wrathful') ? missing*0.4 : isTrait('withering') ? missing*0.65 : 0;
     this.dmg = this.baseDmg * (1 + baseEnrage + wrathBonus);
     const cdRate = 1 + baseEnrage; // cooldowns run faster too, not just harder-hitting
 
     this.ringCd -= dt * cdRate; this.summonCd -= dt * cdRate;
     if(this.ringCd <= 0){
-      const enrage = isTrait('wrathful') ? missing*4 : missing*3;
-      this.ringCd = 5 - Math.min(isTrait('wrathful') ? 4 : 2.5, enrage);
+      // frostbound (Winter surge) rides the SAME fast-ring path wrathful uses, plus gets its own
+      // echo (distinct radius/damage from mirror's) so it isn't just a mirror reskin.
+      const fastRing = isTrait('wrathful') || isTrait('frostbound');
+      const enrage = fastRing ? missing*4 : missing*3;
+      this.ringCd = 5 - Math.min(fastRing ? 4 : 2.5, enrage);
       game.spawnRing(this.group.position.clone(), this.dmg*0.9, 0xb46bff);
       game.spawnRing(this.group.position.clone(), this.dmg*0.7, 0xffb02e, 2.2);
       if(isTrait('mirror')) game.spawnRing(this.group.position.clone(), this.dmg*0.6, this.trait.glow, 4.4);
+      else if(isTrait('frostbound')) game.spawnRing(this.group.position.clone(), this.dmg*0.75, this.trait.glow, 3.6);
       game.audio.roar(0.5);
       game.shake(0.5);
     }
@@ -598,10 +876,12 @@ export class Boss extends Mushroom {
     // just makes it hit harder and come around more often, instead of being the only way to see it
     this.fireballCd -= dt * cdRate;
     if(this.fireballCd <= 0 && game.player){
-      this.fireballCd = (isTrait('pyroclast') ? 5 : 7) + Math.random()*2;
-      const fbColor = isTrait('pyroclast') ? this.trait.glow : 0xb46bff;
+      // scorching (Summer surge) rides pyroclast's own path, hotter and faster than pyroclast alone
+      const hot = isTrait('pyroclast') || isTrait('scorching');
+      this.fireballCd = (isTrait('scorching') ? 4 : hot ? 5 : 7) + Math.random()*2;
+      const fbColor = hot ? this.trait.glow : 0xb46bff;
       game.spawnFireball(this.group.position.clone().setY(this.group.position.y+1.4*this.R.scale),
-        game.player.group.position.clone(), this.dmg*(isTrait('pyroclast') ? 0.95 : 0.75), fbColor);
+        game.player.group.position.clone(), this.dmg*(isTrait('scorching') ? 1.05 : hot ? 0.95 : 0.75), fbColor);
       game.audio.spit();
       game.announce('⚠ The Elder hurls cinderfire! ⚠');
     }
@@ -638,6 +918,10 @@ export class Boss extends Mushroom {
 export class GluttonBoss extends Mushroom {
   constructor(scene, pos, trait=null, mult={hp:1,dmg:1,speed:1}){
     super(scene, 4, pos, 1);
+    // same reason Boss resets this — see setCapProfile's comment. Doubly so here: the Legendary
+    // twin-cap shape under GluttonBoss's own NON-uniform (4.6, 2.5, 4.6) rescale would distort
+    // badly, not just look plain-wrong the way a uniform scale might get away with.
+    this.setCapProfile(0);
     this.trait = trait;
     this.R = { ...RARITIES[4], name:'Rotmaw the Bloated', hp:2600, dmg:46, speed:2.6, scale:3.4, score:100,
       color: trait ? trait.tint : 0x9acc3a, glow: trait ? trait.glow : 0xc8e066 };
@@ -663,11 +947,13 @@ export class GluttonBoss extends Mushroom {
     if(this.aura){ this.aura.material.color.set(this.R.glow); this.aura.material.opacity = 0.30;
       this.aura.scale.setScalar(8.5); this.aura.position.y = 1.8; }   // see Boss: no PointLight
     if(this.groundRing) this.groundRing.material.color.set(this.R.glow);
+    if(this.halo) this.halo.material.color.set(this.R.glow);
     this.chargeCd = 7; this.vomitCd = 4; this.puddleCd = 9; this.summonCd = 11; this.fireballCd = 5;
     this.charging = false; this.telegraphT = 0;
   }
   hit(dmg, from, game, kbMult=1){
     if(this.trait && this.trait.id === 'thickhide') dmg *= 0.8;
+    else if(this.trait && this.trait.id === 'bloated') dmg *= 0.7; // Winter surge: even thicker insulation
     super.hit(dmg, from, game, kbMult);
   }
   update(dt, game){
@@ -699,17 +985,21 @@ export class GluttonBoss extends Mushroom {
     if(this.charging && this.state !== 'lunge'){ this.charging = false; }
     if(!this.charging && this.chargeCd <= 0){
       let cd = 7 - Math.min(3, missing*3.5);
+      // blistering (Summer surge) rides frenzied's own branch, with a bigger ramp
       if(isTrait('frenzied')) cd -= Math.min(3, missing*3); // stacks on top of the baseline enrage
+      else if(isTrait('blistering')) cd -= Math.min(4, missing*4);
       this.chargeCd = Math.max(2, cd);
       this.telegraphT = 0.6;
       game.announce('⚠ Rotmaw inhales... ⚠');
     }
     if(this.vomitCd <= 0 && game.player){
       this.vomitCd = 4.5;
-      const corrosive = isTrait('corrosive');
+      // molding (Autumn surge) rides corrosive's own path, and sprays a wider volley on top of it
+      const corrosive = isTrait('corrosive') || isTrait('molding');
       const projColor = corrosive ? this.trait.glow : this.R.glow;
       const base = game.player.group.position.clone().setY(1).sub(this.group.position).normalize();
-      for(let i=-2;i<=2;i++){
+      const spread = isTrait('molding') ? 3 : 2;
+      for(let i=-spread;i<=spread;i++){
         const ang = i*0.16;
         const dir = new THREE.Vector3(base.x*Math.cos(ang)-base.z*Math.sin(ang), base.y, base.x*Math.sin(ang)+base.z*Math.cos(ang));
         game.spawnProjectile(this.group.position.clone().setY(this.group.position.y+1.2), dir, this.dmg*0.6, projColor, corrosive);
@@ -717,8 +1007,9 @@ export class GluttonBoss extends Mushroom {
       game.audio.spit();
     }
     if(this.puddleCd <= 0){
-      const toxic = isTrait('toxic');
-      this.puddleCd = 9;
+      // sprouting (Spring surge) rides toxic's own path, and comes back faster on top of it
+      const toxic = isTrait('toxic') || isTrait('sprouting');
+      this.puddleCd = isTrait('sprouting') ? 7 : 9;
       for(let i=0;i<(toxic?4:3);i++){
         const a = Math.random()*Math.PI*2, d = 3+Math.random()*6;
         const pp = this.group.position.clone().add(new THREE.Vector3(Math.cos(a)*d, 0, Math.sin(a)*d));
@@ -758,13 +1049,40 @@ export class GluttonBoss extends Mushroom {
 // stomp-kill enemy competes with the melee combo for the attack button AND the kill fantasy at
 // once. The pup's assist bolt is small, capped, and scales off the PLAYER's own level rather
 // than carrying a leveling track of its own — a helper, not a second character.
-const _cTo = new THREE.Vector3();
+//
+// TIERS, found separately from the unlock itself. A Companion Core (main.js drop, same
+// chokepoint as every other powerup) raises progress.companionTier permanently — the SAME
+// "earn it once, keep it forever" shape unlockCompanion() already uses, just continuous instead
+// of a single flag, so finding one reads as "my pup grew stronger" rather than "a second pet
+// appeared". Same rarity NAMING convention as RARITIES (Common..Mythic), but its own table: a
+// companion's dmgMult/cdMult/healPct describe an ASSISTANT's kit, not a creature's hp/speed/scale,
+// so sharing RARITIES directly would just be two unrelated shapes wearing the same labels.
+export const COMPANION_TIERS = [
+  // Common keeps the ORIGINAL Spore Pup cap colours exactly — a player who has never found a
+  // Companion Core sees no visual change at all, which is what makes every tier above it read
+  // as a genuine upgrade rather than a reskin nobody asked for. capGlow is the one field only
+  // Common sets: the original cap used a dim ember emissive (0x5a3a10) separate from its bright
+  // rim/bolt colour (0xffe066, still `glow` below) — collapsing both into one field would have
+  // brightened the cap's glow for a player who found nothing, so this keeps that original split.
+  { name:'Common',    color:0xffb347, glow:0xffe066, capGlow:0x5a3a10, dmgMult:1.00, cdMult:1.00, healPct:0,     scale:1.00 },
+  { name:'Uncommon',  color:0xb8e89a, glow:0x8fe85a, dmgMult:1.25, cdMult:0.90, healPct:0,     scale:1.08 },
+  { name:'Rare',      color:0xff9a8a, glow:0xff5a4a, dmgMult:1.55, cdMult:0.78, healPct:0.02,  scale:1.17 },
+  { name:'Epic',      color:0x8ab8ff, glow:0x5aa0ff, dmgMult:1.90, cdMult:0.65, healPct:0.03,  scale:1.27, doubleShot:true },
+  { name:'Legendary', color:0xd8a8ff, glow:0xb46bff, dmgMult:2.30, cdMult:0.52, healPct:0.045, scale:1.40, doubleShot:true },
+  { name:'Mythic',    color:0xffb3e6, glow:0xffe066, dmgMult:2.80, cdMult:0.40, healPct:0.06,  scale:1.55, doubleShot:true, rainbow:true, guard:true },
+];
+const _cTo = new THREE.Vector3(), _cTo2 = new THREE.Vector3();
 export class Companion {
-  constructor(scene){
+  constructor(scene, tier=0){
     this.scene = scene;
+    this.tier = Math.max(0, Math.min(COMPANION_TIERS.length-1, tier));
+    const T = this.T = COMPANION_TIERS[this.tier];
     const g = this.group = new THREE.Group();
+    // the body (stem + eyes) stays cream at EVERY tier — "still a Spore Pup, just stronger", not
+    // a different creature per rarity. Only the cap colour/glow (which already carried the Pup's
+    // whole rarity read, same as a Mushroom's cap) and the group's overall scale move with tier.
     const bodyMat = toonMat({ color:0xf2e4c8, rim:0.5, rimColor:0xfff6c8 });
-    const capMat = toonMat({ color:0xffb347, emissive:0x5a3a10, emissiveIntensity:0.3, rim:0.6, rimColor:0xffe066 });
+    const capMat = toonMat({ color:T.color, emissive:T.capGlow !== undefined ? T.capGlow : T.glow, emissiveIntensity:0.3+this.tier*0.07, rim:0.6, rimColor:T.glow });
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.17, 0.3, 8), bodyMat);
     stem.position.y = 0.15; addOutline(stem, 0.05);
     const cap = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 8, 0, Math.PI*2, 0, Math.PI*0.55), capMat);
@@ -782,9 +1100,20 @@ export class Companion {
     g.add(stem, cap);
     this.cap = cap;
     this.blob = makeBlobShadow(0.55); this.blob.position.y = 0.02; g.add(this.blob);
+    // rarity aura from Rare (tier 2) up — same billboarded-sprite-not-a-shell technique a rare+
+    // Mushroom's aura already uses (see the constructor comment there for why), scaled down to
+    // the Pup's own small size. Nothing below Rare gets one, same floor the Mushroom aura uses.
+    if(this.tier >= 2){
+      this.aura = new THREE.Sprite(new THREE.SpriteMaterial({ map:glowTexture(), color:T.glow,
+        transparent:true, opacity:0.3, blending:THREE.AdditiveBlending, depthWrite:false, fog:false }));
+      this.aura.scale.setScalar(1.3); this.aura.position.y = 0.32; g.add(this.aura);
+    }
+    g.scale.setScalar(T.scale);
     scene.add(g);
     this.t = Math.random()*10;
     this.boltCd = 3 + Math.random()*2;
+    this.healCd = 7 + Math.random()*3;
+    this.guardCd = 18 + Math.random()*8;
     this.baseY = 0;
     this.yaw = 0;
   }
@@ -801,32 +1130,100 @@ export class Companion {
     g.position.z += (tz - g.position.z) * Math.min(1, dt*4);
     const gy = groundHeight(g.position.x, g.position.z);
     this.baseY += (gy - this.baseY) * Math.min(1, dt*10);
-    g.position.y = this.baseY + Math.abs(Math.sin(this.t*4))*0.1;
+    // Uncommon+ personality: a little excited hop on every bolt it fires (set below, where the
+    // bolt actually launches) — Common stays perfectly still, by design, same reason its cap
+    // never changed colour: a player who found nothing sees nothing different.
+    if(this.hopT > 0){ this.hopT -= dt; }
+    const hop = this.hopT > 0 ? Math.sin(Math.min(1, (0.25-this.hopT)/0.25)*Math.PI)*0.22 : 0;
+    g.position.y = this.baseY + Math.abs(Math.sin(this.t*4))*0.1 + hop;
     const targetYaw = Math.atan2(p.group.position.x-g.position.x, p.group.position.z-g.position.z);
     this.yaw += (((targetYaw - this.yaw + Math.PI*3) % (Math.PI*2)) - Math.PI) * Math.min(1, dt*6);
     g.rotation.y = this.yaw;
 
+    const T = this.T;
     this.boltCd -= dt;
     if(this.boltCd <= 0){
-      let nearest = null, nd = 196; // 14 units, squared
+      // tracks the two nearest targets in one pass — the second slot is what Epic+'s doubleShot
+      // fires at, so two bolts hit two different mushrooms instead of doubling damage on one
+      // nobody but the Pup's own target was already going to die to anyway.
+      let nearest = null, nd = 196, second = null, nd2 = 196; // 14 units, squared
       for(const e of game.enemies){
         if(e.dead) continue;
         const dx = e.group.position.x-g.position.x, dz = e.group.position.z-g.position.z;
         const d2 = dx*dx + dz*dz;
-        if(d2 < nd){ nd = d2; nearest = e; }
+        if(d2 < nd){ nd2 = nd; second = nearest; nd = d2; nearest = e; }
+        else if(d2 < nd2){ nd2 = d2; second = e; }
       }
       if(nearest){
-        // capped growth off the PLAYER's level, not its own — see the note above
-        this.boltCd = Math.max(2.5, 5 - game.level*0.05);
-        const dmg = Math.round(3 + Math.min(20, game.level)*0.6);
+        // capped growth off the PLAYER's level, not its own — see the note above. Tier scales
+        // the SAME two numbers (damage, cooldown) rather than adding a parallel formula, so a
+        // Mythic Pup is still recognizably the same assist, just a stronger one.
+        this.boltCd = Math.max(1.2, (5 - game.level*0.05) * T.cdMult);
+        const dmg = Math.round((3 + Math.min(20, game.level)*0.6) * T.dmgMult);
+        if(this.tier >= 1) this.hopT = 0.25;
         _cTo.copy(nearest.group.position).sub(g.position); _cTo.y = 0; _cTo.normalize();
-        game.spawnProjectile(g.position.clone().setY(g.position.y+0.3), _cTo, dmg, 0xffe066, false, true);
+        game.spawnProjectile(g.position.clone().setY(g.position.y+0.3), _cTo, dmg, T.glow, false, true);
         game.audio.spit();
         game.particles.spawn(g.position.x, g.position.y+0.4, g.position.z, {r:1,g:0.88,b:0.4, spread:0.4, size:6, life:0.3});
+        if(T.doubleShot && second){
+          _cTo2.copy(second.group.position).sub(g.position); _cTo2.y = 0; _cTo2.normalize();
+          game.spawnProjectile(g.position.clone().setY(g.position.y+0.3), _cTo2, dmg, T.glow, false, true);
+        }
       } else {
         this.boltCd = 1.2; // nothing in range: recheck soon rather than idling out the full cooldown
       }
     }
+    // Rare+ periodically mends the player — the one assist a damage bolt can't be, gated on the
+    // same tier floor the aura uses, so "the Pup starts helping with survival" lands on the exact
+    // upgrade that gave it a visible glow, not a separate unrelated threshold.
+    if(T.healPct > 0){
+      this.healCd -= dt;
+      if(this.healCd <= 0){
+        this.healCd = 9 + Math.random()*3;
+        if(p.hp < p.maxHp){
+          const heal = Math.round(p.maxHp * T.healPct);
+          p.hp = Math.min(p.maxHp, p.hp + heal);
+          game.particles.burst(p.group.position.clone().setY(1.2), 8, {r:0.6,g:1,b:0.6, spread:1.5, size:7, life:0.6});
+          game.audio.pickup();
+        }
+      }
+    }
+    // Mythic-only personality: Guardian Ward. Melee hits here are untelegraphed contact damage,
+    // not a wind-up the Pup could realistically dash in front of — so instead of a predictive
+    // dash, the Pup periodically PRIMES a ward (bright pulse tell) that silently blocks the very
+    // next hit the player would take, through the same early-return Player.hurt() already uses
+    // for the shield powerup, just its own flag so it never gets confused with an actual shield
+    // (different cue, different source, no shared HUD icon). A primed ward that goes unused
+    // simply fizzles after READY_WINDOW rather than guaranteeing a block forever.
+    if(T.guard){
+      const READY_WINDOW = 8;
+      if(!this.guardReady){
+        this.guardCd -= dt;
+        if(this.guardCd <= 0){ this.guardReady = true; this.guardReadyT = READY_WINDOW; }
+      } else {
+        if(!p.guardBlocked){
+          this.guardReadyT -= dt;
+          if(this.guardReadyT <= 0){ this.guardReady = false; this.guardCd = 18 + Math.random()*8; } // fizzled, unused
+        } else {
+          p.guardBlocked = false; this.guardReady = false; this.guardCd = 18 + Math.random()*8; // consumed — see Player.hurt()
+          game.particles.burst(p.group.position.clone().setY(1.2), 14, {r:1,g:0.85,b:0.95, spread:3, size:9, life:0.5});
+          game.audio.pop(5);
+        }
+      }
+    }
+    // Mythic hue-cycles live — the exact same "beyond the normal tier" tell Mythic mushrooms (and
+    // The Bloom Ascendant) already use, reusing an established signal instead of inventing a new
+    // one for the same meaning.
+    if(T.rainbow){
+      const hue = (this.t*0.15) % 1;
+      // a primed ward reads as the hue-cycle itself going brighter/faster, rather than a second
+      // unrelated glow fighting the rainbow for the same material property every frame
+      this._rc = this._rc || new THREE.Color();
+      this._rc.setHSL(hue, 0.85, this.guardReady ? 0.78 : 0.6);
+      this.cap.material.emissive.copy(this._rc);
+      if(this.aura) this.aura.material.color.copy(this._rc);
+    }
+    if(this.aura) this.aura.material.opacity = (this.guardReady ? 0.4 : 0.22) + Math.sin(this.t*(this.guardReady?8:3))*0.1;
   }
 }
 
@@ -835,18 +1232,26 @@ export class Player {
   constructor(scene){
     this.scene = scene;
     const g = this.group = new THREE.Group();
-    // body — stylized hunter
-    const cloakMat = toonMat({ color:0x1f8f6e, rim:0.6, rimColor:0xc0ffb0 });
+    // body — Spore Druid: the hunter's own gear leans all the way into the same fungal world
+    // every mushroom in this file lives in, rather than reading as a generic adventurer who
+    // happens to wear a mushroom hat. Moss-painted cloak, small growth-mushrooms on the shoulder,
+    // a glowing jar of spores at the hip, an asymmetric mushroom-cap pauldron, bare feet.
+    if(!mossTex) mossTex = paintTexture('#2f6b3a',
+      [{c:'#4a8f52',n:40,r:10,a:0.35},{c:'#1f4a28',n:22,r:14,a:0.3},{c:'#bfe89a',n:16,r:4,a:0.55}], {dabs:260});
+    const cloakMat = toonMat({ color:0xffffff, map:mossTex, rim:0.55, rimColor:0xbfe89a });
     const skinMat = toonMat({ color:0xf2c89a, rim:0.4 });
+    const mossSkinMat = toonMat({ color:0xcfc29a, rim:0.4, rimColor:0x9fd68a }); // bare, lichen-dusted feet
     const body = this.body = new THREE.Group();
     const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.55, 4, 8), cloakMat);
     torso.position.y = 0.95; addOutline(torso, 0.09);
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.30, 12, 10), skinMat);
     head.position.y = 1.62; addOutline(head, 0.09);
-    // hood / hat (mushroom cap hat!)
-    const hat = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 8, 0, Math.PI*2, 0, Math.PI*0.5),
+    // hat — upgraded from a plain dome to the same flared-bell LatheGeometry profile the
+    // Uncommon mushroom now uses (see CAP_PROFILES), scaled down for a head: a druid wearing a
+    // cap shaped like an actual mushroom cap, not a half-sphere with a cap TEXTURE on it.
+    const hat = new THREE.Mesh(buildCapGeometry(CAP_PROFILES[1], 0.34),
       toonMat({ color:0xe63a2e, map:capTexture(0xe63a2e, 1, 0xffe0a0), rim:0.55 }));
-    hat.position.y = 1.72; addOutline(hat, 0.09);
+    hat.position.y = 1.9; addOutline(hat, 0.09);
     // scarf
     const scarf = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.09, 6, 12), toonMat({color:0xffb52e, rim:0.4}));
     scarf.position.y = 1.38; scarf.rotation.x = Math.PI/2; addOutline(scarf, 0.1);
@@ -855,6 +1260,31 @@ export class Player {
       const e = new THREE.Mesh(new THREE.SphereGeometry(0.045,6,5), new THREE.MeshBasicMaterial({color:0x1c1410}));
       e.position.set(0.11*sx, 1.62, 0.27); body.add(e);
     }
+    // two small growth-mushrooms sprouting straight off the cloak — the same cap geometry/texture
+    // the world's own Common mushrooms use (buildCapGeometry + capTexture), just tiny, so the
+    // druid visibly belongs to the same colony rather than merely dressing like it.
+    this.sproutMushrooms = [];
+    const sproutSpots = [{x:0.22,y:1.12,z:0.2,s:0.14,rot:0.4},{x:-0.16,y:0.82,z:0.26,s:0.1,rot:-0.3}];
+    for(const sp of sproutSpots){
+      const sproutCap = new THREE.Mesh(buildCapGeometry(CAP_PROFILES[0], sp.s),
+        toonMat({ color:0xffb347, map:capTexture(0xffb347, 0, 0xffe066), rim:0.5, rimColor:0xffe066 }));
+      sproutCap.position.set(sp.x, sp.y, sp.z); sproutCap.rotation.z = sp.rot;
+      addOutline(sproutCap, 0.05);
+      body.add(sproutCap); this.sproutMushrooms.push(sproutCap);
+    }
+    // glowing jar of spores at the hip — a cork-stoppered jar with an additive glow inside,
+    // the same billboarded-sprite technique the mushrooms' own rarity aura already uses
+    const jarGroup = new THREE.Group();
+    const jarBody = new THREE.Mesh(new THREE.CylinderGeometry(0.075,0.07,0.14,8),
+      toonMat({ color:0xcfe8dc, rim:0.6, rimColor:0x9fe8ff, transparent:true, opacity:0.55 }));
+    const jarLid = new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,0.03,8), toonMat({color:0x6b4a2a, rim:0.3}));
+    jarLid.position.y = 0.085;
+    const jarGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map:glowTexture(), color:0x9fe8ff,
+      transparent:true, opacity:0.85, blending:THREE.AdditiveBlending, depthWrite:false, fog:false }));
+    jarGlow.scale.setScalar(0.22);
+    jarGroup.add(jarBody, jarLid, jarGlow);
+    jarGroup.position.set(0.3, 0.68, 0.18);
+    body.add(jarGroup); this.jar = jarGroup; this.jarGlow = jarGlow;
     // arms & legs
     this.armR = new THREE.Group(); this.armL = new THREE.Group();
     const armGeo = new THREE.CapsuleGeometry(0.09, 0.4, 3, 6);
@@ -862,6 +1292,14 @@ export class Player {
     const aL = aR.clone();
     this.armR.add(aR); this.armL.add(aL);
     this.armR.position.set(0.42, 1.25, 0); this.armL.position.set(-0.42, 1.25, 0);
+    // asymmetric mushroom-cap pauldron — the LEFT shoulder only (the right carries the weapon,
+    // and "asymmetric" is the whole point: one shoulder reads as grown-over, not a matched set
+    // of armour). Reuses the Legendary profile's twin-cap silhouette at pauldron scale.
+    const pauldron = new THREE.Mesh(buildCapGeometry(CAP_PROFILES[4], 0.3),
+      toonMat({ color:0xffb347, map:capTexture(0xffb347, 4, 0xb46bff), rim:0.6, rimColor:0xb46bff }));
+    pauldron.position.set(0, 0.08, 0); pauldron.rotation.x = Math.PI*0.08;
+    addOutline(pauldron, 0.05);
+    this.armL.add(pauldron); this.pauldron = pauldron;
     // ornate sword — one prebuilt hilt+blade variant per rarity tier, only the
     // equipped one visible; equipWeapon() swaps which is shown + retints the blade
     this.swordVariants = [0,1,2,3,4].map(r=>{
@@ -883,7 +1321,15 @@ export class Player {
     this.spearVariant.group.position.set(0, -0.85, 0);
     this.spearVariant.group.visible = false;
     this.armR.add(this.spearVariant.group);
-    this.legR = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.35, 3, 6), toonMat({color:0x3a2f4d, rim:0.3}));
+    // spore pod — same "own model" reasoning as the bow/spear; held in-hand until thrown, at
+    // which point main.js's spawnSporePod() builds its OWN copy via buildSporePod() for the
+    // flying pod, so the one here never needs to leave the player's hand
+    this.podVariant = buildSporePod();
+    this.podVariant.group.position.set(0, -0.3, 0.15);
+    this.podVariant.group.visible = false;
+    this.armR.add(this.podVariant.group);
+    // bare, lichen-dusted feet — no boots. mossSkinMat built above, next to the cloak's own moss paint.
+    this.legR = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.35, 3, 6), mossSkinMat);
     this.legL = this.legR.clone();
     this.legR.position.set(0.16, 0.35, 0); this.legL.position.set(-0.16, 0.35, 0);
     body.add(torso, head, hat, scarf, this.armR, this.armL, this.legR, this.legL);
@@ -970,6 +1416,7 @@ export class Player {
     for(const v of this.swordVariants) v.group.visible = false;
     if(w.type === 'bow'){
       this.spearVariant.group.visible = false;
+      this.podVariant.group.visible = false;
       this.bowVariant.group.visible = true;
       this.bowVariant.stave.material.color.set(w.color);
       this.bowVariant.stave.material.emissive.set(w.emissive);
@@ -977,12 +1424,20 @@ export class Player {
     }
     this.bowVariant.group.visible = false;
     if(w.type === 'spear'){
+      this.podVariant.group.visible = false;
       this.spearVariant.group.visible = true;
       this.spearVariant.tip.material.color.set(w.color);
       this.spearVariant.tip.material.emissive.set(w.emissive);
       return;
     }
     this.spearVariant.group.visible = false;
+    if(w.type === 'boomerang'){
+      this.podVariant.group.visible = true;
+      this.podVariant.pod.material.color.set(w.color);
+      this.podVariant.pod.material.emissive.set(w.emissive);
+      return;
+    }
+    this.podVariant.group.visible = false;
     const variant = this.swordVariants[w.rarity];
     variant.group.visible = true;
     this.blade = variant.blade;
@@ -1086,6 +1541,16 @@ export class Player {
   getMagnet(game){ return (this.boostTimers.magnet > 0 ? 2.2 : 0) + (game ? this.getArmorBonus('magnet', game) : 0); }
   hurt(dmg, from, game){
     if(this.iframe > 0 || this.dashT > 0 || game.state !== 'play') return;
+    // Mythic Spore Pup's Guardian Ward: its own flag, deliberately separate from the shield
+    // powerup below, so the HUD/audio cue stays "the Pup did that" and never reads as a shield
+    // the player never picked up. The Pup's own update() reads guardBlocked next frame to clear
+    // its ready state and play the consume effect — see entities.js's Companion.update().
+    if(game.companion && game.companion.guardReady){
+      this.guardBlocked = true; this.iframe = 0.3;
+      game.particles.burst(this.group.position.clone().setY(1.2), 10, {r:1,g:0.85,b:0.95, spread:3, size:7, life:0.4});
+      game.audio.click();
+      return;
+    }
     if(this.boostTimers.shield > 0){
       game.audio.shieldBreak(); game.updateBuffs();
       game.particles.burst(this.group.position.clone().setY(1.2), 16, {r:0.5,g:0.9,b:1, spread:4, size:8, life:0.6});
@@ -1167,7 +1632,15 @@ export class Player {
       // have put a ~33%-per-frame ceiling on rain's slide however far this pow was loosened, since
       // the blend's own pull dominates once the friction pow stops being the tightest term. Skipping
       // the blend for exactly this case is what makes "wet ground" an actual, visible difference.
-      const stopPow = game.weather === 'rain' ? 0.35 : 0.0001;
+      // higher stopPow = less decay per frame = more slide (pow() stays closer to 1), so an
+      // active rain storm during winter still wins out (max), rather than winter's milder chill
+      // capping a genuinely slick rainstorm.
+      let stopPow = game.season === 3 ? WINTER_STOP_POW : 0.0001;
+      // blizzard is the rain+wind combo event (Winter-only, see main.js updateWeather) — it gets
+      // the rain branch's own slide, pushed past rain's own 0.35 since a whiteout should feel
+      // worse underfoot than an ordinary storm, not identical to one.
+      if(game.weather === 'rain') stopPow = Math.max(stopPow, 0.35);
+      else if(game.weather === 'blizzard') stopPow = Math.max(stopPow, 0.5);
       this.vel.x *= Math.pow(stopPow,dt); this.vel.z *= Math.pow(stopPow,dt);
     } else {
       const accel = this.grounded ? 40 : 18;
@@ -1178,7 +1651,7 @@ export class Player {
     // player's hands, so wind is felt specifically as "my jump drifted", not as a constant shove
     // that fights every step. Applied to vel, not position, so it composes with dash/attack lunge
     // instead of overriding them.
-    if(!this.grounded && game.weather === 'wind'){
+    if(!this.grounded && (game.weather === 'wind' || game.weather === 'blizzard')){
       this.vel.x += game.windX*WIND_PUSH*dt;
       this.vel.z += game.windZ*WIND_PUSH*dt;
     }
@@ -1235,6 +1708,10 @@ export class Player {
       // so it's shared — but the slashing ground-arc and the blade glow-trail are melee-only
       // flourishes that would look wrong on a bow, so those two are gated on this instead
       const isBow = WEAPONS_BY_ID[this.equipped].type === 'bow';
+      // boomerang shares the bow's draw-and-release pose for the same reason the bow shares the
+      // sword's swing: a throw reads fine on the generic arm-swing, only the slash arc/blade trail
+      // (melee-only flourishes) need to be gated off it, same as the bow above.
+      const isBoomerang = WEAPONS_BY_ID[this.equipped].type === 'boomerang';
       // spear gets its OWN pose, not a shared one: a side-to-side swing arc is exactly the read
       // a reach weapon should NOT have — the whole point of a spear is a straight line, so armZ/
       // twist stay near zero here while armX (the recoil-then-jab) does all the work.
@@ -1268,7 +1745,7 @@ export class Player {
           // thrust glow: a straight streak off the point instead of a slashing ground arc
           _tip.set(0,-1.5,0); this.spearVariant.tip.localToWorld(_tip);
           game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.9,g:0.92,b:1, spread:0.3, size:7, life:0.3});
-        } else if(!isBow){
+        } else if(!isBow && !isBoomerang){
           // swing arc fx follows the blade sweep
           this.arc.position.copy(g.position); this.arc.position.y += 0.9;
           this.arc.rotation.x = -Math.PI/2 + (this.combo===3 ? 0.9 : 0.15);
@@ -1278,10 +1755,14 @@ export class Player {
           // glowing blade trail
           _tip.set(0,-1.3,0); this.blade.localToWorld(_tip);
           game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.55,g:0.95,b:1, spread:0.4, size:8, life:0.35});
-        } else if(Math.random() < 0.4){
+        } else if(isBow && Math.random() < 0.4){
           // bow draw shimmer: a light dust off the string instead of a slash trail
           _tip.set(0,0,0); this.bowVariant.string.localToWorld(_tip);
           game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.75,g:0.9,b:0.6, spread:0.3, size:6, life:0.3});
+        } else if(isBoomerang && Math.random() < 0.4){
+          // pod toss shimmer: a puff off the pod itself instead of a slash trail
+          _tip.set(0,0,0); this.podVariant.pod.localToWorld(_tip);
+          game.particles.spawn(_tip.x, _tip.y, _tip.z, {r:0.85,g:0.65,b:0.25, spread:0.3, size:6, life:0.3});
         }
       } else {
         // recover: ease back to neutral from the follow-through pose
@@ -1331,6 +1812,30 @@ export class Player {
             loose(_fwd.x, _fwd.z);
           }
           game.audio.swing(this.combo); // reuse: a bow's release still wants the same "thwip" cue
+          this.impactT = 0.1;
+        } else if(wdef.type === 'boomerang'){
+          // thrown pod: fire-and-track like the bow above, but into its own flight system
+          // (game.spawnSporePod/updateSporePods in main.js) since the return leg has to home on
+          // the player's current position — something the straight-line friendly pool can't do.
+          _fwd.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+          const originY = g.position.y + 1.3;
+          const toss = (dirX, dirZ) => {
+            const crit = Math.random() < 0.15 + wdef.crit + armorCrit;
+            const dmg = Math.round(dmgBase * (0.9+Math.random()*0.2) * (crit?1.8:1));
+            game.spawnSporePod(g.position.clone().setY(originY), new THREE.Vector3(dirX,0,dirZ),
+              dmg, wdef.color, wdef.knockback, crit);
+          };
+          if(isFinisher && fin && fin.type==='volley'){
+            for(let i=0;i<fin.count;i++){
+              const off = (i-(fin.count-1)/2) * fin.spreadAngle;
+              const c = Math.cos(off), s = Math.sin(off);
+              toss(_fwd.x*c - _fwd.z*s, _fwd.x*s + _fwd.z*c);
+            }
+            game.particles.burst(g.position.clone().setY(originY), 10, {r:0.85,g:0.65,b:0.25, spread:2, size:7, life:0.4});
+          } else {
+            toss(_fwd.x, _fwd.z);
+          }
+          game.audio.swing(this.combo);
           this.impactT = 0.1;
         } else {
         // spear: a narrow forward cone instead of the sword's wide arc — precise reach along a

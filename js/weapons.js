@@ -38,6 +38,16 @@ export const WEAPONS = [
     finisher:{type:'heal', name:'Ember Surge', healFrac:0.12, spdDur:4},
     color:0xff7a4a, emissive:0x8a2a11, geomScale:{x:0.55,y:1.15,z:0.55},
     desc:"A slender blade that drinks the Bloom's essence with every cut." },
+  { id:'sporepod', name:'Thorn Pod Launcher', icon:'🫛', rarity:3, type:'boomerang',
+    dmg:11, atkSpeed:0.78, range:0, crit:0.08, knockback:0.85, special:null,
+    // thrown through the same spore-pod flight system in main.js (updateSporePods/spawnSporePod) —
+    // it travels outward in a straight line, then homes back onto the player, able to land one
+    // hit on each leg. Same chokepoint-per-weapon pattern as the bow: fire-and-track lives in
+    // entities.js, the actual flight/hit-test is its own system since a boomerang's return leg
+    // needs to home on a moving target, which the straight-line friendly projectile pool doesn't.
+    finisher:{type:'volley', name:'Pod Barrage', count:3, spreadAngle:0.3},
+    color:0xd9a441, emissive:0x8a4a10, geomScale:{x:1,y:1,z:1},
+    desc:'A spore-packed pod that arcs out and spins back to your hand — strikes twice per throw.' },
   { id:'warblade', name:'Regal Warblade', icon:'⚔️', rarity:3, type:'greatsword',
     dmg:17, atkSpeed:1.32, range:0.55, crit:0, knockback:2.0, special:null,
     finisher:{type:'shockwave', name:'Ground Slam', mult:0.8},

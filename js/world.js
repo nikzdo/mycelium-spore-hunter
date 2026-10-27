@@ -101,6 +101,9 @@ export const PARAMS = {
   treeSMin: 0.8, treeSVar: 0.9,
   // rocks: ambient scatter + dramatic formations + cave-mouth walls, all one draw call
   rockAmbient: 70, rockSpread: 0.9, rockSMin: 0.5, rockSVar: 2.2,
+  // pebbles: small flattened ground clutter between the big rocks and the grass — one more
+  // InstancedMesh draw call, sharing rockGeo's material so no extra shader compile
+  pebbleAmbient: 240, pebbleSpread: 0.95, pebbleSMin: 0.06, pebbleSVar: 0.16,
   formMin: 3, formVar: 3, formDMin: 20, formDVar: 165, formSpread: 3.5,
   formMemMin: 4, formMemVar: 5, formSMin: 1.2, formSVar: 2.6,
   /* --- stepped rock formations (items 34, 55): the ONLY props you climb by jumping.
@@ -967,11 +970,28 @@ export function buildTerrain(scene, seed, res=PARAMS.terrainSegs, quality=1){
         col += vec3(1.0,0.92,0.65) * smoothstep(0.9970,0.9985,s) * 2.2;   // disc
         col += vec3(1.0,0.80,0.45) * pow(max(s,0.0), 90.0) * 0.9;          // inner halo
         col += vec3(1.0,0.62,0.30) * pow(max(s,0.0), 12.0) * 0.35;         // wide glow
+        // soft outer diffusion — a much wider, dimmer fourth layer so the glow fades into the sky
+        // gradually instead of stopping where the wide-glow term stops. This is the "sun rays" ask
+        // handled the same way the three terms above already are (a shaped falloff baked into this
+        // existing shader, zero extra draw calls), not a true volumetric light-shaft pass — that
+        // would need a postprocessing pipeline this renderer doesn't have, and tuning it without
+        // ever seeing it render isn't a safe bet. Deliberately low intensity: "subtle", not a flare.
+        col += vec3(1.0,0.78,0.5) * pow(max(s,0.0), 3.5) * 0.12;
         col += vec3(1.0,0.85,0.55) * smoothstep(0.9982,0.9986,s) * (1.0-smoothstep(0.9987,0.9990,s)) * 1.4; // rim ring
         gl_FragColor = vec4(col,1.0);
       }`
   });
   addTo(scene, new THREE.Mesh(skyGeo, skyMat));
+  // exposed so main.js's night cycle can blend the sky's own gradient toward sunset/night colours
+  // live — uTop/uMid/uBot were being set once here and never touched again, so the sky itself
+  // never visually changed through a day/night cycle; only the fog did. skyDayColors is the
+  // untouched baseline main.js blends FROM every frame, so repeated lerps never drift/accumulate.
+  world.skyMat = skyMat;
+  world.skyDayColors = {
+    top: skyMat.uniforms.uTop.value.clone(),
+    mid: skyMat.uniforms.uMid.value.clone(),
+    bot: skyMat.uniforms.uBot.value.clone(),
+  };
   // slow day-cycle sweep: rotate the sun direction + light together, dip warmth at low sun angle
   const sunDist = Math.hypot(60,90,30);
   const sunAxisZ = new THREE.Vector3(0,0,1), sunAxisY = new THREE.Vector3(0,1,0);
@@ -1173,8 +1193,16 @@ export function buildProps(scene, seed, world = WORLD){
   { const p=canGeo.attributes.position;
     for(let i=0;i<p.count;i++){
       const v=new THREE.Vector3(p.getX(i),p.getY(i),p.getZ(i));
-      const n = 1 + F.detail(v.x*0.8+v.y, v.z*0.8)*0.25;
-      p.setXYZ(i, v.x*n, v.y*n*0.8, v.z*n); } }
+      // two octaves now, not one — a big lobe shape plus a finer bump layer riding on top of it,
+      // closer to the "cluster of soft round bumps" a canopy should read as rather than one
+      // gently undulating blob. Same geometry, same subdivision level, same instance/draw-call
+      // cost as before (this only moves the SAME vertices further, it doesn't add any) — the fine
+      // layer is deliberately smaller than the per-vertex spacing would really resolve, but it
+      // still breaks up the silhouette's long smooth curves into shorter, bumpier ones.
+      const big = F.detail(v.x*0.8+v.y, v.z*0.8)*0.28;
+      const small = F.detail(v.x*2.6-v.y*1.7, v.z*2.6+v.x*1.3)*0.14;
+      const n = 1 + big + small;
+      p.setXYZ(i, v.x*n, v.y*n*0.82, v.z*n); } }
   const canBase = new THREE.Color(theme.canopyBase);
   const canDark = offsetHSLsRGB(canBase.clone(), 0, 0.05, -0.10);
   // `color` white + ratioTo() per instance — see the note above ratioTo(): the canopy hex used to
@@ -1372,6 +1400,47 @@ export function buildProps(scene, seed, world = WORLD){
       rockHull.setMatrixAt(i, M.compose(P3, Q3, S3.multiplyScalar(1.09)));
     } }
   addTo(scene, rockHull);
+
+  /* ----- pebbles: small flattened ground clutter, the "rock variety" the big dodecahedron scatter
+     above can't give on its own — same jitter-a-shared-geometry trick, but on a rounder base shape
+     and flattened per-instance (same sy non-uniform-scale idea the rocks use), read as creek stones
+     rather than boulders. No colliders and no outline hull, same reasoning grass/flowers already
+     follow: short enough to walk over, so a collider would be an invisible wall and a toon outline
+     would just be noise at this scale. Shares rockMat by reference (one less shader compile) and
+     the strata map reads as a faint fleck at pebble scale instead of visible banding. */
+  const pebbleGeo = new THREE.IcosahedronGeometry(1, 1);
+  { const p = pebbleGeo.attributes.position;
+    for(let i=0;i<p.count;i++){
+      const x=p.getX(i), y=p.getY(i), z=p.getZ(i);
+      const j = 1 + F.detail(x*2.4+y, z*2.4)*0.12;
+      p.setXYZ(i, x*j, y*j, z*j);
+    }
+    pebbleGeo.computeVertexNormals(); }
+  const pebblePlacements = [];
+  for(let i=0;i<PARAMS.pebbleAmbient;i++){
+    const x=(rng()-0.5)*WORLD_SIZE*PARAMS.pebbleSpread, z=(rng()-0.5)*WORLD_SIZE*PARAMS.pebbleSpread;
+    const s = PARAMS.pebbleSMin+rng()*PARAMS.pebbleSVar;
+    pebblePlacements.push({ x, z, s, sy:s*(0.4+rng()*0.25), ry:rng()*7 });
+  }
+  const pebbleCount = pebblePlacements.length;
+  const pebbles = new THREE.InstancedMesh(pebbleGeo, rockMat, pebbleCount);
+  const pebbleColor = new THREE.Color();
+  pebblePlacements.forEach((pp,i)=>{
+    const gy = groundHeight(pp.x, pp.z);
+    Q.setFromEuler(EU.set(0, pp.ry, 0));
+    M.compose(V.set(pp.x, gy+pp.sy*0.3, pp.z), Q, S.set(pp.s, pp.sy, pp.s));
+    pebbles.setMatrixAt(i, M);
+    const mossAmt = rng() < 0.3 ? 0.3+rng()*0.4 : rng()*0.1;
+    const corrupt = corruptionAt(pp.x,pp.z);
+    jitterFor(theme, 'rock', rng, J);
+    pebbleColor.setHSL(J.h, J.s, J.l, THREE.SRGBColorSpace);
+    pebbles.setColorAt(i, pebbleColor.lerp(rockMoss, mossAmt).lerp(rockCorrupt, corrupt*0.75));
+  });
+  // too small to cast a readable shadow (see CLAUDE.md's shadow policy — a sub-40cm prop is a
+  // few texels of smear, not a shape), so receive-only, same split the rocks above don't need
+  // but grass/flowers already follow.
+  pebbles.receiveShadow = true;
+  addTo(scene, pebbles);
 
   /* ----- stepped rock formations (items 34, 55) — the props you PLATFORM up -----
      The instanced batch above is rubble: one silhouette, repeated, walked over. This is the other
@@ -1894,24 +1963,140 @@ export function buildProps(scene, seed, world = WORLD){
   addTo(scene, grass);
   world.updaters.push((dt,t)=>{ grassMat.uniforms.uTime.value = t; });
 
-  /* ----- flowers ----- */
+  /* ----- flowers -----
+     Two species now, not one, and the original (the cone "bud") also stopped looking stamped —
+     it had NO rotation variety at all (Q.identity() every instance, verified by reading the loop
+     below before touching it), so every flower in a field faced the exact same way. Rotation is
+     free; the second species (a small faceted "clover" bud) is one more InstancedMesh, i.e. one
+     more draw call total — flowers are already a single low-count batch, so this stays cheap. */
   const flowerGeo = new THREE.ConeGeometry(0.16, 0.22, 6);
+  const flowerGeo2 = new THREE.IcosahedronGeometry(0.11, 0);
   const flowerMat = new THREE.MeshBasicMaterial({ color:0xffffff });
-  const flowers = new THREE.InstancedMesh(flowerGeo, flowerMat, PARAMS.flowerCount);
+  const flowerCount1 = Math.round(PARAMS.flowerCount*0.6), flowerCount2 = PARAMS.flowerCount - flowerCount1;
+  const flowers = new THREE.InstancedMesh(flowerGeo, flowerMat, flowerCount1);
+  const flowers2 = new THREE.InstancedMesh(flowerGeo2, flowerMat.clone(), flowerCount2);
   /* theme.flowers is three hues either side of the accent, so the flecks of colour in the field
      belong to the same accent family as the crystals — a red-accent world gets warm flowers, not
      the same five authored candy colours in every world. White stays in the list as the neutral
      that reads against any ground. */
   const fCols = [theme.flowers[0], theme.flowers[1], theme.flowers[2], theme.accent, 0xffffff];
   const flowerColor = new THREE.Color();
-  for(let i=0;i<PARAMS.flowerCount;i++){
+  const flowerQ = new THREE.Quaternion();
+  const AXIS_Y = new THREE.Vector3(0,1,0);
+  for(let i=0;i<flowerCount1;i++){
     const a=rng()*Math.PI*2, r=PARAMS.flowerRMin+rng()*PARAMS.flowerRVar;
     const x=Math.cos(a)*r, z=Math.sin(a)*r;
-    M.compose(V.set(x, groundHeight(x,z)+0.22, z), Q.identity(), S.set(1,1,1));
+    flowerQ.setFromAxisAngle(AXIS_Y, rng()*Math.PI*2);
+    M.compose(V.set(x, groundHeight(x,z)+0.22, z), flowerQ, S.set(1,1,1));
     flowers.setMatrixAt(i,M);
     flowers.setColorAt(i, flowerColor.set(fCols[(rng()*fCols.length)|0]));
   }
-  addTo(scene, flowers);
+  for(let i=0;i<flowerCount2;i++){
+    const a=rng()*Math.PI*2, r=PARAMS.flowerRMin+rng()*PARAMS.flowerRVar;
+    const x=Math.cos(a)*r, z=Math.sin(a)*r;
+    flowerQ.setFromAxisAngle(AXIS_Y, rng()*Math.PI*2);
+    M.compose(V.set(x, groundHeight(x,z)+0.14, z), flowerQ, S.set(1,1,1));
+    flowers2.setMatrixAt(i,M);
+    flowers2.setColorAt(i, flowerColor.set(fCols[(rng()*fCols.length)|0]));
+  }
+  addTo(scene, flowers, flowers2);
+
+  /* ----- butterflies: purely ambient, no harvest, no collider — fauna.js's critters are the
+     game's "wandering life you interact with"; this is the ten percent more that makes the
+     meadow read as alive even when you're not doing anything to it. A low, fixed count (not
+     InstancedMesh) on purpose: each one needs its own independently hinged, independently
+     phased wing-flap, which InstancedMesh can't give a Mesh without a custom per-instance
+     shader attribute — and at this count (same order as fauna's own critter population) a
+     plain Group per butterfly costs nothing measurable. The wing itself is a curved Shape with
+     a vertex-pushed fold, not a flat plane, and carries a painted two-tone pattern — the exact
+     craft level the trunk/canopy textures already use, not a bare primitive with a flat tint. */
+  {
+    const BUTTERFLY_COUNT = Math.round(14 * quality);
+    function makeWingGeo(){
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0);
+      shape.quadraticCurveTo(0.14, 0.34, 0.48, 0.40);
+      shape.quadraticCurveTo(0.76, 0.44, 0.72, 0.16);
+      shape.quadraticCurveTo(0.66, -0.10, 0.40, -0.13);
+      shape.quadraticCurveTo(0.16, -0.10, 0, 0);
+      const geo = new THREE.ShapeGeometry(shape, 6);
+      // gentle cup/fold along the hinge-to-tip axis — what keeps this a curved membrane rather
+      // than a flat card, the same vertex-push technique the tree canopy uses, just a simple
+      // deterministic curve instead of noise since a wing's fold is not meant to look irregular
+      const pos = geo.attributes.position;
+      for(let i=0;i<pos.count;i++){
+        const x = pos.getX(i), y = pos.getY(i);
+        pos.setZ(i, Math.sin(x*2.3)*0.08 + y*0.05);
+      }
+      geo.computeVertexNormals();
+      return geo;
+    }
+    const wingGeo = makeWingGeo();
+    // three colour variants pulled from THIS world's own flower palette (theme.flowers) rather
+    // than fixed hues — same reasoning the flower InstancedMesh above already uses: a butterfly
+    // belongs to the world's own accent family instead of five authored colours every seed sees.
+    const wingVariants = [theme.flowers[0], theme.flowers[1], theme.accent].map(hex=>{
+      const base = new THREE.Color(hex);
+      const spot = offsetHSLsRGB(base.clone(), 0, 0.1, 0.3);
+      const mat = toonMat({ color:0xffffff,
+        map:paintTexture('#'+base.getHexString(), [{c:'#'+spot.getHexString(), n:10, r:10, a:0.4}], {dabs:60}),
+        rim:0.5, rimColor:'#'+spot.getHexString(), side:THREE.DoubleSide });
+      return mat;
+    });
+    const bodyMat = toonMat({ color:0x2a1f1a, rim:0.3 });
+    const butterflies = [];
+    const bfPts = scatter(rng, BUTTERFLY_COUNT, 5, (x,z)=> !inExclusion(x, z, 3), { r0:PARAMS.flowerRMin, r1:PARAMS.flowerRMin+PARAMS.flowerRVar });
+    for(const pt of bfPts){
+      const g = new THREE.Group();
+      const variant = wingVariants[(rng()*wingVariants.length)|0];
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.16, 3, 5), bodyMat);
+      body.rotation.x = Math.PI/2; addOutline(body, 0.015);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.045, 6, 5), bodyMat);
+      head.position.z = 0.1;
+      g.add(body, head);
+      for(const sx of [-1,1]){
+        const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.004,0.004,0.12,3), bodyMat);
+        ant.position.set(sx*0.02, 0.03, 0.15); ant.rotation.x = -0.5; ant.rotation.z = sx*0.3;
+        g.add(ant);
+      }
+      const pivots = [];
+      for(const sx of [-1,1]){
+        const pivot = new THREE.Group();
+        pivot.scale.x = sx;
+        const wing = new THREE.Mesh(wingGeo, variant);
+        pivot.add(wing);
+        pivot.position.set(0, 0, 0.02);
+        g.add(pivot);
+        pivots.push(pivot);
+      }
+      const baseY = groundHeight(pt.x, pt.z) + 1.3 + rng()*0.7;
+      g.position.set(pt.x, baseY, pt.z);
+      addTo(scene, g);
+      butterflies.push({
+        g, pivotL:pivots[0], pivotR:pivots[1], cx:pt.x, cz:pt.z, baseY,
+        f1: 0.18+rng()*0.1, f2: 0.4+rng()*0.2, f3: 0.6+rng()*0.3,
+        p1: rng()*Math.PI*2, p2: rng()*Math.PI*2, p3: rng()*Math.PI*2,
+        r1: 3+rng()*2.5, r2: 1+rng()*1.2,
+        flapSpeed: 9+rng()*3, flapPhase: rng()*Math.PI*2,
+      });
+    }
+    world.updaters.push((dt,t)=>{
+      for(const b of butterflies){
+        const dx = Math.sin(t*b.f1+b.p1)*b.r1 + Math.sin(t*b.f2+b.p2)*b.r2;
+        const dz = Math.cos(t*b.f1*0.8+b.p1)*b.r1 + Math.cos(t*b.f2+b.p2)*b.r2;
+        b.g.position.x = b.cx + dx;
+        b.g.position.z = b.cz + dz;
+        b.g.position.y = b.baseY + Math.sin(t*b.f3+b.p3)*0.45;
+        // yaw faces the direction of travel — the analytic derivative of the path above, so no
+        // previous-position needs to be stored just to know which way it's currently heading
+        const vx = b.f1*b.r1*Math.cos(t*b.f1+b.p1) + b.f2*b.r2*Math.cos(t*b.f2+b.p2);
+        const vz = -b.f1*0.8*b.r1*Math.sin(t*b.f1*0.8+b.p1) - b.f2*b.r2*Math.sin(t*b.f2+b.p2);
+        b.g.rotation.y = Math.atan2(vx, vz);
+        const flap = Math.sin(t*b.flapSpeed+b.flapPhase)*0.9 - 0.35;
+        b.pivotL.rotation.z = flap; b.pivotR.rotation.z = -flap;
+      }
+    });
+  }
 
   /* ----- decorative glowing mushrooms (harvestable — see world.harvestMushroom) -----
      item 35: instanced. One stem draw plus one cap draw per species covers every mushroom on
@@ -2986,6 +3171,10 @@ export function buildProps(scene, seed, world = WORLD){
     { id:'vigor', color:0xff6a6a, name:'Shrine of Vigor' },
     { id:'fury',  color:0xffa347, name:'Shrine of Fury' },
     { id:'haste', color:0x6ad0ff, name:'Shrine of Haste' },
+    // gamble is the one shrine that can make the player WORSE off — see updateShrines() in
+    // main.js for the actual wager. Purple to read as "different from the other three" at a
+    // glance, same reasoning every rarity/trait colour split in this game already uses.
+    { id:'gamble', color:0xb46bff, name:'Shrine of Fortune' },
   ];
   if(shrines.length){
     const pedestalMat = toonMat({ color:0x7a7266, map:paintTexture('#7a7266',[{c:'#5a5248',n:10,r:8,a:0.4}],{dabs:180}), rim:0.35 });
@@ -3020,6 +3209,58 @@ export function buildProps(scene, seed, world = WORLD){
     }
   }
   world.shrines = shrines;
+
+  /* ----- Frostbound Cairn: a hidden landmark, not a hidden PATH. A secret only a reachability-
+     flood-filled bridge/cave could offer would need `reachable()` to walk an area it doesn't know
+     about yet (see CLAUDE.md's note on the flood and why it only ever runs from the spawn point
+     once) — too easy to silently wall off a legal shelf. This gets the same "only during one
+     weather+season combo" payoff a cheaper way: the cairn sits here, solid and inert, every run;
+     main.js's updateWeatherCairn() only lights it (and only allows the claim) while a Winter
+     blizzard is actively blowing, so the discovery is "I found something IN the whiteout", not
+     a wall that moves. ----- */
+  {
+    const site = spot(rng, 40, 170, 6);
+    const cx = site.x, cz = site.z, cy = groundHeight(cx, cz);
+    const cairn = { x:cx, z:cz, y:cy, claimed:false, lit:false };
+    const stoneMat = toonMat({ color:0x8a8a92, map:paintTexture('#8a8a92',[{c:'#c8ccd2',n:14,r:7,a:0.5}],{dabs:140}), rim:0.4, rimColor:0xdfe8ff });
+    const stackSizes = [0.95, 0.72, 0.5];
+    let stackY = cy;
+    for(let i=0;i<stackSizes.length;i++){
+      const s = stackSizes[i];
+      const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(s, 0), stoneMat);
+      stackY += s*0.75;
+      rock.position.set(cx + (i===1?0.12:-0.08), stackY, cz + (i===1?-0.1:0.1));
+      rock.rotation.set(rng()*Math.PI, rng()*Math.PI, rng()*Math.PI);
+      addOutline(rock, 0.06);
+      addTo(scene, rock);
+      COLLIDERS.push({ x:cx, z:cz, r:s*0.9, bot:stackY-s*0.75, top:stackY+s*0.6 });
+      stackY += s*0.15;
+    }
+    const coreMat = toonMat({ color:0x9fe0ff, emissive:0x9fe0ff, emissiveIntensity:0, rim:0.85, rimColor:0xffffff });
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.26, 1), coreMat);
+    core.scale.set(1, 1.6, 1);
+    core.position.set(cx, stackY + 0.1, cz);
+    addOutline(core, 0.05);
+    addTo(scene, core);
+    const cairnLight = new THREE.PointLight(0x9fe0ff, 0, 9);
+    cairnLight.position.set(cx, stackY + 0.3, cz);
+    addTo(scene, cairnLight);
+    const cph = rng()*7;
+    world.updaters.push((dt,t)=>{
+      if(cairn.claimed){ cairnLight.intensity = 0; coreMat.emissiveIntensity = 0; return; }
+      // dormant: a plain frost-dusted rock pile, indistinguishable from any other cairn until the
+      // one weather+season combo that matters actually arrives
+      const target = cairn.lit ? 1 : 0;
+      coreMat.emissiveIntensity += (target*1.1 - coreMat.emissiveIntensity) * Math.min(1, dt*4);
+      cairnLight.intensity += (target*6 - cairnLight.intensity) * Math.min(1, dt*4);
+      if(cairn.lit){
+        core.rotation.y = t*1.4;
+        core.position.y = stackY + 0.1 + Math.sin(t*2.2+cph)*0.07;
+        cairnLight.intensity += Math.sin(t*3+cph)*0.8;
+      }
+    });
+    world.cairn = cairn;
+  }
 
   /* ----- birds ----- */
   {

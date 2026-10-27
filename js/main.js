@@ -1,8 +1,8 @@
 // main.js — MYCELIUM: Spore Hunter — game orchestration
 import * as THREE from 'three';
-import { ParticlePool, RewardPops, FrameMarks, glowTexture } from './fx.js';
+import { ParticlePool, RewardPops, FrameMarks, glowTexture, toonMat, addOutline, makeBlobShadow } from './fx.js';
 import { buildWorld, groundHeight, groundOnly, COLLIDERS, PARAMS as WORLD_PARAMS } from './world.js';
-import { Mushroom, Boss, GluttonBoss, Player, Companion, Powerup, POWERUPS, RARITIES } from './entities.js';
+import { Mushroom, Boss, GluttonBoss, Player, Companion, COMPANION_TIERS, Powerup, POWERUPS, RARITIES } from './entities.js';
 import { buildInteractiveProps, PROP_PARAMS } from './props.js';
 import { buildFauna, FAUNA } from './fauna.js';
 import { GameAudio } from './audio.js';
@@ -14,8 +14,9 @@ import { ARMOR, ARMOR_BY_ID, ARMOR_SLOTS, SLOT_ICON } from './armor.js';
 import { POTIONS, POTIONS_BY_ID } from './potions.js';
 import { RINGS, RINGS_BY_ID, RING_KEY, RING_KEY_LABEL } from './rings.js';
 import { SPECIES_BY_ID, hexCss } from './mushrooms.js';
-import { rollBossTrait, ASCENDANT_TRAIT } from './bossTraits.js';
+import { rollBossTrait, ASCENDANT_TRAIT, SEASON_BOSS_TRAITS, BOSS_TRAITS } from './bossTraits.js';
 import { rollAffix, NOCTURNAL_AFFIX } from './affixes.js';
+import { buildSporePod } from './swordVisuals.js';
 
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.has('demo');
@@ -181,11 +182,74 @@ function explodeFireball(fb){
   scene.remove(fb.mesh);
 }
 
+// thrown spore pod (Thorn Pod Launcher) — travels outward in a straight line, then homes onto
+// the player's CURRENT position for the return leg, landing up to one hit on each leg. Not the
+// shared projPool above: that pool only ever travels in a straight line, and a boomerang's whole
+// identity is the curve back onto a target that has since moved. At most 1-3 are ever live (the
+// volley finisher throws 3), so a plain array costs nothing a reusable pool would save here.
+const sporePods = [];
+const SPOREPOD_OUT_RANGE = 10, SPOREPOD_OUT_SPEED = 15, SPOREPOD_RETURN_SPEED = 19, SPOREPOD_CATCH_R = 1.1;
+function disposeSporePodVisual(group){
+  group.traverse(obj=>{
+    if(obj.geometry) obj.geometry.dispose();
+    if(obj.material) obj.material.dispose();
+  });
+}
+function spawnSporePod(pos, dir, dmg, color, kbMult=1, crit=false){
+  const vis = buildSporePod();
+  vis.pod.material.color.set(color); vis.pod.material.emissive.set(color);
+  scene.add(vis.group);
+  vis.group.position.copy(pos);
+  sporePods.push({ group:vis.group, pos:pos.clone(), dir:dir.clone(), dmg, kbMult, crit,
+    phase:'out', traveled:0, hitOut:new Set(), hitBack:new Set(), spin:0 });
+}
+function updateSporePods(sdt){
+  for(let i=sporePods.length-1;i>=0;i--){
+    const pod = sporePods[i];
+    pod.spin += sdt*16;
+    pod.group.rotation.y = pod.spin; pod.group.rotation.x = pod.spin*0.6;
+    if(pod.phase === 'out'){
+      const step = SPOREPOD_OUT_SPEED*sdt;
+      pod.pos.addScaledVector(pod.dir, step);
+      pod.traveled += step;
+      if(pod.traveled >= SPOREPOD_OUT_RANGE) pod.phase = 'back';
+    } else {
+      // return leg: steer at the player's CURRENT position, not the outbound line reversed —
+      // "comes back to your hand" depends on tracking you, not retracing a line you've since left.
+      tmpV.copy(game.player.group.position).sub(pod.pos); tmpV.y = 0;
+      const d = tmpV.length();
+      if(d < SPOREPOD_CATCH_R){
+        scene.remove(pod.group); disposeSporePodVisual(pod.group);
+        particles.burst(pod.pos.clone(), 6, {r:0.85,g:0.65,b:0.25, spread:2, size:6, life:0.35});
+        sporePods.splice(i,1); continue;
+      }
+      tmpV.normalize();
+      pod.pos.addScaledVector(tmpV, SPOREPOD_RETURN_SPEED*sdt);
+    }
+    pod.pos.y = groundHeight(pod.pos.x, pod.pos.z) + 1.3 + Math.sin(pod.spin*0.3)*0.15;
+    pod.group.position.copy(pod.pos);
+    const hitSet = pod.phase === 'out' ? pod.hitOut : pod.hitBack;
+    for(const m of game.enemies){
+      if(m.dead || hitSet.has(m)) continue;
+      const rr = 1.0 + 0.9*m.R.scale;
+      const mp = m.group.position;
+      const ddx = pod.pos.x - mp.x, ddz = pod.pos.z - mp.z;
+      if(ddx*ddx + ddz*ddz > rr*rr) continue;
+      hitSet.add(m);
+      m.hit(pod.dmg, pod.pos, game, pod.kbMult);
+      if(game.comboHit) game.comboHit({ killed: m.dead });
+      const dTip = mp.clone(); dTip.y += 2*m.R.scale;
+      game.damageNumber(dTip, pod.dmg, pod.crit, false, m);
+      particles.burst(pod.pos.clone(), 6, {r:0.85,g:0.65,b:0.25, spread:2, size:6, life:0.35});
+    }
+  }
+}
+
 /* ================= game state ================= */
 const game = {
   state:'title', // title | intro | play | pause | tome | over | win
   player:null, enemies:[], powerups:[], boss:null,
-  particles, audio, spawnProjectile, spawnRing, spawnPuddle, spawnFireball,
+  particles, audio, spawnProjectile, spawnRing, spawnPuddle, spawnFireball, spawnSporePod,
   kills:[0,0,0,0,0,0], totalKills:0, rareKills:0,
   startTime:0, hitStopT:0, shakeT:0, shakeAmp:0,
   bossSpawned:false, zone:0,
@@ -194,6 +258,7 @@ const game = {
   dropBonus:0, rarityJitter:[1,1,1,1,1], density:1,
   stormT:0, stormDur:0, // spore storm: 0 = none active, see updateStorm()
   stormFogMult:1, nightFogMult:1, nightT:0, // fog composites from both — see updateNightCycle()
+  season:0, // 0 Spring, 1 Summer, 2 Autumn, 3 Winter — see updateSeason()
   weather:'none', weatherT:0, weatherDur:0, windX:0, windZ:0, // see updateWeather()
   nearestHarvest:null,
   inCave:false, caveChamber:null, // set by enterCave()/exitCave() — see the cave layer below
@@ -498,6 +563,61 @@ function updateHoverTag(dt){
   if(l !== tagL || t !== tagT){ tagL = l; tagT = t; tagEl.style.left = l+'px'; tagEl.style.top = t+'px'; }
 }
 
+/* ---------- always-on rarity labels ----------
+   The hover tag above is deliberately ONE chip, for whatever the crosshair is actually on — that
+   stays as the "what do I do about this" reader. This is a different job: at a glance, across a
+   whole wave, which of these are worth noticing. One pooled DOM node per LIVE enemy (not created/
+   destroyed every frame — see floatNode's own note on why a fight must not thrash <body>), text
+   set once per enemy (rarity never changes), position re-projected every frame since that's a
+   cheap style write, not a reflow-triggering one. Common/Uncommon stay small and quiet on purpose
+   — the escalating size+glow IS the rarity read, the same way scale and emissive already are on
+   the creature itself; a wall of 40 identical-looking labels would be noise, not information. */
+const rarityLabels = new Map();   // Mushroom instance -> {el}
+const rlabelV = new THREE.Vector3();
+const RARITY_LABEL_STYLE = [
+  { size:10, glow:0 },                           // Common — present, but easy to ignore
+  { size:11, glow:0 },                           // Uncommon
+  { size:12, glow:6 },                           // Rare — first tier that starts to glow
+  { size:13, glow:9 },
+  { size:14, glow:13 },
+  { size:15, glow:18 },                          // Mythic — the loudest label on screen
+];
+function updateRarityLabels(){
+  if(game.state !== 'play'){
+    for(const [,r] of rarityLabels) r.el.style.display = 'none';
+    return;
+  }
+  // same orphan check hoverTags itself uses: a new hunt (resetRun) removes old enemies from the
+  // scene directly without ever marking them dead, so `m.dead` alone would leak a label forever
+  for(const [m, r] of rarityLabels){
+    if(m.dead || m.isBoss || !m.group.parent){ r.el.remove(); rarityLabels.delete(m); }
+  }
+  for(const m of game.enemies){
+    if(m.dead || m.isBoss) continue;
+    let r = rarityLabels.get(m);
+    if(!r){
+      const el = document.createElement('div');
+      el.className = 'raritylabel';
+      el.textContent = m.R.name;
+      const st = RARITY_LABEL_STYLE[m.rarity];
+      const c = RARITY_COLORS[m.rarity];
+      el.style.color = c;
+      el.style.fontSize = st.size + 'px';
+      el.style.textShadow = st.glow
+        ? `0 2px 0 #1c1410, 0 0 ${st.glow}px ${c}`
+        : '0 2px 0 #1c1410';
+      document.body.appendChild(el);
+      r = { el };
+      rarityLabels.set(m, r);
+    }
+    rlabelV.set(m.group.position.x, m.group.position.y + 1.3 + m.R.scale*1.15, m.group.position.z).project(camera);
+    if(rlabelV.z > 1 || rlabelV.z < -1){ r.el.style.display = 'none'; continue; }
+    r.el.style.display = 'block';
+    r.el.style.left = ((rlabelV.x*0.5+0.5)*innerWidth)+'px';
+    r.el.style.top = ((-rlabelV.y*0.5+0.5)*innerHeight)+'px';
+  }
+}
+
 /* item 08 — a contract row has to read for SIX kinds now, not one, so the two things that used to
    come from the species (the swatch colour and the icon) come from the kind when there is no
    species. The NAME is the objective sentence rather than a noun: "Harvest 7 Azure Cap" tells you
@@ -747,10 +867,12 @@ function doTravel(ev){
 /* The interact key. E/F/R/Q/G are potions, H is harvest, B/TAB/M/1-7/SPACE/SHIFT are taken —
    so [C] is the world-interaction key, and the contextual prompt names it every time it applies. */
 function tryInteract(){
-  if(game.state !== 'play' || !props) return;
+  if(game.state !== 'play') return;
   const t = interactTarget;
   if(!t) return;
-  if(t.type === 'chest') props.pry(t);          // pry() emits; payoutChest() pays
+  if(t.type === 'merchant') openMerchantShop();
+  else if(!props) return;
+  else if(t.type === 'chest') props.pry(t);          // pry() emits; payoutChest() pays
   else if(t.type === 'vent') props.travel(t);
   else if(t.type === 'cache') props.digCache(t); // digCache() emits; payoutCache() pays
 }
@@ -800,6 +922,7 @@ function spawnCaveGuardians(chamber){
   leader.group.scale.multiplyScalar(1.4);
   leader.cap.material.emissive.setHex(0xb478ff);
   leader.cap.material.emissiveIntensity = Math.max(leader.cap.material.emissiveIntensity || 0, 0.6);
+  leader.emissBase = leader.cap.material.emissive.clone(); // see spawnPack's identical fix — otherwise the leader's first hit fades its tint back to plain rarity glow
   if(leader.aura) leader.aura.material.color.setHex(0xb478ff);
   if(leader.groundRing) leader.groundRing.material.color.setHex(0xb478ff);
   const dmgMult = 1.25, spdMult = 1.1;
@@ -1286,13 +1409,19 @@ function updateHarvestPrompt(){
      a mushroom you can pick anywhere. The chest's line comes from progress.chestPrompt(), so the
      real per-lockpick probability is on screen BEFORE the lockpick is spent — that is item 14's point. */
   const pp = p.group.position;
-  const chest = props ? props.nearestChest(pp.x, pp.z, pp.y) : null;
-  const vent = (!chest && props) ? props.ventUnderfoot(pp.x, pp.z, pp.y, p.grounded) : null;
-  const cache = (!chest && !vent && props) ? props.nearestCache(pp.x, pp.z, pp.y) : null;
-  interactTarget = chest || vent || cache || null;
-  if(props) props.setHovered(interactTarget);   // the thing [C] would act on is the thing that glows
+  // the merchant wins the [C] prompt outright when in range — it's rare (at most one, only at
+  // night) and a real choice, same reasoning a chest already outranks a mushroom underfoot.
+  const nearMerchant = nightMerchant && Math.hypot(nightMerchant.group.position.x-pp.x, nightMerchant.group.position.z-pp.z) < 2.8;
+  const chest = (!nearMerchant && props) ? props.nearestChest(pp.x, pp.z, pp.y) : null;
+  const vent = (!nearMerchant && !chest && props) ? props.ventUnderfoot(pp.x, pp.z, pp.y, p.grounded) : null;
+  const cache = (!nearMerchant && !chest && !vent && props) ? props.nearestCache(pp.x, pp.z, pp.y) : null;
+  interactTarget = nearMerchant ? { type:'merchant' } : (chest || vent || cache || null);
+  if(props) props.setHovered(nearMerchant ? null : interactTarget);   // the thing [C] would act on is the thing that glows
   let txt = null, id = null;
-  if(chest){
+  if(nearMerchant){
+    txt = '[' + INTERACT_LABEL + '] Trade with the Night Merchant';
+    id = 'nm|' + nightMerchant.stock.filter(s=>!s.bought).length;
+  } else if(chest){
     txt = '[' + INTERACT_LABEL + '] ' + props.promptFor(chest);
     id = 'c|' + chest.x.toFixed(1) + '|' + chest.state.tries + '|' + progress.lockpicks;
   } else if(vent){
@@ -1340,7 +1469,10 @@ function zoneMultAt(pos){
 // the Spore Pup companion (progress.unlockCompanion) — called once from resetRun() when already
 // unlocked, and once more from game.onKill the instant it's FIRST unlocked mid-run
 function spawnCompanion(){
-  game.companion = new Companion(scene);
+  // tier is read fresh every time, never cached — a Companion Core found earlier in the SAME run
+  // (progress.upgradeCompanionTier) is a permanent write, so the very next reset/continue already
+  // picks it up for free without this function needing to know a core was ever found.
+  game.companion = new Companion(scene, progress.companionTier);
   const pp = game.player.group.position;
   game.companion.group.position.set(pp.x + 1.2, pp.y, pp.z - 1.2);
   shadowize(game.companion.group, { noCast: true }); // rule 2: it gets the same blob-shadow treatment the player does
@@ -1367,6 +1499,11 @@ function spawnEnemy(rarityIdx, pos, forcedMult=null){
       if(m.aura) m.aura.material.color.set(affix.tint);
       if(m.groundRing) m.groundRing.material.color.set(affix.tint);
       m.cap.material.emissive.set(affix.tint);
+      // emissBase is what the hit-flash fade (Mushroom.update) converges back to once the flash
+      // decays — without re-pointing it here, the affix tint (the player's primary visual read on
+      // which counter-ring a mushroom belongs to) would fade back to the plain rarity glow the
+      // instant this mushroom took its first hit.
+      m.emissBase = m.cap.material.emissive.clone();
     }
   }
   return m;
@@ -1382,7 +1519,7 @@ function tagEnemy(m){
   // player actually sees the tag, which is what makes the counter-ring readable at all.
   game.hoverTags.register(m.group, ()=> m.dead ? null : m.isBoss
     ? `⚠ ${m.R.name} · ${Math.ceil(m.hp)} HP — punish the wind-up, then swing`
-    : `${m.R.name}${m.affix ? ' · '+m.affix.name : ''} · ${Math.ceil(m.hp)} HP — cut it down for ✦ ${ESS_NAMES[m.rarity]}`,
+    : `${m.R.name}${m.affix ? ' · '+m.affix.name : ''}${m.isChoirLeader ? ' · Lead Singer ('+CHOIR_TYPES[m.choirType].name+') — '+CHOIR_TYPES[m.choirType].tag : ''} · ${Math.ceil(m.hp)} HP — cut it down for ✦ ${ESS_NAMES[m.rarity]}`,
     { range: 26, lift: 1.4 + m.R.scale });
 }
 // every drop lands here, so the payout pop, the hover tag and the list membership can't drift
@@ -1398,6 +1535,7 @@ function addDrop(pw){
     : d.isRing ? `${d.name} — walk over it, then HOLD ${RING_KEY_LABEL} to use its charge`
     : d.isPotion ? `${d.name} — walk over it, then press ${POTIONS_BY_ID[d.potionId].key} to drink`
     : d.isArmor ? `${d.name} — walk over it to fill your ${d.slot} slot`
+    : d.isCompanionCore ? `${d.name} — walk over it to strengthen your ${progress.companionName}`
     : `${d.name} — walk over it for a timed boost`;
   game.hoverTags.register(pw.group, ()=> pw.dead ? null : `${d.icon} ${verb}`, { range: 22, lift: 1.1 });
   return pw;
@@ -1482,6 +1620,68 @@ function updateStorm(p, sdt){
     game.stormFogMult = 1; // safety snap-back once the fade-out reaches 0
   }
 }
+/* Seasons: a SECOND, much slower world clock on top of the night cycle, same `elapsed` so it
+   never resets between hunts either. Four seasons, each gets exactly one visible change (fog tint
+   + a signature ambient particle) and exactly one gameplay change, read through a single existing
+   chokepoint per effect rather than a new branch everywhere — spring's bonus lives inside
+   spawnWave's existing formation roll, autumn's lives inside effDropBonus(), summer's lives inside
+   updateWeather's existing roll, and winter's lives inside Player's existing stopPow slip in
+   entities.js. That keeps "what season is it" from becoming its own parallel systems.
+
+   `elapsed` always starts at 0 on a fresh page load, which meant EVERY new world opened on Spring
+   and took a full 6 minutes before anything could look different — reported as "I only ever see
+   one season, even on a new world". `seasonOffset` (set once in resetRun(), seeded off game.seed)
+   fixes that: a new world rolls which season it's already IN before the player ever sees it,
+   rather than every world starting the clock at the same place. */
+const SEASON_NAMES = ['Spring','Summer','Autumn','Winter'];
+const SEASON_ICONS = ['🌸','☀️','🍂','❄️'];
+const SEASON_LEN = 360; // seconds per season — a 24-minute full rotation: long enough to feel
+                          // seasonal, short enough that a long session sees more than one.
+const SEASON_FOG_TINT = [
+  new THREE.Color(0xcdeeb0), // spring — pale fresh green
+  new THREE.Color(0xffe9a0), // summer — warm gold
+  new THREE.Color(0xe3a05c), // autumn — amber
+  new THREE.Color(0xcfe6f2), // winter — pale ice blue
+];
+// bumped from 0.22 — the original was too subtle to read against the world's own palette, which
+// is the other half of "I can't see different seasons" (the rest was the offset bug above)
+const SEASON_TINT_STRENGTH = 0.4;
+const SEASON_SPRING_FORMATION_BONUS = 0.12; // blooms draw mushrooms into groups more often
+const SEASON_SUMMER_WEATHER_CHANCE = 0.5;   // vs the base 0.3 roll in updateWeather
+const SEASON_AUTUMN_DROP_BONUS = 0.08;      // harvest season — reads through effDropBonus()
+let announcedSeason = -1;
+let seasonOffset = 0; // seconds, randomized once per world in resetRun() — see note above
+function updateSeason(p, sdt){
+  const idx = Math.floor((elapsed + seasonOffset) / SEASON_LEN) % 4;
+  game.season = idx;
+  if(announcedSeason === -1){
+    announcedSeason = idx; // don't announce the season already running at hunt start...
+    setText(document.getElementById('seasonhud'), `${SEASON_ICONS[idx]} ${SEASON_NAMES[idx]}`); // ...but still show it
+  } else if(idx !== announcedSeason){
+    announcedSeason = idx;
+    announce(`${SEASON_ICONS[idx]} ${SEASON_NAMES[idx]} begins`, 'good');
+    setText(document.getElementById('seasonhud'), `${SEASON_ICONS[idx]} ${SEASON_NAMES[idx]}`);
+  }
+  // fog color itself is NOT written here — updateNightCycle() is the one write that combines this
+  // season's tint with the night tint, same reason game.stormFogMult/nightFogMult combine in one
+  // place instead of each updater fighting the other for the last write.
+  // ambient per-season particle — atmosphere only, deliberately slower/sparser than the rain
+  // weather's own falling droplet so the two never compete for the same visual job. Summer's
+  // fireflies are the one season particle gated on time of day rather than always-on.
+  const rate = idx===1 ? (game.nightT>0.5 ? 2.2 : 0) : 2.6;
+  if(rate>0 && Math.random() < sdt*rate){
+    const a = Math.random()*Math.PI*2, r = Math.random()*14;
+    const px = p.group.position.x+Math.cos(a)*r, pz = p.group.position.z+Math.sin(a)*r;
+    if(idx===0) particles.spawn(px, p.group.position.y+6+Math.random()*3, pz,
+      {r:1,g:0.78,b:0.88, spread:0.2, size:5, life:1.2, vy:-2.2, vx:(Math.random()-0.5)*0.6, drag:0.3, grav:0});
+    else if(idx===1) particles.spawn(px, p.group.position.y+0.6+Math.random()*1.5, pz,
+      {r:0.85,g:1,b:0.55, spread:0.15, size:4, life:1.6, vy:0.4, drag:0.5, grav:0});
+    else if(idx===2) particles.spawn(px, p.group.position.y+6+Math.random()*3, pz,
+      {r:0.9,g:0.55,b:0.2, spread:0.25, size:6, life:1.4, vy:-1.8, vx:(Math.random()-0.5)*1.2, drag:0.3, grav:0});
+    else particles.spawn(px, p.group.position.y+6+Math.random()*3, pz,
+      {r:0.92,g:0.96,b:1, spread:0.15, size:4, life:1.8, vy:-1.4, vx:(Math.random()-0.5)*0.4, drag:0.2, grav:0});
+  }
+}
 /* Night cycle: a WORLD CLOCK independent of world.js's own sun sweep — deliberately so. The sun's
    elevation swing is narrowed on purpose (world.js ELEV_SWING) so cream props never go unlit; this
    never touches sun.intensity/hemi.intensity, only fog, so it cannot reopen that bug. `elapsed`
@@ -1492,17 +1692,47 @@ function updateStorm(p, sdt){
 const NIGHT_CYCLE = 240;                      // seconds for one full day+night loop
 const NIGHT_START = 0.60, NIGHT_FULL = 0.68, NIGHT_END = 0.90, NIGHT_OVER = 0.98; // fractions of the cycle
 const NIGHT_FOG_TINT = new THREE.Color(0x1c1230);
+/* The sky dome's own uTop/uMid/uBot (see world.js) were set once at world build and never
+   touched again — only the FOG changed through a day/night cycle, so the actual sky overhead
+   stayed frozen on its original daytime gradient the whole time. SKY_SUNSET/SKY_NIGHT are the two
+   extra states this blends toward, in the exact colour language asked for: sunset is soft peach/
+   warm pink/gentle lavender/golden, night is deep soft blue/gentle violet/a hint of magical cyan.
+   sunsetAmount peaks at the MIDPOINT of either transition (dusk or dawn) and is zero at both full
+   day and full night — that falls straight out of applying a "peak at 0.5" shape to nightT itself,
+   since nightT already IS a 0->1->0 envelope across the whole cycle (see its own definition
+   below), so no separate dusk/dawn bookkeeping is needed. */
+const SKY_SUNSET = { top:new THREE.Color(0xc9a8e0), mid:new THREE.Color(0xffb3a0), bot:new THREE.Color(0xffd27a) };
+const SKY_NIGHT  = { top:new THREE.Color(0x1c2a52), mid:new THREE.Color(0x3a2f6b), bot:new THREE.Color(0x3a5a7a) };
+const _skyTmp = new THREE.Color(); // reused every frame — no per-frame allocation
 let wasNight = false;
 function updateNightCycle(){
-  const p = (elapsed % NIGHT_CYCLE) / NIGHT_CYCLE;
-  const fadeIn = THREE.MathUtils.smoothstep(p, NIGHT_START, NIGHT_FULL);
-  const fadeOut = 1 - THREE.MathUtils.smoothstep(p, NIGHT_END, NIGHT_OVER);
+  const cyc = (elapsed % NIGHT_CYCLE) / NIGHT_CYCLE;
+  const fadeIn = THREE.MathUtils.smoothstep(cyc, NIGHT_START, NIGHT_FULL);
+  const fadeOut = 1 - THREE.MathUtils.smoothstep(cyc, NIGHT_END, NIGHT_OVER);
   const nightT = Math.min(fadeIn, fadeOut);
   game.nightT = nightT;
   // capped well short of 1: a "night" the player can still read is the whole point (see
   // world.js's own cream-readability rule) — this darkens the mood, it does not go dark.
   game.nightFogMult = 1 + 0.55*nightT;
-  if(baseFogColor) scene.fog.color.copy(baseFogColor).lerp(NIGHT_FOG_TINT, nightT*0.6);
+  if(baseFogColor) scene.fog.color.copy(baseFogColor).lerp(SEASON_FOG_TINT[game.season], SEASON_TINT_STRENGTH).lerp(NIGHT_FOG_TINT, nightT*0.6);
+  // the sky dome's own gradient, blended the same way the fog line above already is — day
+  // baseline -> warm sunset at the transition midpoint -> night palette once fully dark. One
+  // write, same "combine here, not in three places" reasoning the fog composite already uses.
+  if(world.skyMat && world.skyDayColors){
+    const sunsetAmount = Math.min(1, 4*nightT*(1-nightT));
+    const u = world.skyMat.uniforms;
+    _skyTmp.copy(world.skyDayColors.top).lerp(SKY_NIGHT.top, nightT).lerp(SKY_SUNSET.top, sunsetAmount*0.7);
+    u.uTop.value.copy(_skyTmp);
+    _skyTmp.copy(world.skyDayColors.mid).lerp(SKY_NIGHT.mid, nightT).lerp(SKY_SUNSET.mid, sunsetAmount*0.7);
+    u.uMid.value.copy(_skyTmp);
+    _skyTmp.copy(world.skyDayColors.bot).lerp(SKY_NIGHT.bot, nightT).lerp(SKY_SUNSET.bot, sunsetAmount*0.7);
+    u.uBot.value.copy(_skyTmp);
+    // uFog was bound to a Color object FogExp2's constructor had already copied out of — a
+    // separate object from scene.fog.color, so it never actually tracked the animated fog at
+    // all (verified by reading FogExp2's own constructor in vendor/three.module.js). This is the
+    // one write that fixes it, in the same place the fog itself finishes changing each frame.
+    u.uFog.value.copy(scene.fog.color);
+  }
   const isNight = nightT > 0.5;
   if(isNight !== wasNight){
     wasNight = isNight;
@@ -1513,13 +1743,37 @@ function updateNightCycle(){
    sideways, see WIND_PUSH) — independent of the spore storm, which is a depth-gated HAZARD event.
    Weather is atmosphere plus a light movement modifier, so it is available from the start of any
    hunt rather than something only a deep run ever sees. Never both at once: one active weather at
-   a time keeps it readable as "what's happening right now" instead of a stacked modifier soup. */
+   a time keeps it readable as "what's happening right now" instead of a stacked modifier soup.
+
+   Blizzard is the one deliberate exception: a Winter-only COMBO of rain's slide and wind's push,
+   rarer than either alone, with its own longer telegraph (pendingBlizzardT) instead of the usual
+   instant-on roll, and a guaranteed reward on the far side — braving a whiteout should always pay
+   off, not just roll the dice on whether loot happened to be nearby when it passed. */
 let weatherCheckCd = 12 + Math.random()*10;
+let pendingBlizzardT = 0;
+const BLIZZARD_CHANCE = 0.4; // of the weather rolls that happen during Winter
 function updateWeather(p, sdt){
+  if(pendingBlizzardT > 0){
+    pendingBlizzardT -= sdt;
+    if(pendingBlizzardT <= 0){
+      game.weather = 'blizzard';
+      game.weatherDur = game.weatherT = 20 + Math.random()*10;
+      const a = Math.random()*Math.PI*2;
+      game.windX = Math.cos(a); game.windZ = Math.sin(a);
+      audio.hiss(0.7, 0.22, 150, 1700);
+    }
+    return; // the warning is still counting down — nothing has actually hit yet
+  }
   weatherCheckCd -= sdt;
   if(weatherCheckCd <= 0){
     weatherCheckCd = 45 + Math.random()*35;
-    if(game.weather === 'none' && Math.random() < 0.3){
+    if(game.weather === 'none' && Math.random() < (game.season===1 ? SEASON_SUMMER_WEATHER_CHANCE : 0.3)){
+      if(game.season === 3 && Math.random() < BLIZZARD_CHANCE){
+        pendingBlizzardT = 4.5;
+        announce('❄️⚠ A blizzard is building on the horizon... ⚠❄️', 'bad');
+        audio.hiss(0.4, 0.1, 500, 850);
+        return;
+      }
       game.weather = Math.random() < 0.5 ? 'rain' : 'wind';
       game.weatherDur = game.weatherT = 22 + Math.random()*16;
       if(game.weather === 'wind'){
@@ -1533,7 +1787,17 @@ function updateWeather(p, sdt){
   }
   if(game.weather === 'none') return;
   game.weatherT -= sdt;
-  if(game.weatherT <= 0){ game.weather = 'none'; return; }
+  if(game.weatherT <= 0){
+    if(game.weather === 'blizzard'){
+      // guaranteed, not a chance roll — reuses the exact drop functions a boss kill already calls
+      // (isBoss=true just rides their existing amount formula), so weathering a blizzard needs no
+      // reward system of its own.
+      dropCoin(p.group.position.clone(), 5, true);
+      dropEssence(p.group.position.clone(), 5, true);
+      announce('❄️ The blizzard breaks — the Bloom left something behind', 'good');
+    }
+    game.weather = 'none'; return;
+  }
   // fades in/out over the last 3s of each end, same triangular shape the storm uses, so a weather
   // event doesn't snap on/off but its particle rate can just read the raw timer without a second
   // envelope variable — the visible fade IS the timer running out.
@@ -1548,6 +1812,12 @@ function updateWeather(p, sdt){
     const px = p.group.position.x+Math.cos(a)*r, pz = p.group.position.z+Math.sin(a)*r;
     particles.spawn(px, p.group.position.y+1+Math.random()*2, pz,
       {r:0.85,g:0.9,b:0.8, spread:0.3, size:5, life:0.6, vx:game.windX*6, vz:game.windZ*6, grav:0, drag:1});
+  } else if(game.weather === 'blizzard' && Math.random() < sdt*34*fadeGate){
+    // heavier than either rain or wind alone — a whiteout, not just "both at once"
+    const a = Math.random()*Math.PI*2, r = Math.random()*13;
+    const px = p.group.position.x+Math.cos(a)*r, pz = p.group.position.z+Math.sin(a)*r;
+    particles.spawn(px, p.group.position.y+7+Math.random()*3, pz,
+      {r:0.92,g:0.96,b:1, spread:0.2, size:6, life:0.6, vy:-10, vx:game.windX*4, vz:game.windZ*4, drag:0.5, grav:0});
   }
 }
 // enemy packs: a small common/uncommon-only squad around one buffed leader — deliberately kept
@@ -1573,22 +1843,73 @@ function spawnPack(centerPos){
   leader.group.scale.multiplyScalar(1.25);
   leader.cap.material.emissive.setHex(0xffb347);
   leader.cap.material.emissiveIntensity = Math.max(leader.cap.material.emissiveIntensity || 0, 0.55);
+  // emissBase is what the hit-flash fade (Mushroom.update) converges back to once the flash
+  // decays — without re-pointing it here, the leader's own first hit would fade its tint straight
+  // back to its plain rarity glow, erasing the one thing that marks it as the leader.
+  leader.emissBase = leader.cap.material.emissive.clone();
   for(const m of leader.packMembers){
     m.dmg *= PACK_DMG_MULT; m.speed *= PACK_SPEED_MULT;
     m._packDmgMult = PACK_DMG_MULT; m._packSpeedMult = PACK_SPEED_MULT; // die()'s revert reads these, not the module constant
     m.packLeader = leader;
   }
 }
+// singing mushroom groups ("choir"): the same spawn-time grouping spawnPack() uses, same
+// common/uncommon-only reasoning, but a DIFFERENT threat shape on purpose — bigger groups (4-6,
+// not 3-4) and three different SONGS, so "which choir is this" is a real read, not just a tint.
+// "Within earshot" is the spawn cluster radius itself (4.5 m, wider than a pack's 3.2 m) rather
+// than a live per-frame proximity check — same simplification spawnPack() makes, and for the same
+// reason: membership decided once at spawn keeps die()'s revert a flat list walk instead of a
+// per-frame cost on every live mushroom. The actual per-song behavior lives in entities.js
+// (Mushroom.update/die/hit) — this table is just what main.js needs to spawn the right one.
+const CHOIR_DMG_MULT = 1.3;
+const CHOIR_TYPES = [
+  { name:'War Chant',    ring:0x7ad8ff, tag:'buffs its group\'s damage — kill it to silence the buff' },
+  { name:'Mending Song', ring:0x7aff9a, tag:'heals its group over time — kill it to stop the healing' },
+  { name:'Hushed Chant', ring:0xb47aff, tag:'makes its group hard to hit — kill it to stop the phasing' },
+];
+function spawnChoir(centerPos){
+  const rarityIdx = Math.random() < 0.6 ? 0 : 1;
+  const choirSize = 4 + ((Math.random()*3)|0);
+  const members = [];
+  for(let i=0;i<choirSize;i++){
+    const a = Math.random()*Math.PI*2, r = Math.random()*4.5;
+    const pos = centerPos.clone().add(new THREE.Vector3(Math.cos(a)*r, 0, Math.sin(a)*r));
+    if(Math.hypot(pos.x,pos.z) > 190) continue;
+    members.push(spawnEnemy(rarityIdx, pos));
+  }
+  if(members.length < 3) return; // too small to read as a choir — leave them as loose spawns
+  const typeIdx = (Math.random()*CHOIR_TYPES.length)|0;
+  const type = CHOIR_TYPES[typeIdx];
+  const leader = members[0];
+  leader.choirType = typeIdx;
+  leader.addChoirRing(type.ring); // sets isChoirLeader + builds the expanding sound-ring
+  leader.choirMembers = members.slice(1);
+  leader.group.scale.multiplyScalar(1.2);
+  leader.cap.material.emissive.setHex(type.ring);
+  leader.cap.material.emissiveIntensity = Math.max(leader.cap.material.emissiveIntensity || 0, 0.55);
+  leader.emissBase = leader.cap.material.emissive.clone(); // see spawnPack's identical fix — otherwise the leader's first hit fades its tint back to plain rarity glow
+  for(const m of leader.choirMembers){
+    m.choirLeader = leader;
+    if(typeIdx === 0){
+      m.dmg *= CHOIR_DMG_MULT;
+      m._choirDmgMult = CHOIR_DMG_MULT; // die()'s revert reads this, not the module constant
+    } else if(typeIdx === 2){
+      m.addEvasionSprite(); // Hushed Chant: needs the visual ready before the leader ever toggles it on
+    }
+  }
+}
 function spawnWave(n){
   n = Math.max(1, Math.round(n * game.density * (game.stormT > 0 ? 1.6 : 1)));
   const pp = game.player.group.position;
-  // roughly one wave in four forms a pack instead of independent spawns, and only once enough
-  // enemies are being thrown out at once for a squad to read as a squad rather than a coincidence.
-  // golden seeds push this to more than half — noticeably pack-heavy without making every single
-  // wave a mini-boss fight, which a guaranteed 100% would.
-  if(n >= 3 && Math.random() < (GOLDEN ? 0.6 : 0.25)){
+  // roughly one wave in four forms a pack OR a choir instead of independent spawns, and only
+  // once enough enemies are being thrown out at once for a squad to read as a squad rather than
+  // a coincidence. golden seeds push this to more than half — noticeably formation-heavy without
+  // making every single wave a mini-boss fight, which a guaranteed 100% would. One roll decides
+  // BOTH whether a formation happens and which kind, so this stays the one chokepoint for both.
+  if(n >= 3 && Math.random() < (GOLDEN ? 0.6 : 0.25) + (game.season===0 ? SEASON_SPRING_FORMATION_BONUS : 0)){
     const a = Math.random()*Math.PI*2, r = 18 + Math.random()*30;
-    spawnPack(new THREE.Vector3(pp.x + Math.cos(a)*r, 0, pp.z + Math.sin(a)*r));
+    const spot = new THREE.Vector3(pp.x + Math.cos(a)*r, 0, pp.z + Math.sin(a)*r);
+    if(Math.random() < 0.5) spawnPack(spot); else spawnChoir(spot);
     n -= 3;
   }
   for(let i=0;i<n;i++){
@@ -1650,6 +1971,7 @@ function updateBounty(sdt){
   // counter is still readable, just not colour-coded on top of the bounty gold.
   m.cap.material.emissive.setHex(0xffd94a);
   m.cap.material.emissiveIntensity = Math.max(m.cap.material.emissiveIntensity || 0, 0.6);
+  m.emissBase = m.cap.material.emissive.clone(); // see spawnPack's identical fix — otherwise the bounty's first hit fades its gold tint back to plain rarity glow
   if(m.aura) m.aura.material.color.setHex(0xffd94a);
   if(m.groundRing) m.groundRing.material.color.setHex(0xffd94a);
   game.bounty = m;
@@ -1663,6 +1985,40 @@ const SHRINE_TRIGGER_R2 = 2.4*2.4;
 const SHRINE_LABELS = { vigor:'Shrine of Vigor — max HP up, and fully healed',
   fury:'Shrine of Fury — damage up for the rest of this hunt',
   haste:'Shrine of Haste — move speed up for the rest of this hunt' };
+// Shrine of Fortune: the one shrine of the four that can leave the player WORSE off, not just
+// "found a buff" — a real bet, not a disguised always-win. Bets a slice of EVERY essence tier at
+// once (not one chosen tier) so it reads as "wagering your spore bank", not "pick your favourite
+// colour to risk". Claimed only on an ACTUAL bet — touching it with an empty bank does nothing and
+// does not burn the shrine, since there is nothing to gamble yet.
+// win_chance * win_mult = 0.896, i.e. a ~10% house edge — a real average loss over many tries,
+// not dressed-up free essence. Checked explicitly: it's easy to pick a "scary" low chance with a
+// "big" multiplier and end up net-positive anyway (0.35 * 3.2 = 1.12, which was the first draft
+// here and was WRONG for exactly that reason) — this pair was solved for a negative EV on purpose.
+const GAMBLE_BET_FRACTION = 0.4, GAMBLE_WIN_CHANCE = 0.28, GAMBLE_WIN_MULT = 3.2;
+function resolveGambleShrine(pp){
+  const bet = progress.bank.map(n => Math.round(n * GAMBLE_BET_FRACTION));
+  const totalBet = bet.reduce((a,b)=>a+b, 0);
+  if(totalBet <= 0) return false; // nothing to wager — leave the shrine unclaimed for later
+  for(let i=0;i<bet.length;i++) progress.bank[i] -= bet[i];
+  progress.saveBank();
+  const betText = bet.map((n,i)=> n>0 ? `✦${n} ${RARITIES[i].name}` : null).filter(Boolean).join(', ');
+  const won = Math.random() < GAMBLE_WIN_CHANCE;
+  if(won){
+    const payout = bet.map(n => Math.round(n * GAMBLE_WIN_MULT));
+    for(let i=0;i<payout.length;i++) if(payout[i]>0) progress.collect(i, payout[i]);
+    const winText = payout.map((n,i)=> n>0 ? `✦${n} ${RARITIES[i].name}` : null).filter(Boolean).join(', ');
+    particles.burst(pp.clone().setY(1.5), 32, {r:0.85,g:0.6,b:1, spread:4, size:10, life:1.1});
+    game.shake(0.4);
+    audio.gearUp(5);
+    announce(`🎲 Wagered ${betText} — JACKPOT! Won ${winText}!`, 'cool');
+  } else {
+    particles.burst(pp.clone().setY(1.5), 10, {r:0.4,g:0.3,b:0.5, spread:2, size:6, life:0.6});
+    audio.click();
+    announce(`🎲 Wagered ${betText} — the Shrine of Fortune took it all.`, 'bad');
+  }
+  updateHUD();
+  return true;
+}
 function updateShrines(){
   if(!world.shrines || !world.shrines.length) return;
   const pp = game.player.group.position;
@@ -1670,6 +2026,7 @@ function updateShrines(){
     if(sh.claimed) continue;
     const dx = pp.x-sh.x, dz = pp.z-sh.z;
     if(dx*dx + dz*dz > SHRINE_TRIGGER_R2) continue;
+    if(sh.kind === 'gamble'){ if(resolveGambleShrine(pp)) sh.claimed = true; return; }
     sh.claimed = true;
     const p = game.player;
     if(sh.kind === 'vigor'){ p.maxHp = Math.round(p.maxHp*1.15); p.hp = p.maxHp; }
@@ -1683,8 +2040,183 @@ function updateShrines(){
     return; // at most 3 shrines in a world and they're spaced well apart — one claim per frame is plenty
   }
 }
+/* Frostbound Cairn: world.js places one every world, dormant and indistinguishable from scenery.
+   It only lights (and only accepts the claim) during an active Winter blizzard — the one weather+
+   season combo that gates it, same ask as a hidden path but without touching reachable()/COLLIDERS
+   terrain logic (see the long comment in world.js for why that flood-fill risk wasn't worth it).
+   Braving the whiteout to go LOOK for it is the whole reward loop; the guaranteed drops on top are
+   the same "worth the wait" payout the blizzard's own end-of-storm trinket already promises, just
+   bigger, because finding this took more than just standing still. */
+const CAIRN_TRIGGER_R2 = 2.6*2.6;
+function updateWeatherCairn(){
+  if(!world.cairn || world.cairn.claimed) return;
+  const active = game.season === 3 && game.weather === 'blizzard';
+  world.cairn.lit = active;
+  if(!active) return;
+  const pp = game.player.group.position;
+  const dx = pp.x-world.cairn.x, dz = pp.z-world.cairn.z;
+  if(dx*dx + dz*dz > CAIRN_TRIGGER_R2) return;
+  world.cairn.claimed = true;
+  const drop = pp.clone();
+  dropEssence(drop, 4, true);
+  dropCoin(drop, 4, true);
+  dropWeapon(drop, Math.random()<0.5 ? 2 : 3, true);
+  audio.unlock();
+  particles.burst(pp.clone().setY(1.6), 26, {r:0.75,g:0.95,b:1, spread:3.5, size:10, life:0.9});
+  game.shake(0.35);
+  announce('❄️✨ The whiteout revealed a Frostbound Cairn!', 'cool');
+  updateHUD();
+}
+/* Night Merchant: a found-not-fought NPC like the shrines above, but interaction-gated (walk up,
+   press [C]) instead of touch-triggered — buying something is a real choice, not a passive
+   pickup. Appears the instant full night hits and leaves the instant dawn does, using the SAME
+   nightT>=0.5 threshold updateNightCycle()'s own day/night announce flip already uses, so
+   "merchant hours" always line up with what the player already reads as "night" from everything
+   else the cycle touches. Mycelium-only stock (progress.merchantBuyGear) is what makes this a
+   genuinely different economy from the Forge, which always costs coins AND Mycelium for a
+   player-CHOSEN item — these three slots are rolled, not picked, and spend the one currency that
+   otherwise has the fewest sinks. */
+let nightMerchant = null;      // { group, lanternGlow, stock:[...] } or null
+let merchantVisitedThisNight = false;
+const MERCHANT_SLOT_COUNT = 3;
+function buildMerchantVisual(){
+  const g = new THREE.Group();
+  const robeMat = toonMat({ color:0x2a2240, rim:0.55, rimColor:0x9a7fd8 });
+  const skinMat = toonMat({ color:0xd8b896, rim:0.3 });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.65, 4, 8), robeMat);
+  body.position.y = 1.0; addOutline(body, 0.08);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 8), skinMat);
+  head.position.y = 1.72; addOutline(head, 0.07);
+  const hood = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.5, 8), robeMat);
+  hood.position.y = 2.0; addOutline(hood, 0.06);
+  const lanternPole = new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,0.6,5), toonMat({ color:0x3a2a1a, rim:0.3 }));
+  lanternPole.position.set(0.4, 1.1, 0.1); lanternPole.rotation.z = -0.3; addOutline(lanternPole, 0.1);
+  const lanternGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map:glowTexture(), color:0xffc46b,
+    transparent:true, opacity:0.85, blending:THREE.AdditiveBlending, depthWrite:false, fog:false }));
+  lanternGlow.scale.setScalar(0.5); lanternGlow.position.set(0.56, 0.82, 0.14);
+  g.add(body, head, hood, lanternPole, lanternGlow);
+  const blob = makeBlobShadow(1.3); blob.position.y = 0.03; g.add(blob);
+  return { group:g, lanternGlow, t: Math.random()*10 };
+}
+// three rolled slots: 1 weapon, 1 armor (unowned preferred — a merchant should feel like a real
+// chance at something new, not just more dupes), and either a Companion Core (if the Pup is
+// unlocked — the merchant is the only source OTHER than a boss-rarity drop) or a coin bundle
+// (before that, a core would just be a dead slot).
+function rollMerchantStock(){
+  const stock = [];
+  const pickGear = (kind, catalog)=>{
+    const unowned = catalog.filter(d=> !progress.gearOf(kind, d.id));
+    const pool = unowned.length ? unowned : catalog;
+    const def = pool[(Math.random()*pool.length)|0];
+    const myco = 10 + def.rarity*12;
+    stock.push({ kind:'gear', gearKind:kind, id:def.id, def, myco,
+      icon:def.icon, name:def.name, desc:`${RARITIES[def.rarity].name} ${kind}${unowned.length?' — new to your collection':''}` });
+  };
+  pickGear('weapon', WEAPONS);
+  pickGear('armor', ARMOR);
+  if(progress.companionUnlocked){
+    const tier = Math.min(5, progress.companionTier + 1 + ((Math.random()<0.4)?1:0));
+    const myco = 18 + tier*9;
+    stock.push({ kind:'core', tier, myco, icon:'🍄',
+      name:`${COMPANION_TIERS[tier].name} Companion Core`, desc:'Strengthens your Spore Pup — permanent.' });
+  } else {
+    const amount = 40 + ((Math.random()*40)|0);
+    stock.push({ kind:'coins', amount, myco:14, icon:'🪙', name:`${amount} Coins`, desc:'A bundle, traded for Mycelium.' });
+  }
+  return stock;
+}
+function spawnNightMerchant(){
+  const pp = game.player.group.position;
+  const a = Math.random()*Math.PI*2, r = 10 + Math.random()*8;
+  const pos = new THREE.Vector3(pp.x + Math.cos(a)*r, 0, pp.z + Math.sin(a)*r);
+  if(Math.hypot(pos.x, pos.z) > 185) { pos.setX(pp.x - Math.cos(a)*r).setZ(pp.z - Math.sin(a)*r); }
+  const vis = buildMerchantVisual();
+  vis.group.position.set(pos.x, groundHeight(pos.x, pos.z), pos.z);
+  scene.add(vis.group);
+  shadowize(vis.group, { noCast: true });
+  nightMerchant = { ...vis, stock: rollMerchantStock() };
+  announce('🧙 A traveling merchant sets up camp nearby...', 'cool');
+  audio.hiss(0.3, 0.1, 600, 1000);
+}
+function despawnNightMerchant(){
+  if(!nightMerchant) return;
+  scene.remove(nightMerchant.group);
+  nightMerchant = null;
+  if($('merchantwrap') && !$('merchantwrap').classList.contains('hidden')) closeMerchantShop();
+}
+function updateNightMerchant(dt){
+  if(game.nightT >= 0.5){
+    if(!nightMerchant && !merchantVisitedThisNight && !game.inCave){
+      merchantVisitedThisNight = true;
+      spawnNightMerchant();
+    }
+  } else {
+    merchantVisitedThisNight = false;
+    if(nightMerchant) despawnNightMerchant();
+  }
+  if(nightMerchant){
+    nightMerchant.t += dt;
+    nightMerchant.group.position.y = groundHeight(nightMerchant.group.position.x, nightMerchant.group.position.z) + Math.sin(nightMerchant.t*1.5)*0.03;
+    nightMerchant.lanternGlow.material.opacity = 0.7 + Math.sin(nightMerchant.t*3)*0.15;
+  }
+}
+function renderMerchantShop(){
+  if(!nightMerchant) return;
+  setHTML($('merchantstock'), nightMerchant.stock.map((item,i)=>{
+    const afford = progress.myco >= item.myco;
+    return `<div class="merchitem"><span class="micon">${item.icon}</span>
+      <div class="minfo"><div class="mname">${item.name}</div><div class="mdesc">${item.desc}</div></div>
+      <button class="eqbtn mbuy" data-i="${i}" ${item.bought?'disabled':''} ${!item.bought && !afford?'disabled':''}>
+        ${item.bought ? 'SOLD' : '🌿 '+item.myco}</button></div>`;
+  }).join(''));
+  for(const b of $('merchantstock').querySelectorAll('[data-i]')){
+    b.onclick = ()=>{
+      const item = nightMerchant.stock[+b.dataset.i];
+      if(!item || item.bought || progress.myco < item.myco) return;
+      if(item.kind === 'gear'){
+        const res = progress.merchantBuyGear(item.gearKind, item.id, item.myco);
+        if(!res) return;
+        const p = game.player;
+        if(item.gearKind === 'weapon'){ if(!p.weapons.includes(item.id)) p.addWeapon(item.id); }
+        else { if(!p.armorOwned[item.def.slot].includes(item.id)) p.addArmor(item.def.slot, item.id); }
+        audio.gearUp(res.dupeResult ? (res.dupeResult.starredTo||1) : 1);
+      } else if(item.kind === 'core'){
+        if(progress.myco < item.myco) return;
+        progress.myco -= item.myco; progress.saveMyco();
+        const upgraded = progress.upgradeCompanionTier(item.tier);
+        if(upgraded && game.companion){
+          const prevPos = game.companion.group.position.clone();
+          scene.remove(game.companion.group);
+          game.companion = new Companion(scene, progress.companionTier);
+          game.companion.group.position.copy(prevPos);
+          shadowize(game.companion.group, { noCast: true });
+        }
+        audio.gearUp(item.tier+1);
+      } else if(item.kind === 'coins'){
+        progress.myco -= item.myco; progress.saveMyco();
+        progress.coins += item.amount; progress.saveCoins();
+        audio.click();
+      }
+      item.bought = true;
+      announce(`🧙 Bought ${item.name}`, 'cool');
+      updateHUD(); updateBackpack(); renderMerchantShop();
+    };
+  }
+}
+function openMerchantShop(){
+  if(!nightMerchant) return;
+  renderMerchantShop();
+  $('merchantwrap').classList.remove('hidden');
+  game.state = 'merchant';
+  document.exitPointerLock?.();
+  audio.click();
+}
+function closeMerchantShop(){
+  $('merchantwrap').classList.add('hidden');
+  if(game.state === 'merchant'){ game.state = 'play'; grabPointer(); }
+}
 // mutation luckyspore bonus + any equipped charm's live dropBonus (charms can be swapped mid-run)
-function effDropBonus(){ return game.dropBonus + (game.player ? game.player.getArmorBonus('dropBonus', game) : 0); }
+function effDropBonus(){ return game.dropBonus + (game.player ? game.player.getArmorBonus('dropBonus', game) : 0) + (game.season===2 ? SEASON_AUTUMN_DROP_BONUS : 0); }
 function dropPowerup(pos, rarity){
   // guaranteed for rare+, high chance otherwise (was 0.25 flat — most kills dropped nothing)
   const chance = rarity >= 2 ? 1 : Math.min(1, 0.55 + rarity*0.15 + effDropBonus());
@@ -1738,6 +2270,24 @@ function dropArmor(pos, rarity, force=false){
   const def = { id:'armor_'+a.id, icon:a.icon, name:a.name, color:RARITY_COLORS[a.rarity], isArmor:true, armorId:a.id, slot:a.slot };
   addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.2), def));
 }
+// Companion Core — a rare drop that raises the Spore Pup's permanent tier (see entities.js's
+// COMPANION_TIERS and progress.upgradeCompanionTier). Gated on the companion already existing:
+// there is nothing to upgrade before the first boss kill, and dropping one earlier would just be
+// a confusing pickup with no visible effect. Rarer than armor at the same kill rarity on purpose
+// — this is a bigger, PERMANENT reward than one piece of gear feeding one star meter.
+const CORE_DROP_MIN = 0.012, CORE_DROP_STEP = 0.01;   // rarity 0..5 -> 1.2% .. 6.2%
+function dropCompanionCore(pos, rarity, force=false){
+  if(!progress.companionUnlocked) return;
+  const chance = CORE_DROP_MIN + rarity*CORE_DROP_STEP;
+  if(!force && Math.random() > chance + effDropBonus()*0.15) return;
+  // the core's own tier rides the kill's rarity with a little upward jitter, capped at 5 — same
+  // "tougher kill, better payout" shape dropHealthPotion already uses. A Common kill can still
+  // occasionally hand over an Uncommon core; a Mythic kill is the only reliable road to a Mythic one.
+  const tier = Math.min(5, rarity + (Math.random() < 0.3 ? 1 : 0));
+  const def = { id:'companioncore_'+tier, icon:'🍄', name:COMPANION_TIERS[tier].name+' Companion Core',
+    color:RARITY_COLORS[tier], isCompanionCore:true, tier };
+  addDrop(new Powerup(scene, pos.clone().setY(groundHeight(pos.x,pos.z)+1.1), def));
+}
 function dropEssence(pos, rarity, isBoss){
   const amount = isBoss ? 5 : 1;
   const def = { id:'essence_'+rarity, icon:'✦', name:RARITIES[rarity].name+' Essence', color:RARITY_COLORS[rarity],
@@ -1763,6 +2313,7 @@ game.onKill = (m)=>{
   dropArmor(m.group.position, m.rarity, m.isBoss);
   dropPotion(m.group.position, m.rarity, m.isBoss);
   dropHealthPotion(m.group.position, m.rarity, m.isBoss);
+  dropCompanionCore(m.group.position, m.rarity, m.isBoss);
   if(m.isBoss){
     // permanent, one-time unlock — see progress.unlockCompanion for why this is a milestone
     // gate rather than something bought with the Forge's currencies
@@ -1862,6 +2413,27 @@ game.applyPowerup = (def)=>{
       announce(def.icon + ' ' + def.name + ' unlocked — equip it from the Backpack (B)', 'cool');
     }
     updateBackpack(); updateHUD();
+    return;
+  }
+  if(def.isCompanionCore){
+    const upgraded = progress.upgradeCompanionTier(def.tier);
+    if(upgraded){
+      // rebuild the LIVE companion in place, at its own current position rather than the
+      // player-relative spawn offset spawnCompanion() uses for a fresh one — a mid-run upgrade
+      // should never read as the Pup teleporting back to your shoulder.
+      const prevPos = game.companion ? game.companion.group.position.clone() : null;
+      if(game.companion) scene.remove(game.companion.group);
+      game.companion = new Companion(scene, progress.companionTier);
+      if(prevPos) game.companion.group.position.copy(prevPos);
+      else { game.companion.group.position.set(pp.x + 1.2, pp.y, pp.z - 1.2); }
+      shadowize(game.companion.group, { noCast: true });
+      audio.gearUp(def.tier+1);
+      announce(`🍄 ${def.name} — your ${progress.companionName} grows stronger!`, 'cool');
+    } else {
+      audio.click();
+      announce(`🍄 ${def.name} — your Pup is already this strong or stronger`, 'bad');
+    }
+    updateHUD();
     return;
   }
   if(def.isEssence){
@@ -2115,6 +2687,14 @@ function updateHUD(){
   setCounter('myco', progress.myco);
   setCounter('lockpicks', progress.lockpicks);
   setCounter('ess', progress.bank.reduce((a,b)=>a+b, 0));
+  // companion name tag: hidden entirely until the Spore Pup is actually unlocked, same convention
+  // #bosswrap uses for "nothing to show yet" — a rename button for a pet you don't have would
+  // just be confusing chrome.
+  const chud = document.getElementById('companionhud');
+  if(progress.companionUnlocked){
+    if(chud.style.display === 'none') chud.style.display = 'block';
+    setText(chud, '🍄 '+progress.companionName);
+  } else if(chud.style.display !== 'none') chud.style.display = 'none';
   updateWorldLine();
   /* item 11: the heal slot's `urgent` state depends on HP, which changes constantly, but
      updateBackpack() rebuilds DOM — so it is driven off a LATCH, not off the HP value. One rebuild
@@ -2181,6 +2761,28 @@ function forgeCostHtml(cost){
   const lackMyco = progress.myco < cost.myco, lackCoins = progress.coins < cost.coins;
   return `<span class="ci${lackMyco?' lack':''}">🌿 ${cost.myco}</span><span class="ci${lackCoins?' lack':''}">🪙 ${cost.coins}</span>`;
 }
+// Boss trophy wall: every archetype+trait combo the player COULD ever beat, built once from the
+// same data bossTraits.js already defines (not a second hand-typed list that could drift from
+// what actually rolls). 'none' stands for a plain fight — no trait rolled — same key
+// progress.recordBossWin() falls back to when game.bossPlan.trait is null.
+const BOSS_TROPHY_LIST = [
+  { archetype:'elder', id:'none', name:'Elder Myconid', tint:0x7a4dbb, glow:0xb46bff, desc:'A plain fight — no surge.' },
+  ...BOSS_TRAITS.elder.map(t=>({ archetype:'elder', ...t })),
+  ...SEASON_BOSS_TRAITS.elder.map(t=>({ archetype:'elder', ...t })),
+  { archetype:'elder', ...ASCENDANT_TRAIT },
+  { archetype:'glutton', id:'none', name:'Rotmaw the Bloated', tint:0x9acc3a, glow:0xc8e066, desc:'A plain fight — no surge.' },
+  ...BOSS_TRAITS.glutton.map(t=>({ archetype:'glutton', ...t })),
+  ...SEASON_BOSS_TRAITS.glutton.map(t=>({ archetype:'glutton', ...t })),
+];
+function trophyGridHTML(){
+  return BOSS_TROPHY_LIST.map(t=>{
+    const key = `${t.archetype}:${t.id}`;
+    const beaten = progress.bossTrophies.has(key);
+    const col = '#'+new THREE.Color(beaten ? t.tint : 0x4a4258).getHexString();
+    const title = beaten ? `${t.name} — defeated` : `${t.name} — not yet beaten`;
+    return `<div class="trophybadge${beaten?' beaten':''}" style="--tc:${col}" title="${title}">${beaten?'🏆':'?'}</div>`;
+  }).join('');
+}
 function renderTome(){
   /* The Equipment tab is a different SHAPE of screen, not a different page of the same one: a
      paper doll needs the whole width of the book (see the note on #equipscreen). So the two
@@ -2234,11 +2836,15 @@ function renderTome(){
     <div class="tstat"><span>Move speed</span><b>${((p?p.speed:8)*(p?p.speedMult:1)).toFixed(1)}</b></div>
     <div class="tstat"><span>Max HP</span><b>${p?p.maxHp:100}</b></div>
     <div class="tstat"><span>Total kills</span><b>${game.totalKills}</b></div>
+    <div class="tstat"><span>Coins</span><b>🪙 ${progress.coins}</b></div>
     <div class="tstat"><span>Mycelium</span><b>🌿 ${progress.myco}</b></div>
     <h3>Harvest Contracts</h3>${contractRows}
     <div class="essrow" style="opacity:.7;font-size:12px">Press <b>H</b> near a small glowing mushroom to harvest it toward these.</div>
     <h3>Spore Essences</h3>${essRows}
-    <h3>Bestiary</h3>${killsRows}`;
+    <h3>Bestiary</h3>${killsRows}
+    <h3>🏆 Boss Trophies</h3>
+    <div class="trophygrid">${trophyGridHTML()}</div>
+    <div class="essrow" style="opacity:.7;font-size:12px">${[...progress.bossTrophies].length} / ${BOSS_TROPHY_LIST.length} found. Each one is a specific boss AND trait combo, not just the archetype.</div>`;
   // RIGHT PAGE — spore alchemy / equipment collection (tabbed)
   const right = $('tomeright');
   const tabTitles = { alchemy:'Spore Alchemy', equipment:'Equipment Collection', forge:'Spore Forge' };
@@ -2246,8 +2852,13 @@ function renderTome(){
     forge:'SPEND 🌿 + 🪙 TO CRAFT A SPECIFIC PIECE, NOT JUST WHATEVER DROPS' };
   // No tab buttons in here any more: they live in #tometabbar, above both spreads. Re-emitting
   // them would silently steal the shared ids and reintroduce the jump.
+  // Forge spends coins AND Mycelium together on every craft, so unlike Alchemy (essences only,
+  // already itemised lower on this same page) it gets its own purse right under the header — the
+  // same reason the Equipment screen's #eqpurse exists, just worded for what THIS page spends.
+  const forgePurse = tomeTab==='forge'
+    ? `<div class="forgepurse"><span>🪙 ${progress.coins} COINS</span><span>🌿 ${progress.myco} MYCELIUM</span></div>` : '';
   right.innerHTML = `<h2>${tabTitles[tomeTab]}</h2>
-    <div class="subtitle">${tabSubs[tomeTab]}</div>`;
+    <div class="subtitle">${tabSubs[tomeTab]}</div>${forgePurse}`;
 
   if(tomeTab==='alchemy'){
     for(const m of MUTATIONS){
@@ -2360,18 +2971,35 @@ const EQ_SLOTS = [
   { id:'boots',  cap:'BOOTS',    el:'eqs-boots' },
 ];
 let eqFilter = 'all';       // all | weapon | armor
+// Defaults ON: seeing your whole lifetime collection — including things from a hunt you're not
+// in right now — in the same grid as what you can actually wear today read as "why am I looking
+// at gear I can't equip". OFF still exists for "what have I found overall", one tap away.
+let eqHeldOnly = true;
 let eqSel = null;           // { kind, id } — the tile whose detail strip is showing
 
 // Every item the player owns, flattened into what the grid draws. `shard` entries are banked
 // duplicates; they carry the same id so selecting one selects the item.
+// "owned" (progress.weaponGear/armorGear — permanent, across every hunt) and "held" (p.weapons/
+// p.armorOwned — THIS hunt's bag) are different facts, and the Equipment screen showed only the
+// first one: a tile and its popup read identically whether you were currently carrying the thing
+// or not, so the +LEVEL button worked on either, and spending coins to level a sword sitting in a
+// hunt from a week ago just looked broken. heldCheck() is the one place both tiles and the popup
+// ask "is this actually in my bag right now", so neither can drift from the other again.
+function heldCheck(kind, id, slot){
+  const p = game.player;
+  if(!p) return false;
+  return kind === 'weapon' ? p.weapons.includes(id) : p.armorOwned[slot].includes(id);
+}
 function eqCollection(){
   const out = [];
   const push = (kind, id, def)=>{
     if(!def) return;
     const info = progress.gearInfo(kind, id, def.rarity);
     if(!info) return;
-    out.push({ kind, id, def, info, shard:false });
-    for(let i=0;i<info.dupes;i++) out.push({ kind, id, def, info, shard:true });
+    const held = heldCheck(kind, id, def.slot);
+    if(eqHeldOnly && !held) return; // the whole point of the toggle: skip it entirely, not just dim it
+    out.push({ kind, id, def, info, shard:false, held });
+    for(let i=0;i<info.dupes;i++) out.push({ kind, id, def, info, shard:true, held });
   };
   if(eqFilter !== 'armor') for(const id of Object.keys(progress.weaponGear)) push('weapon', id, WEAPONS_BY_ID[id]);
   if(eqFilter !== 'weapon') for(const id of Object.keys(progress.armorGear)) push('armor', id, ARMOR_BY_ID[id]);
@@ -2380,8 +3008,10 @@ function eqCollection(){
   out.sort((a,b)=> b.def.rarity - a.def.rarity || a.id.localeCompare(b.id) || (a.shard?1:0)-(b.shard?1:0));
   return out;
 }
-// can the player afford this item's next level right now — the green arrow's whole meaning
-function eqCanUp(info){ return !!(info && !info.maxedLevel && info.levelCost !== null && progress.coins >= info.levelCost); }
+// can the player afford this item's next level right now — the green arrow's whole meaning.
+// held is required too, now: the arrow means "spend coins and feel it immediately", which is only
+// true for something you're actually carrying this hunt.
+function eqCanUp(info, held){ return !!(held && info && !info.maxedLevel && info.levelCost !== null && progress.coins >= info.levelCost); }
 
 /* The shared face of an item, used by both a slot and a tile. Returns innerHTML rather than nodes
    because both callers rebuild wholesale on open — this is a modal, not a per-frame widget, so the
@@ -2392,11 +3022,16 @@ function eqFaceHTML(entry, opts){
   // `none` collapses the row entirely at zero stars — see the note in the stylesheet
   const pips = Array.from({length:6},(_,i)=>`<i class="${i<info.stars?'on':''}"></i>`).join('');
   const lv = entry.shard ? 'SHARD' : 'Lv.' + info.level;
+  // the level chip's own colour carries "do I have this" for free: rarity-tinted when it's in
+  // your bag (or worn — a slot entry is always held, see renderEquip), grey when it's only in the
+  // permanent collection. Same fact the tile opacity below also carries — colour AND opacity, not
+  // one alone, so this reads for a colourblind player too.
+  const chipBg = entry.shard || entry.held ? rc : '#8a8290';
   return `${opts && opts.cap ? `<span class="eqcap">${opts.cap}</span>` : ''}
     <span class="eqpips${info.stars ? '' : ' none'}">${pips}</span>
     <span style="filter:drop-shadow(0 2px 0 rgba(0,0,0,.25))">${def.icon}</span>
-    <span class="${opts && opts.slot ? 'eqlv' : 'tilelv'}" style="background:${rc};border-radius:8px;padding:0 4px">${lv}</span>
-    ${!entry.shard && eqCanUp(info) ? '<span class="equp">▲</span>' : ''}`;
+    <span class="${opts && opts.slot ? 'eqlv' : 'tilelv'}" style="background:${chipBg};border-radius:8px;padding:0 4px">${lv}</span>
+    ${!entry.shard && eqCanUp(info, entry.held) ? '<span class="equp">▲</span>' : ''}`;
 }
 function eqApplyFrame(el, def){
   el.dataset.r = def.rarity;
@@ -2407,7 +3042,7 @@ function renderEquip(){
   const p = game.player;
   if(!p) return;
   // ---- purse
-  setHTML($('eqpurse'), `<span>🪙 ${progress.coins}</span><span>🌿 ${progress.myco}</span><span>🗝️ ${progress.lockpicks}</span>`);
+  setHTML($('eqpurse'), `<span>🪙 ${progress.coins} COINS</span><span>🌿 ${progress.myco} MYCELIUM</span><span>🗝️ ${progress.lockpicks} LOCKPICKS</span>`);
   // ---- the slots
   for(const sl of EQ_SLOTS){
     const el = document.getElementById(sl.el);
@@ -2419,7 +3054,7 @@ function renderEquip(){
     if(sl.id === 'weapon' && p.equipped){
       const def = WEAPONS_BY_ID[p.equipped];
       const info = def && progress.gearInfo('weapon', p.equipped, def.rarity);
-      if(info) entry = { kind:'weapon', id:p.equipped, def, info, shard:false };
+      if(info) entry = { kind:'weapon', id:p.equipped, def, info, shard:false, held:true };
     } else if(sl.id === 'elem'){
       /* The elemental ring is per-run and has no collection entry at all, so it cannot go through
          eqFaceHTML — it has no stars and no level, it has SECONDS. Drawn by hand for that reason,
@@ -2442,7 +3077,7 @@ function renderEquip(){
       const id = p.armor[sl.id];
       const def = id && ARMOR_BY_ID[id];
       const info = def && progress.gearInfo('armor', id, def.rarity);
-      if(info) entry = { kind:'armor', id, def, info, shard:false };
+      if(info) entry = { kind:'armor', id, def, info, shard:false, held:true };
     }
     if(entry){
       eqApplyFrame(el, entry.def);
@@ -2470,24 +3105,32 @@ function renderEquip(){
   const fEl = $('eqfilters');
   setHTML(fEl, filters.map(([k,label])=>
     `<button class="ttab${eqFilter===k?' on':''}" data-f="${k}">${label}</button>`).join('')
+    + `<button class="ttab${eqHeldOnly?' on':''}" id="eqheldtoggle">📦 ON YOU</button>`
     + `<span style="margin-left:auto;font-size:11px;font-weight:700;color:#8a6a3f;letter-spacing:.1em">MY COLLECTION</span>`);
   for(const b of fEl.querySelectorAll('[data-f]'))
     b.onclick = ()=>{ eqFilter = b.dataset.f; audio.click(); renderEquip(); };
+  // own toggle, not a radio with the kind filters above — "weapons I'm carrying" and "every
+  // weapon I've ever found" are two independent questions, not mutually exclusive choices
+  $('eqheldtoggle').onclick = ()=>{ eqHeldOnly = !eqHeldOnly; audio.click(); renderEquip(); };
   // ---- the grid
   const grid = $('eqgrid');
   const items = eqCollection();
   grid.innerHTML = '';
   if(!items.length){
-    grid.innerHTML = '<div class="eqempty">Nothing found yet. Weapons and armour you pick up on any hunt join your permanent collection here — and every duplicate after the first stars that item up.</div>';
+    grid.innerHTML = eqHeldOnly
+      ? '<div class="eqempty">Nothing in your bag this hunt yet. Turn off "📦 ON YOU" to see your whole collection, including gear from other hunts.</div>'
+      : '<div class="eqempty">Nothing found yet. Weapons and armour you pick up on any hunt join your permanent collection here — and every duplicate after the first stars that item up.</div>';
   }
   items.forEach((entry, i)=>{
     const t = document.createElement('div');
     t.className = 'eqtile' + (entry.shard ? ' shard' : '')
+      + (!entry.shard && !entry.held ? ' notcarried' : '')
       + (!entry.shard && eqSel && eqSel.id === entry.id && eqSel.kind === entry.kind ? ' sel' : '');
     eqApplyFrame(t, entry.def);
     t.innerHTML = eqFaceHTML(entry, {});
     t.title = entry.shard ? `${entry.def.name} duplicate — banked toward the next ★`
-      : `${entry.def.name} · ${entry.def.desc}`;
+      : entry.held ? `${entry.def.name} · ${entry.def.desc}`
+      : `${entry.def.name} · ${entry.def.desc} · in your collection, not carried this hunt`;
     // a shard opens the SAME card as the item it belongs to — it is that item's progress, so
     // sending the player somewhere else would be inventing a second thing that does not exist
     makeActivatable(t, ()=>openEqPop(entry.kind, entry.id));
@@ -2601,15 +3244,17 @@ function renderEqPop(){
         info.maxedStars ? 'MAX ★' : `${info.dupes}/${info.dupesNeed} to ★${info.stars+1}`}</span></div>
     <div class="popdupe"><span style="width:${Math.round(info.dupeProgress01*100)}%"></span></div>
     <div class="popbtns">
-      <button class="eqbtn" id="eqlevel">${info.maxedLevel ? 'MAX LEVEL' : '+LEVEL 🪙' + info.levelCost}</button>
+      <button class="eqbtn" id="eqlevel">${!held ? 'EQUIP IT TO LEVEL' : info.maxedLevel ? 'MAX LEVEL' : '+LEVEL 🪙' + info.levelCost}</button>
       <button class="eqbtn alt" id="eqwear">${equipped ? 'WORN' : held ? 'WEAR IT' : 'NOT ON YOU'}</button>
     </div>
     <div class="popnote">${
-      info.maxedStars ? 'Fully starred — every further duplicate refines into coins.'
-      : held ? 'Stars come from finding duplicates. Levels are bought with coins.'
-      : 'In your permanent collection, but not on you this hunt — find one to wear it.'}</div>`;
+      !held ? 'In your permanent collection, but not on you this hunt — find one to wear it, then its level opens up again.'
+      : info.maxedStars ? 'Fully starred — every further duplicate refines into coins.'
+      : 'Stars come from finding duplicates. Levels are bought with coins.'}</div>`;
   const lvl = document.getElementById('eqlevel');
-  if(info.maxedLevel || progress.coins < info.levelCost) lvl.disabled = true;
+  // not held is checked FIRST and alone disables the button — spending coins on a level this hunt
+  // can't use is the exact bug this screen had (see heldCheck's note on eqCollection above).
+  if(!held || info.maxedLevel || progress.coins < info.levelCost) lvl.disabled = true;
   else lvl.onclick = ()=>{
     if(progress.levelUpGear(eqSel.kind, eqSel.id)){
       audio.gearUp(info.stars);
@@ -2901,6 +3546,16 @@ $('resumebtn').onclick = ()=>{ audio.click(); resumeGame(); };
 $('mutebtn').onclick = ()=>{ audio.init(); const m = audio.toggleMute(); $('mutebtn').textContent='MUTE: '+(m?'ON':'OFF'); };
 $('tomebtn').onclick = ()=>{ audio.init(); openTome(); };
 $('tomebtn2').onclick = ()=>{ audio.click(); openTome(); };
+$('merchantclose').onclick = closeMerchantShop;
+// companion rename: a native prompt rather than a bespoke text-input panel — this is the one
+// piece of free-text entry in the whole HUD, and the Tome's styled-panel machinery would be a lot
+// of new UI for a single text field. progress.renameCompanion() owns the trim/length-cap/persist,
+// so this click handler only has to react to what it returns.
+$('companionhud').onclick = ()=>{
+  audio.click();
+  const name = window.prompt('Name your Spore Pup:', progress.companionName);
+  if(name !== null && progress.renameCompanion(name)) updateHUD();
+};
 $('tomeclose').onclick = ()=>{ audio.click(); closeTome(); };
 $('invclose').onclick = ()=>{ audio.click(); closeInventory(); };
 // restart / retry / new hunt = reroll to a brand-new seeded world
@@ -2962,6 +3617,8 @@ function resetRun(){
   puddles.length = 0;
   for(const fb of fireballs) scene.remove(fb.mesh);
   fireballs.length = 0;
+  for(const pod of sporePods){ scene.remove(pod.group); disposeSporePodVisual(pod.group); }
+  sporePods.length = 0;
   for(const pr of projPool){ pr.active = false; pr.mesh.visible = false; } // no stale projectiles after restart
   game.enemies = []; game.powerups = []; game.boss = null;
   game.kills = [0,0,0,0,0,0]; game.totalKills = 0; game.rareKills = 0; game.bossSpawned = false;
@@ -2969,6 +3626,10 @@ function resetRun(){
   game.bounty = null; bountyCd = 60 + Math.random()*30;
   game.level = 1; game.xp = 0; game.runEssences = [0,0,0,0,0,0]; game.dropBonus = 0;
   game.stormT = 0; game.stormDur = 0; game.stormFogMult = 1; stormCheckCd = 15;
+  // which season THIS world opens on — seeded off game.seed so a fresh world doesn't always land
+  // on Spring at elapsed=0 (see the long note on updateSeason). resetRun() runs exactly once per
+  // page load (boot() calls it right after buildWorld()), so this never jumps mid-hunt.
+  seasonOffset = mulberry32(deriveSeed(game.seed, 0x5ea5))() * SEASON_LEN * 4;
   // a storm mid-hunt must not bleed into the next one; the night multiplier is a world clock and
   // deliberately survives a reset, so it stays in the product here rather than being wiped too
   if(baseFogDensity) scene.fog.density = baseFogDensity * game.nightFogMult;
@@ -3003,6 +3664,12 @@ function resetRun(){
   const SUPERBOSS_UNLOCK = 2, SUPERBOSS_CHANCE = 0.35;
   const superbossReady = progress.eldersBeaten >= SUPERBOSS_UNLOCK && progress.gluttonsBeaten >= SUPERBOSS_UNLOCK;
   const isSuperboss = superbossReady && bRng() < SUPERBOSS_CHANCE;
+  // season-surge trait: not every boss fought during a season gets it — same restraint the
+  // Nocturnal affix uses — but when it hits, it ALWAYS matches the season actually running
+  // right now (game.season, not a seeded roll), so finding one genuinely means "the world is in
+  // that season," not just a reskin that happened to come up.
+  const SEASON_BOSS_CHANCE = 0.45;
+  const seasonBossTrait = bRng() < SEASON_BOSS_CHANCE ? SEASON_BOSS_TRAITS[bossArchetype][game.season] : null;
   // hp/dmg bumped well past the old 0.92-1.14 / 0.94-1.10 bands: a longer, harder boss fight is
   // the whole point of a "make the boss stronger, make the hunt longer" request, and this is the
   // one lever that does both — the same enrage/trait mechanics just have a bigger fight to run in.
@@ -3014,7 +3681,7 @@ function resetRun(){
     mult: { hp: (2.2+bRng()*0.4)*bossDepthMult, dmg: (1.6+bRng()*0.3)*bossDepthMult, speed: 1.05+bRng()*0.12 },
   } : {
     archetype: bossArchetype,
-    trait: rollBossTrait(bossArchetype, bRng),
+    trait: seasonBossTrait || rollBossTrait(bossArchetype, bRng),
     mult: { hp: (1.5+bRng()*0.4)*bossDepthMult, dmg: (1.2+bRng()*0.25)*bossDepthMult, speed: 0.95+bRng()*0.12 },
   };
   if(game.player) scene.remove(game.player.group);
@@ -3102,7 +3769,9 @@ function victory(){
   game.shake(1);
   particles.burst(game.boss.group.position.clone().setY(4), 30, {r:1,g:0.85,b:0.3, spread:8, size:12, life:1.6, grav:4});  // 60 -> 30, see levelUp()
   progress.advanceDepth(); // the NEXT world starts one notch harder
-  progress.recordBossWin(game.bossPlan.archetype); // lifetime count — gates The Bloom Ascendant
+  // lifetime count (gates The Bloom Ascendant) + the specific archetype:trait combo, for the
+  // Tome's trophy wall — a plain fight (no trait rolled) records as 'none'.
+  progress.recordBossWin(game.bossPlan.archetype, game.bossPlan.trait ? game.bossPlan.trait.id : null);
   // stash the current build so "NEW HUNT (NEW WORLD)" continues this run instead of starting
   // over — only dying resets level/loadout (gameOver clears this same key)
   const p = game.player;
@@ -3490,7 +4159,7 @@ function tick(){
     renderFrame();
     return;
   }
-  if(game.state === 'pause' || game.state === 'tome' || game.state === 'inventory'){
+  if(game.state === 'pause' || game.state === 'tome' || game.state === 'inventory' || game.state === 'merchant'){
     hideHoverTag(); // the chip must not survive into a menu that is drawn over the world
     renderFrame();
     return;
@@ -3518,15 +4187,21 @@ function tick(){
     if(!game.inCave){
       spawnCd -= sdt;
       const alive = game.enemies.filter(e=>!e.dead).length;
-      if(spawnCd <= 0 && alive < 12){ spawnCd = 2.5; spawnWave(2 + Math.min(4, (game.totalKills/12)|0)); }
+      // both numbers raised from the original 2.5s/12-alive/2-6-per-wave: measured comfortable up
+      // to 60 concurrent enemies (see CLAUDE.md's perf notes), so this stays well inside a tested
+      // ceiling rather than guessing at a new ceiling of its own.
+      if(spawnCd <= 0 && alive < 20){ spawnCd = 1.7; spawnWave(3 + Math.min(5, (game.totalKills/12)|0)); }
       updateStorm(p, sdt);
+      updateSeason(p, sdt);
       updateNightCycle();
       // ONE write: both updaters above only set their own multiplier, this is the one place they
       // combine — see the note on updateStorm for why that split exists.
       if(baseFogDensity) scene.fog.density = baseFogDensity * game.stormFogMult * game.nightFogMult;
       updateWeather(p, sdt);
+      updateWeatherCairn();
       updateBounty(sdt);
       updateShrines();
+      updateNightMerchant(sdt);
     }
     updateCaveTriggers();
 
@@ -3671,6 +4346,7 @@ function tick(){
       // disposed here; the material is per-ring because it carries the ring's colour and opacity.
       if(r.r > 14){ scene.remove(r.mesh); r.mesh.material.dispose(); rings.splice(i,1); }
     }
+    updateSporePods(sdt);
     // boss fireballs (pyroclast trait) — straight-line lob that explodes on arrival/expiry
     for(let i=fireballs.length-1;i>=0;i--){
       const fb = fireballs[i];
@@ -3718,6 +4394,7 @@ function tick(){
   updateCamera(dt);
   updateSunShadow(dt);
   updateHoverTag(dt);
+  updateRarityLabels();
   renderFrame();
   if(DEMO && (elapsed|0) !== lastDbg){ lastDbg = elapsed|0;
     document.title = JSON.stringify({k:game.totalKills, hp:Math.round(p.hp), e:game.enemies.length, lv:game.level, xp:game.xp, ess:game.runEssences.join(','),

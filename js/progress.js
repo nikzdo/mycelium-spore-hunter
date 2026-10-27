@@ -50,8 +50,13 @@ export const MUTATIONS = [
 const LS = { bank:'mycelium_bank', life:'mycelium_lifetime', muts:'mycelium_mutations',
   weaponGear:'mycelium_weapon_gear', armorGear:'mycelium_armor_gear',
   coins:'mycelium_coins', myco:'mycelium_myco', contracts:'mycelium_contracts', depth:'mycelium_depth',
-  lockpicks:'mycelium_spines', companion:'mycelium_companion',
-  eldersBeaten:'mycelium_elders_beaten', gluttonsBeaten:'mycelium_gluttons_beaten' };
+  lockpicks:'mycelium_spines', companion:'mycelium_companion', companionTier:'mycelium_companion_tier',
+  companionName:'mycelium_companion_name',
+  eldersBeaten:'mycelium_elders_beaten', gluttonsBeaten:'mycelium_gluttons_beaten',
+  trophies:'mycelium_boss_trophies' };
+
+export const DEFAULT_COMPANION_NAME = 'Spore Pup';
+export const COMPANION_NAME_MAX = 16;
 
 // ---------------- world depth: how many bosses in a row you've beaten. mobs everywhere
 // (not just far from spawn) scale up with it, so worlds keep getting harder as long as you
@@ -65,6 +70,13 @@ function loadDepth(){
 // Ascendant (main.js resetRun, bossTraits.js) gates on both of these together, not depth alone —
 // depth only proves a current streak, and "beat both archetypes" is a lifetime achievement that
 // dying shouldn't take away partway through earning it. ----
+// ---------------- boss trophies: pure cosmetic record of every archetype+trait COMBO ever
+// beaten (not just "beat an Elder" — "beat a Wrathful Elder"), for the Tome's trophy wall. This
+// never gates anything the way eldersBeaten/gluttonsBeaten does, so a Set of "archetype:traitId"
+// keys is enough — just "have I ever", not a count. 'none' is the key for a plain, trait-less fight.
+function loadTrophies(){
+  try{ return new Set(JSON.parse(localStorage.getItem(LS.trophies) || '[]')); }catch(e){ return new Set(); }
+}
 function loadCount(key){
   try{ return Math.max(0, parseInt(localStorage.getItem(key))||0); }catch(e){ return 0; }
 }
@@ -74,6 +86,19 @@ function loadCount(key){
 // from "you paid for it", and this game already has a currency sink in the Forge. ----
 function loadCompanion(){
   try{ return localStorage.getItem(LS.companion) === '1'; }catch(e){ return false; }
+}
+// ---------------- companion tier: a SEPARATE permanent upgrade from the unlock above. Found as
+// a rare drop (main.js's Companion Core powerup, same drop/chest chokepoints as everything else),
+// never bought, never rolled back down — the same "earn it, keep it" shape unlockCompanion()
+// already uses, just continuous (0-5, entities.js's COMPANION_TIERS) instead of a single flag. ----
+function loadCompanionTier(){
+  try{ return Math.max(0, Math.min(5, parseInt(localStorage.getItem(LS.companionTier))||0)); }catch(e){ return 0; }
+}
+// ---------------- companion name: purely cosmetic, never gates anything — a saved game with no
+// name ever set just reads as DEFAULT_COMPANION_NAME, same as a fresh one, so this never needed
+// its own "has the player ever renamed it" flag.
+function loadCompanionName(){
+  try{ const v = localStorage.getItem(LS.companionName); return v && v.trim() ? v.slice(0, COMPANION_NAME_MAX) : DEFAULT_COMPANION_NAME; }catch(e){ return DEFAULT_COMPANION_NAME; }
 }
 
 // ---------------- gear collection: rarity is fixed per item (what it looks like / where it
@@ -318,8 +343,11 @@ export class Progress {
     if(!this.weaponGear.blade) this.weaponGear.blade = { dupes:0, stars:0, level:1 }; // starting weapon is always in the collection
     this.depth = loadDepth();            // consecutive boss wins since your last death
     this.companionUnlocked = loadCompanion(); // permanent, once true it never reverts
+    this.companionTier = loadCompanionTier(); // 0-5, permanent, never decreases — see loadCompanionTier
+    this.companionName = loadCompanionName(); // cosmetic only — see loadCompanionName
     this.eldersBeaten = loadCount(LS.eldersBeaten);     // lifetime, never reset by a death
     this.gluttonsBeaten = loadCount(LS.gluttonsBeaten);
+    this.bossTrophies = loadTrophies(); // cosmetic only — see loadTrophies
   }
   // returns true only the FIRST time — main.js uses that to fire the unlock announcement once,
   // not on every subsequent boss kill of a run where it was already unlocked
@@ -327,6 +355,26 @@ export class Progress {
     if(this.companionUnlocked) return false;
     this.companionUnlocked = true;
     try{ localStorage.setItem(LS.companion, '1'); }catch(e){}
+    return true;
+  }
+  // a found Companion Core only ever raises the tier — a Common core found after a Legendary one
+  // is a wasted pickup, same as finding a duplicate of a maxed weapon, never a downgrade. Returns
+  // true only when the tier actually moved, so main.js's drop handler can tell "upgraded" from
+  // "already had better" and word the announcement accordingly.
+  upgradeCompanionTier(tier){
+    if(tier <= this.companionTier) return false;
+    this.companionTier = tier;
+    try{ localStorage.setItem(LS.companionTier, String(tier)); }catch(e){}
+    return true;
+  }
+  // trimmed + length-capped here, once, so every caller (just the HUD rename prompt today) gets
+  // the same guarantee without re-checking it. An empty/whitespace-only name is treated as "didn't
+  // rename it" rather than persisting blank, same reasoning loadCompanionName's own fallback uses.
+  renameCompanion(name){
+    const trimmed = (name || '').trim().slice(0, COMPANION_NAME_MAX);
+    if(!trimmed) return false;
+    this.companionName = trimmed;
+    try{ localStorage.setItem(LS.companionName, trimmed); }catch(e){}
     return true;
   }
   saveBank(){ try{ localStorage.setItem(LS.bank, JSON.stringify(this.bank)); }catch(e){} }
@@ -340,9 +388,14 @@ export class Progress {
   // call when a boss falls — the *next* world starts one notch harder
   advanceDepth(){ this.depth++; this.saveDepth(); }
   // call once per boss win, with which archetype fell — main.js's victory() flow
-  recordBossWin(archetype){
+  recordBossWin(archetype, traitId){
     if(archetype === 'elder'){ this.eldersBeaten++; try{ localStorage.setItem(LS.eldersBeaten, String(this.eldersBeaten)); }catch(e){} }
     else if(archetype === 'glutton'){ this.gluttonsBeaten++; try{ localStorage.setItem(LS.gluttonsBeaten, String(this.gluttonsBeaten)); }catch(e){} }
+    const key = `${archetype}:${traitId || 'none'}`;
+    if(!this.bossTrophies.has(key)){
+      this.bossTrophies.add(key);
+      try{ localStorage.setItem(LS.trophies, JSON.stringify([...this.bossTrophies])); }catch(e){}
+    }
   }
   // call on player death — mob scaling falls back to baseline
   resetDepth(){ this.depth = 1; this.saveDepth(); }
@@ -649,5 +702,19 @@ export class Progress {
     if(!hadBefore) this.ownGear(kind, id);
     const dupeResult = hadBefore ? this.addDupe(kind, id, def.rarity) : null;
     return { ok:true, hadBefore, dupeResult, cost };
+  }
+
+  // ---------------- Night Merchant: Mycelium ONLY, no coins — a deliberately different
+  // economic shape from the Forge above (which always costs both), not just the same mechanic
+  // with smaller numbers. Still goes through the exact same ownGear/addDupe doors a real find or
+  // a Forge craft does, so star/level math never has to know gear came from a merchant.
+  merchantBuyGear(kind, id, mycoCost){
+    if(this.myco < mycoCost) return null;
+    this.myco -= mycoCost; this.saveMyco();
+    const def = kind === 'weapon' ? WEAPONS_BY_ID[id] : ARMOR_BY_ID[id];
+    const hadBefore = !!this.gearOf(kind, id);
+    if(!hadBefore) this.ownGear(kind, id);
+    const dupeResult = hadBefore ? this.addDupe(kind, id, def.rarity) : null;
+    return { ok:true, hadBefore, dupeResult };
   }
 }

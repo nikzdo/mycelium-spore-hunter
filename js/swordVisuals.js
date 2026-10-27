@@ -200,6 +200,35 @@ export function buildSpear(){
   return { group, shaft, tip };
 }
 
+// builds the spore pod: a chunky spotted seed-pod, held between two fingers before the throw.
+// its own model rather than a stretched sword blade, same reasoning as the bow/spear above —
+// a thrown pod needs to read as a pod at a glance, both in-hand and later flying through the air,
+// so the mesh this returns is also what main.js clones/reuses for the flying projectile itself.
+export function buildSporePod(){
+  const group = new THREE.Group();
+  const pod = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8),
+    toonMat({ color:0xd9a441, emissive:0x8a4a10, emissiveIntensity:0.5, rim:0.7, rimColor:0xffe8a0 }));
+  pod.scale.set(1, 1.3, 0.85);
+  addOutline(pod, 0.1);
+  group.add(pod);
+  // spore dots — small dark bumps scattered over the shell, same "spotted cap" language as
+  // the mushroom caps this pod was budded from
+  const dotMat = toonMat({ color:0x3a2410, rim:0.2 });
+  const dotPositions = [[0.09,0.12,0.09],[-0.1,0.0,0.08],[0.02,-0.14,0.1],[-0.06,0.1,-0.1],[0.1,-0.05,-0.08]];
+  for(const [x,y,z] of dotPositions){
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.028, 6, 5), dotMat);
+    dot.position.set(x,y,z);
+    pod.add(dot);
+  }
+  // short stem, held between the fingers
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.035, 0.22, 6),
+    toonMat({ color:0x4a8a2e, rim:0.4, rimColor:0xc8ffb0 }));
+  stem.position.y = 0.26;
+  addOutline(stem, 0.1);
+  group.add(stem);
+  return { group, pod, stem };
+}
+
 // builds one full sword: { group (add under the hand), blade (mesh to tint per-weapon) }
 export function buildSwordVariant(rarity){
   const group = new THREE.Group();
